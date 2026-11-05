@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -32,25 +32,25 @@
 #include "tscore/ink_assert.h"
 #include "tscore/ink_defs.h"
 
-#if defined(freebsd)
+#if defined(__FreeBSD__)
 #include <sys/types.h>
 #include <sys/param.h>
-#ifdef HAVE_SYS_SYSCTL_H
 #include <sys/sysctl.h>
-#endif
-#endif
+#endif // __FreeBSD__
 #include <cstring>
 #include <sys/time.h>
+
+int gSystemClock = 0; // 0 == CLOCK_REALTIME, the default
 
 char *
 int64_to_str(char *buf, unsigned int buf_size, int64_t val, unsigned int *total_chars, unsigned int req_width, char pad_char)
 {
   const unsigned int local_buf_size = 32;
-  char local_buf[local_buf_size];
-  bool using_local_buffer = false;
-  bool negative           = false;
-  char *out_buf           = buf;
-  char *working_buf;
+  char               local_buf[local_buf_size];
+  bool               using_local_buffer = false;
+  bool               negative           = false;
+  char              *out_buf            = buf;
+  char              *working_buf;
 
   if (buf_size < 22) {
     // int64_t may not fit in provided buffer, use the local one
@@ -73,8 +73,8 @@ int64_to_str(char *buf, unsigned int buf_size, int64_t val, unsigned int *total_
     ++num_chars;
   } else {
     do {
-      *working_buf-- = static_cast<char>(val % 10) + '0';
-      val /= 10;
+      *working_buf--  = static_cast<char>(val % 10) + '0';
+      val            /= 10;
       ++num_chars;
     } while (val);
   }
@@ -151,19 +151,19 @@ int64_to_str(char *buf, unsigned int buf_size, int64_t val, unsigned int *total_
 int
 squid_timestamp_to_buf(char *buf, unsigned int buf_size, long timestamp_sec, long timestamp_usec)
 {
-  int res;
+  int                res;
   const unsigned int tmp_buf_size = 32;
-  char tmp_buf[tmp_buf_size];
+  char               tmp_buf[tmp_buf_size];
 
   unsigned int num_chars_s;
-  char *ts_s = int64_to_str(tmp_buf, tmp_buf_size - 4, timestamp_sec, &num_chars_s, 0, '0');
+  char        *ts_s = int64_to_str(tmp_buf, tmp_buf_size - 4, timestamp_sec, &num_chars_s, 0, '0');
   ink_assert(ts_s);
 
   // convert milliseconds
   //
   tmp_buf[tmp_buf_size - 5] = '.';
-  int ms                    = timestamp_usec / 1000;
-  unsigned int num_chars_ms;
+  int              ms       = timestamp_usec / 1000;
+  unsigned int     num_chars_ms;
   char ATS_UNUSED *ts_ms = int64_to_str(&tmp_buf[tmp_buf_size - 4], 4, ms, &num_chars_ms, 4, '0');
   ink_assert(ts_ms && num_chars_ms == 4);
 
@@ -178,58 +178,3 @@ squid_timestamp_to_buf(char *buf, unsigned int buf_size, long timestamp_sec, lon
 
   return res;
 }
-
-#ifdef USE_TIME_STAMP_COUNTER_HRTIME
-uint32_t
-init_hrtime_TCS()
-{
-  int freqlen = sizeof(hrtime_freq);
-  if (sysctlbyname("machdep.tsc_freq", &hrtime_freq, (size_t *)&freqlen, nullptr, 0) < 0) {
-    perror("sysctl: machdep.tsc_freq");
-    exit(1);
-  }
-  hrtime_freq_float = (double)1000000000 / (double)hrtime_freq;
-  return hrtime_freq;
-}
-
-double hrtime_freq_float = 0.5; // 500 Mhz
-uint32_t hrtime_freq     = init_hrtime_TCS();
-#endif
-
-#ifdef NEED_HRTIME_BASIS
-timespec timespec_basis;
-ink_hrtime hrtime_offset;
-ink_hrtime hrtime_basis = init_hrtime_basis();
-
-ink_hrtime
-init_hrtime_basis()
-{
-  ink_hrtime t1, t2, b, now;
-  timespec ts;
-#ifdef USE_TIME_STAMP_COUNTER_HRTIME
-  init_hrtime_TCS();
-#endif
-  do {
-    t1 = ink_get_hrtime_internal();
-#if HAVE_CLOCK_GETTIME
-    ink_assert(!clock_gettime(CLOCK_REALTIME, &timespec_basis));
-#else
-    {
-      struct timeval tnow;
-      ink_assert(!gettimeofday(&tnow, nullptr));
-      timespec_basis.tv_sec  = tnow.tv_sec;
-      timespec_basis.tv_nsec = tnow.tv_usec * 1000;
-    }
-#endif
-    t2 = ink_get_hrtime_internal();
-    // accuracy must be at least 100 microseconds
-  } while (t2 - t1 > HRTIME_USECONDS(100));
-  b   = (t2 + t1) / 2;
-  now = ink_hrtime_from_timespec(&timespec_basis);
-  ts  = ink_hrtime_to_timespec(now);
-  ink_assert(ts.tv_sec == timespec_basis.tv_sec && ts.tv_nsec == timespec_basis.tv_nsec);
-  hrtime_offset = now - b;
-  hrtime_basis  = b;
-  return b;
-}
-#endif

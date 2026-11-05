@@ -15,6 +15,8 @@
    specific language governing permissions and limitations
    under the License.
 
+.. include:: ../../common.defs
+
 .. _admin-cache-storage:
 
 Cache Storage
@@ -73,18 +75,22 @@ and reduces load on disks, especially during temporary traffic peaks.
 You can configure the RAM cache size to suit your needs, as described in
 :ref:`changing-the-size-of-the-ram-cache` below.
 
-The RAM cache supports two cache eviction algorithms, a regular *LRU*
-(Least Recently Used) and the more advanced *CLFUS* (Clocked Least
+The RAM cache supports three cache eviction algorithms: a regular *LRU*
+(Least Recently Used); the more advanced *CLFUS* (Clocked Least
 Frequently Used by Size; which balances recentness, frequency, and size
-to maximize hit rate, similar to a most frequently used algorithm).
-The default is to use *LRU*, and this is controlled via
+to maximize hit rate, similar to a most frequently used algorithm); and
+*S3-FIFO* (Simple Scalable Static FIFO), a FIFO-based policy whose small
+admission queue and ghost list filter one-hit-wonders, giving strong hit
+rates on CDN and key-value workloads at low cost. The default is to use
+*LRU*, and this is controlled via
 :ts:cv:`proxy.config.cache.ram_cache.algorithm`.
 
 Both the *LRU* and *CLFUS* RAM caches support a configuration to increase
 scan resistance. In a typical *LRU*, if you request all possible objects in
 sequence, you will effectively churn the cache on every request. The option
 :ts:cv:`proxy.config.cache.ram_cache.use_seen_filter` can be set to add some
-resistance against this problem.
+resistance against this problem. *S3-FIFO* is scan-resistant by design,
+through its admission queue, and does not use the seen filter.
 
 In addition, *CLFUS* also supports compressing in the RAM cache itself.
 This can be useful for content which is not compressed by itself (e.g.
@@ -92,18 +98,8 @@ images). This should not be confused with ``Content-Encoding: gzip``, this
 feature is only present to save space internally in the RAM cache itself. As
 such, it is completely transparent to the User-Agent. The RAM cache
 compression is enabled with the option
-:ts:cv:`proxy.config.cache.ram_cache.compress`.
-
-Possible values are:
-
-======= =============================
-Value   Meaning
-======= =============================
-0       No compression (*default*)
-1       *fastlz* compression
-2       *libz* compression
-3       *liblzma* compression
-======= =============================
+:ts:cv:`proxy.config.cache.ram_cache.compress`, which documents the available
+codecs and which of them a given build supports.
 
 .. _changing-the-size-of-the-ram-cache:
 
@@ -130,7 +126,7 @@ To change the RAM cache size:
 
 #. Set the variable :ts:cv:`proxy.config.cache.ram_cache.size`
    to specify the size of the RAM cache. The default value of ``-1`` means
-   that the RAM cache is automatically sized at approximately 1MB per
+   that the RAM cache is automatically sized at approximately 10MB per
    gigabyte of disk.
 
 #. Restart Traffic Server. If you increase the RAM cache to a size of
@@ -141,8 +137,8 @@ Disabling the RAM Cache
 -----------------------
 
 It is possible to disable the RAM cache. If you have configured your
-storage using the :file:`volume.config` you can add an optional directive
-of ``ramcache=false`` to whichever volumes you wish to have it disabled on.
+storage using the :file:`storage.yaml` you can add an optional directive
+of ``ram_cache: false`` to whichever volumes you wish to have it disabled on.
 This may be desirable for volumes composed of storage like RAM disks where
 you may want to avoid double RAM caching.
 
@@ -164,7 +160,7 @@ existing disks, or to add new disks to a Traffic Server node:
 
 #. Add hardware, if necessary.
 
-#. Edit :file:`storage.config` to increase the amount of disk space allocated
+#. Edit :file:`storage.yaml` to increase the amount of disk space allocated
    to the cache on existing disks or describe the new hardware you are adding.
 
 #. Restart Traffic Server.
@@ -179,12 +175,12 @@ existing disk, or to remove disks from a Traffic Server node:
 
 #. Remove hardware, if necessary.
 
-#. Edit :file:`storage.config` to reduce the amount of disk space allocated
+#. Edit :file:`storage.yaml` to reduce the amount of disk space allocated
    to the cache on existing disks or delete the reference to the hardware you're removing.
 
 #. Restart Traffic Server.
 
-.. important:: In :file:`storage.config`, a formatted or raw disk must be at least 128 MB.
+.. important:: In :file:`storage.yaml`, a formatted or raw disk must be at least 128 MB.
 
 .. _partitioning-the-cache:
 
@@ -298,7 +294,7 @@ from any other IP, we connect to the daemon via localhost: ::
       > Host: example.com
       > Accept: */*
       >
-      < HTTP/1.1 200 Ok
+      < HTTP/1.1 200 OK
       < Date: Thu, 08 Jan 2010 20:32:07 GMT
       < Connection: keep-alive
 
@@ -306,11 +302,47 @@ The next time Traffic Server receives a request for the removed object,
 it will contact the origin server to retrieve a new copy, which will replace
 the previously cached version in Traffic Server.
 
+If the removed object was stored as a partial response, that is if it carried a
+``Content-Range``, then the ``200 OK`` also reports that range back in a
+``X-Purged-Content-Range`` header::
+
+      < HTTP/1.1 200 OK
+      < X-Purged-Content-Range: bytes 0-1048575/9437184
+
+This lets a caller that holds one piece of a larger resource learn the whole
+resource's extent without a second lookup. It is what allows the
+:ref:`admin-plugins-slice` plugin to purge an object block by block and know which
+block is the last one. The range is reported under its own header name rather than
+as ``Content-Range``, because ``Content-Range`` on a ``200`` response has no
+meaning under :rfc:`9110` and is read by other components as a sign that a stored
+partial response is being served.
+
 This procedure only removes the index to the object from a specific Traffic Server
 cache. While the object remains on disk, Traffic Server will no longer able to find
 the object. The next request for that object will result in a fresh copy of the
 object fetched. Users may still see the old (removed) content if it was cached by
 intermediary caches or by the end-users' web browser.
+
+Conditional Cache Invalidation on DELETE Requests
+=================================================
+
+In compliance with :rfc:`9111` Section 4.4 "Invalidating Stored Responses", |TS|
+automatically invalidates cached responses when it receives a **successful**
+(non-error, i.e., 2xx or 3xx status code) response to a ``DELETE`` request for the same URL.
+This behavior ensures cache consistency when resources are deleted at the origin server.
+
+This means:
+
+- If a ``DELETE`` request to the origin server returns a success response
+  (e.g., ``200 OK``, ``204 No Content``), the cached object for that URL is invalidated.
+- If the ``DELETE`` request returns an error response (e.g., ``404 Not Found``,
+  ``405 Method Not Allowed``), the cached object remains unchanged.
+
+.. note::
+
+    This automatic invalidation differs from the ``PURGE`` method, which is a |TS| specific
+    mechanism for explicit cache removal. The ``DELETE`` method invalidation follows standard
+    HTTP semantics and requires the request to be forwarded to the origin server.
 
 Pushing an Object into the Cache
 ================================
@@ -338,74 +370,6 @@ To push an object, first save the object headers and body into a file. For insta
 Then, to push the object, post the object using the PUSH method: ::
 
       $ curl -s -o /dev/null -X PUSH --data-binary @/path/to/file "http://example.com/push_me.html"
-
-.. _inspecting-the-cache:
-
-Inspecting the Cache
-====================
-
-Traffic Server provides a Cache Inspector utility that enables you to
-view, delete, and invalidate URLs in the cache (HTTP only). The Cache
-Inspector utility is a powerful tool that's capable of deleting all
-the objects in your cache. Therefore, make sure that only authorized
-administrators are allowed to access this utility through proper use
-of the ``@src_ip`` option in :file:`remap.config` and the instructions
-detailed in :ref:`admin-controlling-access`.
-
-Accessing the Cache Inspector Utility
--------------------------------------
-
-To access the Cache Inspector utility:
-
-#. Set :ts:cv:`proxy.config.http_ui_enabled` to ``1``.
-#. To access the cache inspector in reverse proxy mode, you must add a
-   remap rule to :file:`remap.config` to expose the URL. This should be
-   restricted to a limited set of hosts using the ``@src_ip`` option.
-   To restrict access to the network 172.28.56.0/24, use ::
-
-      map http://yourhost.com/myCI/ http://{cache} @action=allow @src_ip=172.28.56.1-172.28.56.254
-
-#. Reload the Traffic Server configuration by running :option:`traffic_ctl config reload`.
-#. Open your web browser and go to the following URL::
-
-      http://yourhost/myCI/
-
-   You will now be presented with the Cache Inspector interface.
-
-Using the Cache Inspector Utility
----------------------------------
-
-The Cache Inspector Utility provides several options that enable you to view and
-delete the contents of your cache.
-
-Lookup URL
-    Search for a particular URL in the cache. When Traffic Server finds the URL
-    in the cache, it will display details of the object that corresponds to the
-    URL (e.g. header length and number of alternates). The option to delete the
-    URL from the cache will be presented.
-
-Delete URL
-    Delete the object from the cache which corresponds to the given URL. Success
-    or failure will be indicated after a delete has been attempted.
-
-Regex Lookup
-    Search URLs within the cache using one or more regular expressions.
-
-Regex Delete
-    Deletes all objects from the cache which match the provided regular
-    expressions.
-
-Regex Invalidate
-    Marks any objects in the cache which match the given regular expressions as
-    stale. Traffic Server will contact the relevant origin server(s) to confirm
-    the validity and freshness of the cached object, updating the cached object
-    if necessary.
-
-.. note::
-
-    Only one administrator should delete and invalidate cache entries from the
-    Cache Inspector at any point in time. Changes made by multiple
-    administrators at the same time can lead to unpredictable results.
 
 If-Modified-Since/If-None-Match
 -------------------------------

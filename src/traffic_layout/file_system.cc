@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -38,12 +38,12 @@ static std::string dst_root;
 static std::string src_root;
 static std::string copy_dir; // the current dir we are copying. e.x. sysconfdir, bindir...
 static std::string remove_path;
-CopyStyle copy_style;
+CopyStyle          copy_style;
 
 // list of all executables of traffic server
-std::set<std::string> const executables = {"traffic_crashlog", "traffic_ctl",     "traffic_layout", "traffic_logcat",
-                                           "traffic_logstats", "traffic_manager", "traffic_server", "traffic_top",
-                                           "traffic_via",      "trafficserver",   "tspush",         "tsxs"};
+std::set<std::string> const executables = {"traffic_crashlog", "traffic_ctl",    "traffic_layout", "traffic_logcat",
+                                           "traffic_logstats", "traffic_server", "traffic_top",    "traffic_via",
+                                           "trafficserver",    "tspush"};
 
 void
 append_slash(std::string &path)
@@ -96,7 +96,7 @@ create_directory(const std::string &dir)
 }
 
 static int
-remove_function(const char *path, const struct stat *s, int flag, struct FTW *f)
+remove_function(const char *path, [[maybe_unused]] const struct stat *s, int flag, [[maybe_unused]] struct FTW *f)
 {
   int (*rm_func)(const char *);
 
@@ -115,7 +115,7 @@ remove_function(const char *path, const struct stat *s, int flag, struct FTW *f)
 }
 
 static int
-remove_inside_function(const char *path, const struct stat *s, int flag, struct FTW *f)
+remove_inside_function(const char *path, [[maybe_unused]] const struct stat *s, int flag, [[maybe_unused]] struct FTW *f)
 {
   std::string path_to_remove = path;
   if (path_to_remove != remove_path) {

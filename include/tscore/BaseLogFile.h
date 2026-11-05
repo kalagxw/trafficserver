@@ -2,7 +2,7 @@
 
   Base class for log files
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -32,28 +32,28 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
-#include "ink_memory.h"
-#include "ink_string.h"
-#include "ink_file.h"
-#include "ink_cap.h"
-#include "ink_time.h"
-#include "SimpleTokenizer.h"
+#include "tscore/ink_memory.h"
+#include "tscore/ink_string.h"
+#include "tscore/ink_file.h"
+#include "tscore/ink_cap.h"
+#include "tscore/ink_time.h"
+#include "tscore/SimpleTokenizer.h"
 
 #define LOGFILE_ROLLED_EXTENSION ".old"
 #define LOGFILE_SEPARATOR_STRING "_"
-#define LOGFILE_DEFAULT_PERMS (0644)
-#define LOGFILE_ROLL_MAXPATHLEN 4096
+#define LOGFILE_DEFAULT_PERMS    (0644)
+#define LOGFILE_ROLL_MAXPATHLEN  4096
 #define BASELOGFILE_DEBUG_MODE \
   0 // change this to 1 to enable debug messages
     // TODO find a way to enable this from autotools
 
-typedef enum {
+enum LogLogPriorityLevel {
   LL_Debug = 0, // process does not die
   LL_Note,      // process does not die
   LL_Warning,   // process does not die
   LL_Error,     // process does not die
   LL_Fatal,     // causes process termination
-} LogLogPriorityLevel;
+};
 
 #define log_log_trace(...)                         \
   do {                                             \
@@ -91,18 +91,18 @@ public:
   };
 
 private:
-  char *_filename;                // the name of the meta file
-  time_t _creation_time;          // file creation time
-  uint64_t _log_object_signature; // log object signature
-  int _flags;                     // metainfo status flags
-  char _buffer[BUF_SIZE];         // read/write buffer
+  char    *_filename{nullptr};       // the name of the meta file
+  time_t   _creation_time{0};        // file creation time
+  uint64_t _log_object_signature{0}; // log object signature
+  int      _flags{0};                // metainfo status flags
+  char     _buffer[BUF_SIZE];        // read/write buffer
 
   void _read_from_file();
   void _write_to_file();
   void _build_name(const char *filename);
 
 public:
-  BaseMetaInfo(const char *filename) : _flags(0)
+  BaseMetaInfo(const char *filename)
   {
     _build_name(filename);
     _read_from_file();
@@ -166,20 +166,20 @@ class BaseLogFile
 {
 public:
   // member functions
-  BaseLogFile()        = delete;
+  BaseLogFile()                               = delete;
   BaseLogFile &operator=(const BaseLogFile &) = delete;
   BaseLogFile(const char *name);
   BaseLogFile(const char *name, uint64_t sig);
   BaseLogFile(const BaseLogFile &);
   ~BaseLogFile();
-  int roll();
-  int roll(long interval_start, long interval_end);
+  int         roll();
+  int         roll(long interval_start, long interval_end);
   static bool rolled_logfile(char *path);
   static bool exists(const char *pathname);
-  int open_file(int perm = -1);
-  int close_file();
-  void change_name(const char *new_name);
-  void display(FILE *fd = stdout);
+  int         open_file(int perm = -1);
+  int         close_file();
+  void        change_name(const char *new_name);
+  void        display(FILE *fd = stdout);
   const char *
   get_name() const
   {
@@ -219,9 +219,9 @@ public:
     LOG_FILE_COULD_NOT_OPEN_FILE,
   };
 
-  FILE *m_fp               = nullptr;
-  long m_start_time        = time(nullptr);
-  long m_end_time          = 0L;
+  FILE    *m_fp            = nullptr;
+  long     m_start_time    = time(nullptr);
+  long     m_end_time      = 0L;
   uint64_t m_bytes_written = 0;
 
 private:
@@ -229,11 +229,11 @@ private:
   int timestamp_to_str(long timestamp, char *buf, int size);
 
   // member variables
-  ats_scoped_str m_name;
-  ats_scoped_str m_hostname;
-  bool m_is_regfile         = false;
-  bool m_is_init            = false;
-  BaseMetaInfo *m_meta_info = nullptr;
-  uint64_t m_signature      = 0;
-  bool m_has_signature      = false;
+  ats_scoped_str                m_name;
+  ats_scoped_str                m_hostname;
+  bool                          m_is_regfile    = false;
+  bool                          m_is_init       = false;
+  std::unique_ptr<BaseMetaInfo> m_meta_info     = nullptr;
+  uint64_t                      m_signature     = 0;
+  bool                          m_has_signature = false;
 };

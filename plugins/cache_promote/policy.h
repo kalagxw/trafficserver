@@ -28,6 +28,10 @@ extern int TXN_ARG_IDX;
 #define MAX_STAT_LENGTH (1 << 8)
 extern const char *PLUGIN_NAME;
 
+extern DbgCtl cache_promote_dbg_ctl;
+
+#define DBG(...) Dbg(cache_promote_dbg_ctl, __VA_ARGS__)
+
 //////////////////////////////////////////////////////////////////////////////////////////////
 // Abstract base class for all policies.
 //
@@ -38,7 +42,7 @@ public:
   {
     // This doesn't have to be perfect, since this is just chance sampling.
     // coverity[dont_call]
-    TSDebug(PLUGIN_NAME, "PromotionPolicy() CTOR");
+    DBG("PromotionPolicy() CTOR");
     srand48(static_cast<long>(time(nullptr)));
   }
 
@@ -59,7 +63,7 @@ public:
   void
   decrementStat(const int stat, const int amount)
   {
-    if (_stats_enabled) {
+    if (!_stats_id.empty()) {
       TSStatIntDecrement(stat, amount);
     }
   }
@@ -67,13 +71,13 @@ public:
   void
   incrementStat(const int stat, const int amount)
   {
-    if (_stats_enabled) {
+    if (!_stats_id.empty()) {
       TSStatIntIncrement(stat, amount);
     }
   }
 
   virtual bool
-  parseOption(int opt, char *optarg)
+  parseOption(int /* opt ATS_UNUSED */, char * /* optarg ATS_UNUSED */)
   {
     return false;
   }
@@ -86,7 +90,7 @@ public:
 
   // Cleanup any internal state / memory that may be in use
   virtual void
-  cleanup(TSHttpTxn txnp)
+  cleanup(TSHttpTxn /* txnp ATS_UNUSED */)
   {
   }
 
@@ -98,7 +102,7 @@ public:
   }
 
   virtual void
-  addBytes(TSHttpTxn txnp)
+  addBytes(TSHttpTxn /* txnp ATS_UNUSED */)
   {
   }
 
@@ -115,20 +119,19 @@ public:
   }
 
   bool doSample() const;
-  int create_stat(std::string_view name, std::string_view remap_identifier);
+  int  create_stat(std::string_view name, std::string_view remap_identifier);
 
   // These are pure virtual
-  virtual bool doPromote(TSHttpTxn txnp)       = 0;
-  virtual const char *policyName() const       = 0;
-  virtual void usage() const                   = 0;
-  virtual bool stats_add(const char *remap_id) = 0;
+  virtual bool        doPromote(TSHttpTxn txnp)       = 0;
+  virtual const char *policyName() const              = 0;
+  virtual void        usage() const                   = 0;
+  virtual bool        stats_add(const char *remap_id) = 0;
 
-  // when true stats are incremented.
-  bool _stats_enabled    = false;
-  bool _internal_enabled = false;
-  int _cache_hits_id     = -1;
-  int _promoted_id       = -1;
-  int _total_requests_id = -1;
+  bool        _internal_enabled  = false;
+  int         _cache_hits_id     = -1;
+  int         _promoted_id       = -1;
+  int         _total_requests_id = -1;
+  std::string _stats_id          = "";
 
 private:
   float _sample = 0.0;

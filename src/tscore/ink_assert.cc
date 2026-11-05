@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -26,10 +26,8 @@ Assertions
 
 ***************************************************************************/
 
-#include "tscore/ink_platform.h"
 #include "tscore/ink_assert.h"
 #include "tscore/ink_error.h"
-#include "tscore/ink_string.h"
 
 void
 _ink_assert(const char *expression, const char *file, int line)

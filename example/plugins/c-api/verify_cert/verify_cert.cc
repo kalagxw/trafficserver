@@ -30,12 +30,14 @@
 #include <openssl/ssl.h>
 
 #define PLUGIN_NAME "verify_cert"
-#define PCP "[" PLUGIN_NAME "] "
+#define PCP         "[" PLUGIN_NAME "] "
 
 namespace
 {
+DbgCtl dbg_ctl{PLUGIN_NAME};
+
 static void
-debug_certificate(const char *msg, X509_NAME *name)
+debug_certificate(const char *msg, const X509_NAME *name)
 {
   BIO *bio;
 
@@ -49,10 +51,10 @@ debug_certificate(const char *msg, X509_NAME *name)
   }
 
   if (X509_NAME_print_ex(bio, name, 0 /* indent */, XN_FLAG_ONELINE) > 0) {
-    long len;
+    long  len;
     char *ptr;
     len = BIO_get_mem_data(bio, &ptr);
-    TSDebug(PLUGIN_NAME, "%s %.*s", msg, static_cast<int>(len), ptr);
+    Dbg(dbg_ctl, "%s %.*s", msg, static_cast<int>(len), ptr);
   }
 
   BIO_free(bio);
@@ -61,11 +63,15 @@ debug_certificate(const char *msg, X509_NAME *name)
 int
 CB_clientcert(TSCont /* contp */, TSEvent /* event */, void *edata)
 {
-  TSVConn ssl_vc         = reinterpret_cast<TSVConn>(edata);
+  TSVConn         ssl_vc = reinterpret_cast<TSVConn>(edata);
   TSSslConnection sslobj = TSVConnSslConnectionGet(ssl_vc);
-  SSL *ssl               = reinterpret_cast<SSL *>(sslobj);
-  X509 *cert             = SSL_get_peer_certificate(ssl);
-  TSDebug(PLUGIN_NAME, "plugin verify_cert verifying client certificate");
+  SSL            *ssl    = reinterpret_cast<SSL *>(sslobj);
+#ifdef OPENSSL_IS_AT_LEAST_OPENSSL3
+  X509 *cert = SSL_get1_peer_certificate(ssl);
+#else
+  X509 *cert = SSL_get_peer_certificate(ssl);
+#endif
+  Dbg(dbg_ctl, "plugin verify_cert verifying client certificate");
   if (cert) {
     debug_certificate("client certificate subject CN is %s", X509_get_subject_name(cert));
     debug_certificate("client certificate issuer CN is %s", X509_get_issuer_name(cert));
@@ -80,11 +86,11 @@ CB_clientcert(TSCont /* contp */, TSEvent /* event */, void *edata)
 
 // Called by ATS as our initialization point
 void
-TSPluginInit(int argc, const char *argv[])
+TSPluginInit(int /* argc ATS_UNUSED */, const char ** /* argv ATS_UNUSED */)
 {
-  bool success = false;
+  bool                     success = false;
   TSPluginRegistrationInfo info;
-  TSCont cb_cert = nullptr; // Certificate callback continuation
+  TSCont                   cb_cert = nullptr; // Certificate callback continuation
 
   info.plugin_name   = PLUGIN_NAME;
   info.vendor_name   = "Apache Software Foundation";
@@ -102,7 +108,7 @@ TSPluginInit(int argc, const char *argv[])
   if (!success) {
     TSError(PCP "not initialized");
   }
-  TSDebug(PLUGIN_NAME, "Plugin %s", success ? "online" : "offline");
+  Dbg(dbg_ctl, "Plugin %s", success ? "online" : "offline");
 
   return;
 }

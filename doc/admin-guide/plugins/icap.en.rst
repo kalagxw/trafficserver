@@ -22,6 +22,8 @@ ICAP Plugin
   under the License.
 
 
+**Note:** As of ATS v10.0.0, this plugin is deprecated and unsupported.
+
 The ICAP plugin enables passing along the response header and body to
 an external server for additional processing (generally scanning) using
 the ICAP protocol.  The scanner, depending on whether the file contains
@@ -33,11 +35,9 @@ regarding the infection.
 Installation
 ------------
 
-This plugin is only built if the configure option ::
-
-    --enable-experimental-plugins
-
-is given at build time.
+To make this plugin available, you must enable experimental plugins when
+building |TS| by passing the ``-DBUILD_EXPERIMENTAL_PLUGINS=ON`` to the ``cmake``
+command when building.
 
 To use this plugin, you need to compile the plugin and add the following line in plugin.config (assuming the compiled plugin library is called icap_plugin.so):
 

@@ -27,16 +27,17 @@
 #include <list>
 #include <vector>
 #include <netinet/in.h>
+#include <sys/un.h>
 
 #include "ts/ts.h"
-#include "lib/StringHash.h"
-#include "lib/HttpHeader.h"
+#include "StringHash.h"
+#include "HttpHeader.h"
 #include "HttpDataFetcher.h"
 
 class HttpDataFetcherImpl : public HttpDataFetcher
 {
 public:
-  HttpDataFetcherImpl(TSCont contp, sockaddr const *client_addr, const char *debug_tag);
+  HttpDataFetcherImpl(TSCont contp, sockaddr const *client_addr, char const *dbg_tag);
 
   void useHeader(const EsiLib::HttpHeader &header);
 
@@ -69,10 +70,10 @@ public:
 
   // used to return data to callers
   struct ResponseData {
-    const char *content;
-    int content_len;
-    TSMBuffer bufp;
-    TSMLoc hdr_loc;
+    const char  *content;
+    int          content_len;
+    TSMBuffer    bufp;
+    TSMLoc       hdr_loc;
     TSHttpStatus status;
     ResponseData() { set(nullptr, 0, nullptr, nullptr, TS_HTTP_STATUS_NONE); }
     inline void set(const char *c, int clen, TSMBuffer b, TSMLoc loc, TSHttpStatus s);
@@ -103,33 +104,32 @@ public:
 
 private:
   TSCont _contp;
-  char _debug_tag[64];
 
-  typedef std::list<FetchedDataProcessor *> CallbackObjectList;
+  using CallbackObjectList = std::list<FetchedDataProcessor *>;
 
   // used to track a request that was made
   struct RequestData {
-    std::string response;
-    std::string raw_response;
-    const char *body         = nullptr;
-    int body_len             = 0;
-    TSHttpStatus resp_status = TS_HTTP_STATUS_NONE;
+    std::string        response;
+    std::string        raw_response;
+    const char        *body        = nullptr;
+    int                body_len    = 0;
+    TSHttpStatus       resp_status = TS_HTTP_STATUS_NONE;
     CallbackObjectList callback_objects;
-    bool complete  = false;
-    TSMBuffer bufp = nullptr;
-    TSMLoc hdr_loc = nullptr;
+    bool               complete = false;
+    TSMBuffer          bufp     = nullptr;
+    TSMLoc             hdr_loc  = nullptr;
 
     RequestData() {}
   };
 
-  typedef __gnu_cxx::hash_map<std::string, RequestData, EsiLib::StringHasher> UrlToContentMap;
+  using UrlToContentMap = std::unordered_map<std::string, RequestData, EsiLib::StringHasher>;
   UrlToContentMap _pages;
 
-  typedef std::vector<UrlToContentMap::iterator> IteratorArray;
+  using IteratorArray = std::vector<UrlToContentMap::iterator>;
   IteratorArray _page_entry_lookup; // used to map event ids to requests
 
-  int _n_pending_requests;
-  int _curr_event_id_base;
+  int          _n_pending_requests;
+  int          _curr_event_id_base;
   TSHttpParser _http_parser;
 
   static const int FETCH_EVENT_ID_BASE;
@@ -149,6 +149,8 @@ private:
   inline void _release(RequestData &req_data);
 
   struct sockaddr_storage _client_addr;
+
+  DbgCtl _dbg_ctl;
 };
 
 inline void

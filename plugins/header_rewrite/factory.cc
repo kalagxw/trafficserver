@@ -73,10 +73,36 @@ operator_factory(const std::string &op)
     o = new OperatorSetDebug();
   } else if (op == "set-body") {
     o = new OperatorSetBody();
+  } else if (op == "set-body-from-file") {
+    o = new OperatorSetBodyFromFile();
   } else if (op == "set-http-cntl") {
     o = new OperatorSetHttpCntl();
-
+  } else if (op == "set-plugin-cntl") {
+    o = new OperatorSetPluginCntl();
+  } else if (op == "run-plugin") {
+    o = new OperatorRunPlugin();
+  } else if (op == "set-body-from") {
+    o = new OperatorSetBodyFrom();
+  } else if (op == "set-state-flag") {
+    o = new OperatorSetStateFlag();
+  } else if (op == "set-state-int8") {
+    o = new OperatorSetStateInt8();
+  } else if (op == "set-state-int16") {
+    o = new OperatorSetStateInt16();
+  } else if (op == "set-session-flag") {
+    o = new OperatorSetStateFlag(TS_USER_ARGS_SSN);
+  } else if (op == "set-session-int8") {
+    o = new OperatorSetStateInt8(TS_USER_ARGS_SSN);
+  } else if (op == "set-session-int16") {
+    o = new OperatorSetStateInt16(TS_USER_ARGS_SSN);
+  } else if (op == "set-effective-address") {
+    o = new OperatorSetEffectiveAddress();
+  } else if (op == "set-next-hop-strategy") {
+    o = new OperatorSetNextHopStrategy();
+  } else if (op == "set-cc-alg") {
+    o = new OperatorSetCCAlgorithm();
   } else {
+    // Note that we don't support the OperatorIf() pseudo-operator here!
     TSError("[%s] Unknown operator: %s", PLUGIN_NAME, op.c_str());
     return nullptr;
   }
@@ -87,8 +113,8 @@ operator_factory(const std::string &op)
 Condition *
 condition_factory(const std::string &cond)
 {
-  Condition *c = nullptr;
-  std::string c_name, c_qual;
+  Condition             *c = nullptr;
+  std::string            c_name, c_qual;
   std::string::size_type pos = cond.find_first_of(':');
 
   if (pos != std::string::npos) {
@@ -114,9 +140,13 @@ condition_factory(const std::string &cond)
   } else if (c_name == "HEADER") { // This condition adapts to the hook
     c = new ConditionHeader();
   } else if (c_name == "CLIENT-HEADER") {
-    c = new ConditionHeader(true);
+    c = new ConditionHeader(ConditionHeader::CLIENT);
+  } else if (c_name == "SERVER-HEADER") {
+    c = new ConditionHeader(ConditionHeader::SERVER);
   } else if (c_name == "CLIENT-URL") { // This condition adapts to the hook
     c = new ConditionUrl(ConditionUrl::CLIENT);
+  } else if (c_name == "SERVER-URL") {
+    c = new ConditionUrl(ConditionUrl::SERVER);
   } else if (c_name == "URL") {
     c = new ConditionUrl(ConditionUrl::URL);
   } else if (c_name == "FROM-URL") {
@@ -157,6 +187,26 @@ condition_factory(const std::string &cond)
     c = new ConditionTcpInfo();
   } else if (c_name == "CACHE") {
     c = new ConditionCache();
+  } else if (c_name == "NEXT-HOP") { // This condition adapts to the hook
+    c = new ConditionNextHop();
+  } else if (c_name == "HTTP-CNTL") {
+    c = new ConditionHttpCntl();
+  } else if (c_name == "GROUP") {
+    c = new ConditionGroup();
+  } else if (c_name == "STATE-FLAG") {
+    c = new ConditionStateFlag();
+  } else if (c_name == "STATE-INT8") {
+    c = new ConditionStateInt8();
+  } else if (c_name == "STATE-INT16") {
+    c = new ConditionStateInt16();
+  } else if (c_name == "SESSION-FLAG") {
+    c = new ConditionStateFlag(TS_USER_ARGS_SSN);
+  } else if (c_name == "SESSION-INT8") {
+    c = new ConditionStateInt8(TS_USER_ARGS_SSN);
+  } else if (c_name == "SESSION-INT16") {
+    c = new ConditionStateInt16(TS_USER_ARGS_SSN);
+  } else if (c_name == "LAST-CAPTURE") {
+    c = new ConditionLastCapture();
   } else {
     TSError("[%s] Unknown condition %s", PLUGIN_NAME, c_name.c_str());
     return nullptr;

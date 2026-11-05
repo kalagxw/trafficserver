@@ -16,6 +16,7 @@
    under the License.
 
 .. include:: ../../../common.defs
+.. default-domain:: cpp
 
 .. _developer-plugins-hooks-http-transactions:
 
@@ -29,7 +30,7 @@ transactions.
 As described in :ref:`HTTP sessions
 <developer-plugins-hooks-http-sessions>`, an **HTTP transaction** is an
 object defined for the lifetime of a single request from a client and
-the corresponding response from Traffic Server. The :c:type:`TSHttpTxn`
+the corresponding response from Traffic Server. The :cpp:type:`TSHttpTxn`
 structure is the main handle given to a plugin for manipulating a
 transaction's internal state. Additionally, an HTTP transaction has a
 reference back to the HTTP session that created it.
@@ -49,21 +50,23 @@ transaction and associate data to the transaction.
 
     #include <ts/ts.h>
 
-    #define DBG_TAG "txn"
+    namespace
+    {
+    DbgCtl dbg_ctl{"txn"};
+    }
 
     /* Structure to be associated to txns */
-    typedef struct {
+    struct TxnData {
        int i;
        float f;
-       char *s;
-    } TxnData;
+       char const *s;
+    };
 
     /* Allocate memory and init a TxnData structure */
     TxnData *
     txn_data_alloc()
     {
-       TxnData *data;
-       data = TSmalloc(sizeof(TxnData));
+       auto data{new TxnData};
 
        data->i = 1;
        data->f = 0.5;
@@ -71,19 +74,12 @@ transaction and associate data to the transaction.
        return data;
     }
 
-    /* Free up a TxnData structure */
-    void
-    txn_data_free(TxnData *data)
-    {
-       TSfree(data);
-    }
-
     /* Handler for event READ_REQUEST and TXN_CLOSE */
     static int
     local_hook_handler (TSCont contp, TSEvent event, void *edata)
     {
        TSHttpTxn txnp = (TSHttpTxn) edata;
-       TxnData *txn_data = TSContDataGet(contp);
+       auto txn_data = static_cast<TxnData *>(TSContDataGet(contp));
        switch (event) {
        case TS_EVENT_HTTP_READ_REQUEST_HDR:
           /* Modify values of txn data */
@@ -94,10 +90,10 @@ transaction and associate data to the transaction.
 
        case TS_EVENT_HTTP_TXN_CLOSE:
           /* Print txn data values */
-          TSDebug(DBG_TAG, "Txn data i=%d f=%f s=%s", txn_data->i, txn_data->f, txn_data->s);
+          Dbg(dbg_ctl, "Txn data i=%d f=%f s=%s", txn_data->i, txn_data->f, txn_data->s);
 
           /* Then destroy the txn cont and its data */
-          txn_data_free(txn_data);
+          delete txn_data;
           TSContDestroy(contp);
           break;
 
@@ -114,7 +110,7 @@ transaction and associate data to the transaction.
     static int
     global_hook_handler (TSCont contp, TSEvent event, void *edata)
     {
-       TSHttpTxn txnp = (TSHttpTxn) edata;
+       auto txnp = static_cast<TSHttpTxn>(edata);
        TSCont txn_contp;
        TxnData *txn_data;
 
@@ -143,11 +139,9 @@ transaction and associate data to the transaction.
     void
     TSPluginInit (int argc, const char *argv[])
     {
-       TSCont contp;
-
        /* Note that we do not need a mutex for this txn since it registers globally
           and doesn't have any data associated with it */
-       contp = TSContCreate(global_hook_handler, NULL);
+       TSCont contp = TSContCreate(global_hook_handler, nullptr);
 
        /* Register globally */
        TSHttpHookAdd(TS_HTTP_TXN_START_HOOK, contp);
@@ -160,48 +154,48 @@ illustration of the steps involved in a typical HTTP transaction.
 
 The HTTP transaction functions are:
 
--  :c:func:`TSHttpTxnCacheLookupStatusGet`
+-  :func:`TSHttpTxnCacheLookupStatusGet`
 
--  :c:func:`TSHttpTxnCachedReqGet`
+-  :func:`TSHttpTxnCachedReqGet`
    - Note that it is an error to modify cached headers.
 
--  :c:func:`TSHttpTxnCachedRespGet`
+-  :func:`TSHttpTxnCachedRespGet`
    - Note that it is an error to modify cached headers.
 
--  :c:func:`TSHttpTxnClientReqGet`
+-  :func:`TSHttpTxnClientReqGet`
    - Plugins that read client request headers use this call to retrieve the
-   HTTP header for any given :c:type:`TSHttpTxn`.
+   HTTP header for any given :cpp:type:`TSHttpTxn`.
 
--  :c:func:`TSHttpTxnPostBufferReaderGet`
+-  :func:`TSHttpTxnPostBufferReaderGet`
    - Plugins that read client request bodies use this call to retrieve the
-   HTTP body for any given :c:type:`TSHttpTxn`.
+   HTTP body for any given :cpp:type:`TSHttpTxn`.
 
--  :c:func:`TSHttpTxnClientRespGet`
+-  :func:`TSHttpTxnClientRespGet`
 
--  :c:func:`TSHttpTxnErrorBodySet`
+-  :func:`TSHttpTxnErrorBodySet`
 
--  :c:func:`TSHttpTxnHookAdd`
+-  :func:`TSHttpTxnHookAdd`
 
--  :c:func:`TSHttpTxnNextHopAddrGet`
+-  :func:`TSHttpTxnNextHopAddrGet`
 
--  :c:func:`TSHttpTxnParentProxySet`
+-  :func:`TSHttpTxnParentProxySet`
 
--  :c:func:`TSHttpTxnReenable`
+-  :func:`TSHttpTxnReenable`
 
--  :c:func:`TSHttpTxnServerAddrGet`
+-  :func:`TSHttpTxnServerAddrGet`
 
--  :c:func:`TSHttpTxnServerAddrSet`
+-  :func:`TSHttpTxnServerAddrSet`
 
--  :c:func:`TSHttpTxnServerReqGet`
+-  :func:`TSHttpTxnServerReqGet`
 
--  :c:func:`TSHttpTxnServerRespGet`
+-  :func:`TSHttpTxnServerRespGet`
 
--  :c:func:`TSHttpTxnSsnGet`
+-  :func:`TSHttpTxnSsnGet`
 
--  :c:func:`TSHttpTxnTransformedRespCache`
+-  :func:`TSHttpTxnTransformedRespCache`
 
--  :c:func:`TSHttpTxnTransformRespGet`
+-  :func:`TSHttpTxnTransformRespGet`
 
--  :c:func:`TSHttpTxnUntransformedRespCache`
+-  :func:`TSHttpTxnUntransformedRespCache`
 
 

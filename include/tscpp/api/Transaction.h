@@ -19,6 +19,8 @@
  * @file Transaction.h
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include <sys/socket.h>
@@ -203,9 +205,9 @@ public:
   /**
    * Sets the server address on the Transaction to a populated sockaddr *
    *
-   * @param sockaddr* the sockaddr structure populated as the server address.
+   * @param[in] sockaddress the sockaddr structure populated as the server address.
    */
-  bool setServerAddress(const sockaddr *);
+  bool setServerAddress(const sockaddr *sockaddress);
 
   /**
    * Returns a boolean value if the request is an internal request.
@@ -269,7 +271,7 @@ public:
    * Sets the url used by the ATS cache for a specific transaction.
    * @param url is the url to use in the cache.
    */
-  bool setCacheUrl(const std::string &);
+  bool setCacheUrl(const std::string &url);
 
   /**
    * Ability to skip the remap phase of the State Machine
@@ -322,9 +324,9 @@ public:
    * Adds a TransactionPlugin to the current Transaction. This effectively transfers ownership and the
    * Transaction is now responsible for cleaning it up.
    *
-   * @param TransactionPlugin* the TransactionPlugin that will be now bound to the current Transaction.
+   * @param[in] plugin the TransactionPlugin that will be now bound to the current Transaction.
    */
-  void addPlugin(TransactionPlugin *);
+  void addPlugin(TransactionPlugin *plugin);
 
   /*
    * Note: The following methods cannot be attached to a Response
@@ -373,9 +375,9 @@ public:
   bool configFind(std::string const &name, TSOverridableConfigKey *conf, TSRecordDataType *type);
 
 private:
-  TransactionState *state_;          //!< The internal TransactionState object tied to the current Transaction
-  friend class TransactionPlugin;    //!< TransactionPlugin is a friend so it can call addPlugin()
-  friend class TransformationPlugin; //!< TransformationPlugin is a friend so it can call addPlugin()
+  std::unique_ptr<TransactionState> state_; //!< The internal TransactionState object tied to the current Transaction
+  friend class TransactionPlugin;           //!< TransactionPlugin is a friend so it can call addPlugin()
+  friend class TransformationPlugin;        //!< TransformationPlugin is a friend so it can call addPlugin()
 
   /**
    * @private

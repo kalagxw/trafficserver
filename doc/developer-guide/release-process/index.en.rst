@@ -46,10 +46,6 @@ to the community for validation before the actual release.
 Document
 ========
 
-Gather up information about the changes for the release. The ``CHANGES`` file
-is a good starting point. You may also want to check the commits since the last
-release. The primary purpose of this is to generate a list of the important
-changes since the last release.
 
 Create or update a page on the Wiki for the release. If it is a major or minor
 release it should have its own page. Use the previous release page as a
@@ -66,19 +62,37 @@ Build
 
 #. Go to the top level source directory.
 
-#. Check the version in ``configure.ac``. There are two values near the top that
-   need to be set, ``TS_VERSION_S`` and ``TS_VERSION_N``. These are the release
-   version number in different encodings.
+#. Check the version in ``CMakeLists.txt``. There is a ``project`` line near the
+   top with the version number.  Make sure that is correct for the release.
 
-#. Check the variable ``RC`` in the top level ``Makefile.am``. This should be
-   the point release value. This needs to be changed for every release
-   candidate. The first release candidate is ``0`` (zero).
+#. Generate or update the CHANGELOG for the next release. This needs
+   `uv <https://docs.astral.sh/uv/>`__, and ``--use-gh`` additionally needs the
+   `GitHub CLI <https://cli.github.com/>`__ already authenticated with
+   ``gh auth login``.  ::
 
-#. Execute the following commands to make the distribution files. ::
+      uv run --project tools/changelog python tools/changelog/changelog.py \
+        -o apache -r trafficserver -m X.Y.Z --use-gh > CHANGELOG-X.Y.Z
 
-      autoreconf -i
-      ./configure
-      make rel-candidate
+   Without the GitHub CLI, omit ``--use-gh`` and supply a token through the
+   ``GH_TOKEN`` environment variable instead. A token is not optional here: an
+   unauthenticated run exceeds the GitHub API rate limit partway through a
+   release-sized milestone and exits without writing a changelog.  ::
+
+      GH_TOKEN=<token> uv run --project tools/changelog \
+        python tools/changelog/changelog.py \
+        -o apache -r trafficserver -m X.Y.Z > CHANGELOG-X.Y.Z
+
+#. Commit this file to the repository and push it to the release branch.
+
+#. Execute the following commands to make the distribution files where A is the
+   next release candidate number (start with 0). ::
+
+      RC=A cmake --preset release
+      cmake --build build-release -t rel-candidate
+
+#. Push the release tag to the repository. ::
+
+      git push <upstream repo> tag X.Y.Z-rcA
 
 These steps will create the distribution files and sign them using your key.
 Expect to be prompted twice for your passphrase unless you use an ssh key agent.
@@ -86,20 +100,28 @@ If you have multiple keys you will need to set the default appropriately
 beforehand, as no option will be provided to select the signing key. The files
 should have names that start with ``trafficserver-X.Y.Z-rcA.tar.bz2`` where
 ``X.Y.Z`` is the version and ``A`` is the release candidate counter. There
-should be four such files, one with no extension and three others with the
-extensions ``asc``, ``md5``, and ``sha1``. This will also create a signed git
+should be three such files, one with no extension and two others with the
+extensions ``asc``,  and ``sha512``. This will also create a signed git
 tag of the form ``X.Y.Z-rcA``.
 
 Distribute
 ==========
 
-The release candidate files should be uploaded to some public storage. Your
-personal storage on *people.apache.org* is a reasonable location to use.
+The release candidate files should be uploaded to apache dists. ::
+
+   svn co https://dist.apache.org/repos/dist/dev/trafficserver <local-directory>
+
+Create a directory for the next release version if necessary and then add and
+commit the release files produced above.
 
 Send the release candidate announcement to the *users* and *dev* mailing
 lists, noting that it is a release *candidate* and providing a link to the
 distribution files you uploaded. This announcement should also call for a vote
 on the candidate, generally with a 72 hours time limit.
+
+The distribution files for the release candidate will be available at::
+
+   https://dist.apache.org/repos/dist/dev/trafficserver/
 
 If the voting was successful (at least three "+1" votes and no "-1" votes),
 proceed to :ref:`release-management-official-release`. Otherwise, repeat the
@@ -112,49 +134,44 @@ Official Release
 
 Build the distribution files with the command ::
 
-   make release
+   cmake --build build-release -t release
 
 Be sure to not have changed anything since the release candidate was built so
 the checksums are identical. This will create a signed git tag of the form
-``X.Y.Z`` and produce the distribution files. Push the tag to the ASF repository
-with the command ::
-
-   git push origin X.Y.Z
-
-This presumes ``origin`` is the name for the ASF remote repository which is
-correct if you originally clone from the ASF repository.
+``X.Y.Z`` and produce the distribution files.
 
 The distribution files must be added to an SVN repository. This can be accessed
 with the command::
 
    svn co https://dist.apache.org/repos/dist/release/trafficserver <local-directory>
 
-All four of the distribution files go here. If you are making a point release
+All three (.tar.bz2, .asc and .sha512) of the distribution files go here. If you are making a point release
 then you should also remove the distribution files for the previous release.
 Allow 24 hours for the files to be distributed through the ASF infrastructure.
 
-The Traffic Server website must be updated. This is an SVN repository which you
-can access with ::
+The distribution files for the release will be available at::
 
-   svn co https://svn.apache.org/repos/asf/trafficserver/site/trunk <local-directory>
+   https://dist.apache.org/repos/dist/release/trafficserver/
 
-The files of interest are in the ``content`` directory.
+The Traffic Server website must be updated. There is a git repository which you
+can access at ::
+
+   https://github.com/apache/trafficserver-site
+
+The files of interest are in the ``source/markdown`` directory.
 
 ``index.html``
    This is the front page. The places to edit here are any security
    announcements at the top and the "News" section.
 
-``downloads.en.mdtext``
-   Update the downloads page to point to the new download objects.
+``downloads.mdtext``
+   Update the downloads page to adjust the links, version numbers and dates.
 
-After making changes, commit them and then run ::
+Commiting to the `asf-site` branch will deploy to the trafficserver website
+here::
 
-   publish.pl trafficserver <apache-id>
+   https://trafficserver.apache.org/
 
-On the ``people.apache.org`` host.
-
-If needed, update the Wiki page for the release to point at the release
-distribution files.
 
 Update the announcement, if needed, to refer to the release distribution files
 and remove the comments concerning the release candidate. This announcement
@@ -162,13 +179,9 @@ should be sent to the *users* and *dev* mailing lists. It should also be sent
 to the ASF announcement list, which must be done using an ``apache.org`` email
 address.
 
-Finally, update various files after the release:
+Prepare for the next minor release
+==================================
 
-* The ``STATUS`` file for master and for the release branch to include this version.
-
-* The ``CHANGES`` file to have a header for the next version.
-
-* ``configure.ac`` to be set to the next version.
-
-* In the top level ``Makefile.am`` change ``RC`` to have the value ``0``.
-
+Update the version in ``CMakeLists.txt`` by incrementing the minor version
+number.  This should be the first commit of the point release after the release
+tag.

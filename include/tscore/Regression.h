@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -23,9 +23,8 @@
 
 #pragma once
 
-#include "tscore/ink_platform.h"
-#include "tscore/Regex.h"
-#include "tscore/Diags.h"
+#include "tsutil/Regex.h"
+#include "tsutil/SourceLocation.h"
 
 //   Each module should provide one or more regression tests
 //
@@ -44,15 +43,15 @@
 //   }
 
 // status values
-#define REGRESSION_TEST_PASSED 1
+#define REGRESSION_TEST_PASSED     1
 #define REGRESSION_TEST_INPROGRESS 0 // initial value
-#define REGRESSION_TEST_FAILED -1
-#define REGRESSION_TEST_NOT_RUN -2
+#define REGRESSION_TEST_FAILED     -1
+#define REGRESSION_TEST_NOT_RUN    -2
 
 // regression types
-#define REGRESSION_TEST_NONE 0
-#define REGRESSION_TEST_QUICK 1
-#define REGRESSION_TEST_NIGHTLY 2
+#define REGRESSION_TEST_NONE     0
+#define REGRESSION_TEST_QUICK    1
+#define REGRESSION_TEST_NIGHTLY  2
 #define REGRESSION_TEST_EXTENDED 3
 
 // regression options
@@ -62,44 +61,44 @@
 
 struct RegressionTest;
 
-typedef void TestFunction(RegressionTest *t, int type, int *status);
+using TestFunction = void(RegressionTest *, int, int *);
 
 struct RegressionTest {
-  const char *name;
+  const char          *name;
   const SourceLocation location;
-  TestFunction *function;
-  RegressionTest *next;
-  int status;
-  bool printed;
-  int opt;
+  TestFunction        *function;
+  RegressionTest      *next;
+  int                  status;
+  bool                 printed;
+  int                  opt;
 
   RegressionTest(const char *name_arg, const SourceLocation &loc, TestFunction *function_arg, int aopt);
 
-  static int final_status;
-  static int ran_tests;
-  static DFA dfa;
+  static int             final_status;
+  static int             ran_tests;
+  static Regex           regex;
   static RegressionTest *current;
-  static int run(const char *name, int regression_level);
-  static void list();
-  static int run_some(int regression_level);
-  static int check_status(int regression_level);
+  static int             run(const char *name, int regression_level);
+  static void            list();
+  static int             run_some(int regression_level);
+  static int             check_status(int regression_level);
 
   static int main(int argc, const char **argv, int level);
 };
 
 #define REGRESSION_TEST(_f)                                                                                        \
-  void RegressionTest_##_f(RegressionTest *t, int atype, int *pstatus);                                            \
+  void           RegressionTest_##_f(RegressionTest *t, int atype, int *pstatus);                                  \
   RegressionTest regressionTest_##_f(#_f, RegressionMakeLocation("RegressionTest_" #_f), &RegressionTest_##_f, 0); \
-  void RegressionTest_##_f
+  void           RegressionTest_##_f
 
 #define EXCLUSIVE_REGRESSION_TEST(_f)                                                                          \
-  void RegressionTest_##_f(RegressionTest *t, int atype, int *pstatus);                                        \
+  void           RegressionTest_##_f(RegressionTest *t, int atype, int *pstatus);                              \
   RegressionTest regressionTest_##_f(#_f, RegressionMakeLocation("RegressionTest_" #_f), &RegressionTest_##_f, \
                                      REGRESSION_OPT_EXCLUSIVE);                                                \
-  void RegressionTest_##_f
+  void           RegressionTest_##_f
 
-int rprintf(RegressionTest *t, const char *format, ...);
-int rperf(RegressionTest *t, const char *tag, double val);
+int         rprintf(RegressionTest *t, const char *format, ...);
+int         rperf(RegressionTest *t, const char *tag, double val);
 const char *regression_status_string(int status);
 
 void tell_diags_regression_testing_is_on();

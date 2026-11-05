@@ -17,7 +17,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSUrlHostSet
 ************
@@ -38,7 +38,6 @@ Synopsis
 .. function:: TSReturnCode TSUrlPortSet(TSMBuffer bufp, TSMLoc offset, int port)
 .. function:: TSReturnCode TSUrlPathSet(TSMBuffer bufp, TSMLoc offset, const char * value, int length)
 .. function:: TSReturnCode TSUrlHttpQuerySet(TSMBuffer bufp, TSMLoc offset, const char * value, int length)
-.. function:: TSReturnCode TSUrlHttpParamsSet(TSMBuffer bufp, TSMLoc offset, const char * value, int length)
 .. function:: TSReturnCode TSUrlHttpFragmentSet(TSMBuffer bufp, TSMLoc offset, const char * value, int length)
 
 Description
@@ -51,11 +50,11 @@ and retrieve or modify parts of URLs, such as their host, port or scheme
 information.
 
 :func:`TSUrlSchemeSet`, :func:`TSUrlUserSet`, :func:`TSUrlPasswordSet`,
-:func:`TSUrlHostSet`, :func:`TSUrlHttpParamsSet`, :func:`TSUrlHttpQuerySet`
+:func:`TSUrlHostSet`, :func:`TSUrlHttpQuerySet`
 and :func:`TSUrlHttpFragmentSet` each set the specified portion of the URL
 located at offset within the marshal buffer :arg:`bufp` to the string
 value. If :arg:`length` is :literal:`-1` then these functions assume that value
-is NULL-terminated. Otherwise, the length of the :arg:`string` value is taken
+is null-terminated. Otherwise, the length of the :arg:`string` value is taken
 to be the value of :arg:`length`. These functions copy the string to within
 :arg:`bufp`, so it can be subsequently modified or deleted.
 
@@ -66,8 +65,8 @@ port. Normal canonicalization based on the URL scheme still applies.
 Return Values
 =============
 
-All these APIs returns a :type:`TSReturnCode`, indicating success
-(:data:`TS_SUCCESS`) or failure (:data:`TS_ERROR`) of the operation.
+All these APIs returns a :enum:`TSReturnCode`, indicating success
+(:enumerator:`TS_SUCCESS`) or failure (:enumerator:`TS_ERROR`) of the operation.
 
 See Also
 ========

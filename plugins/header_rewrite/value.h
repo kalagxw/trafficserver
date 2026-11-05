@@ -21,6 +21,7 @@
 //
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -36,24 +37,24 @@
 // TODO: This is very incomplete, we need to support linked lists of these,
 // which evaluate each component and create a "joined" final string.
 //
-class Value : Statement
+class Value : public Statement
 {
 public:
-  Value() { TSDebug(PLUGIN_NAME_DBG, "Calling CTOR for Value"); }
+  Value() { Dbg(dbg_ctl, "Calling CTOR for Value"); }
 
   ~Value() override;
 
   // noncopyable
-  Value(const Value &) = delete;
+  Value(const Value &)          = delete;
   void operator=(const Value &) = delete;
 
-  void set_value(const std::string &val);
+  void set_value(const std::string &val, Statement *owner = nullptr);
 
   void
   append_value(std::string &s, const Resources &res) const
   {
     if (!_cond_vals.empty()) {
-      for (auto _cond_val : _cond_vals) {
+      for (auto &_cond_val : _cond_vals) {
         _cond_val->append_value(s, res);
       }
     } else {
@@ -91,9 +92,15 @@ public:
     return _value.empty();
   }
 
+  bool
+  has_conds() const
+  {
+    return !_cond_vals.empty();
+  }
+
 private:
-  int _int_value      = 0;
-  double _float_value = 0.0;
-  std::string _value;
-  std::vector<Condition *> _cond_vals;
+  int                                     _int_value   = 0;
+  double                                  _float_value = 0.0;
+  std::string                             _value;
+  std::vector<std::unique_ptr<Condition>> _cond_vals;
 };

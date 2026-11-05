@@ -22,6 +22,7 @@
 //
 #include <ts/ts.h>
 #include <ts/remap.h>
+#include <ts/remap_version.h>
 #include <cstdio>
 #include <cstring>
 
@@ -34,19 +35,9 @@
 TSReturnCode
 TSRemapInit(TSRemapInterface *api_info, char *errbuf, int errbuf_size)
 {
-  if (api_info->size < sizeof(TSRemapInterface)) {
-    strncpy(errbuf, "[tsremap_init] - Incorrect size of TSRemapInterface structure", errbuf_size - 1);
-    return TS_ERROR;
-  }
-
-  if (api_info->tsremap_version < TSREMAP_VERSION) {
-    snprintf(errbuf, errbuf_size, "[tsremap_init] - Incorrect API version %ld.%ld", api_info->tsremap_version >> 16,
-             (api_info->tsremap_version & 0xffff));
-    return TS_ERROR;
-  }
-
+  CHECK_REMAP_API_COMPATIBILITY(api_info, errbuf, errbuf_size);
   if (Acl::init()) {
-    TSDebug(PLUGIN_NAME, "remap plugin is successfully initialized");
+    Dbg(dbg_ctl, "remap plugin is successfully initialized");
     return TS_SUCCESS; /* success */
   } else {
     return TS_ERROR;
@@ -65,7 +56,7 @@ TSRemapNewInstance(int argc, char *argv[], void **ih, char * /* errbuf */, int /
     // ToDo: Should do better processing here, to make it easier to deal with
     // rules other then country codes.
     if (!strncmp(argv[2], "country", 11)) {
-      TSDebug(PLUGIN_NAME, "creating an ACL rule with ISO country codes");
+      Dbg(dbg_ctl, "creating an ACL rule with ISO country codes");
       a = new CountryAcl();
     }
 
@@ -100,13 +91,13 @@ TSRemapStatus
 TSRemapDoRemap(void *ih, TSHttpTxn rh, TSRemapRequestInfo *rri)
 {
   if (nullptr == ih) {
-    TSDebug(PLUGIN_NAME, "No ACLs configured, this is probably a plugin bug");
+    Dbg(dbg_ctl, "No ACLs configured, this is probably a plugin bug");
   } else {
     Acl *a = static_cast<Acl *>(ih);
 
     if (!a->eval(rri, rh)) {
-      TSDebug(PLUGIN_NAME, "denying request");
-      TSHttpTxnStatusSet(rh, static_cast<TSHttpStatus>(403));
+      Dbg(dbg_ctl, "denying request");
+      TSHttpTxnStatusSet(rh, static_cast<TSHttpStatus>(403), PLUGIN_NAME);
       a->send_html(rh);
     }
   }

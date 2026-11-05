@@ -2,7 +2,7 @@
 
   HTTPVersion - class to track the HTTP version
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -27,7 +27,7 @@ class HTTPVersion
 {
 public:
   HTTPVersion() {}
-  HTTPVersion(HTTPVersion const &that) = default;
+  HTTPVersion(HTTPVersion const &that)        = default;
   HTTPVersion &operator=(const HTTPVersion &) = default;
 
   explicit HTTPVersion(int version);
@@ -40,8 +40,8 @@ public:
   int operator>=(const HTTPVersion &hv) const;
   int operator<=(const HTTPVersion &hv) const;
 
-  uint8_t get_major() const;
-  uint8_t get_minor() const;
+  uint8_t  get_major() const;
+  uint8_t  get_minor() const;
   uint32_t get_flat_version() const;
 
 private:

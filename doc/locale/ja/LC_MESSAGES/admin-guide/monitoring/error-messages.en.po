@@ -52,7 +52,7 @@ msgstr ""
 
 #: ../../../admin-guide/monitoring/error-messages.en.rst:33
 msgid ""
-"The port specified in :file:`records.config` that accepts incoming HTTP "
+"The port specified in :file:`records.yaml` that accepts incoming HTTP "
 "requests is not valid."
 msgstr ""
 
@@ -210,13 +210,6 @@ msgstr ""
 "Traffic Server の ``config`` ディレクトリで指示されたファイルが存在すること"
 "を確認してください。パーミッションを確認し、必要であれば変更してください"
 
-#: ../../../admin-guide/monitoring/error-messages.en.rst:100
-msgid "``[Traffic Manager] Configuration File Update Failed: <error number>``"
-msgstr ""
-
-#: ../../../admin-guide/monitoring/error-messages.en.rst:104
-msgid "``[Traffic Manager] Mgmt <==>Proxy conn. closed``"
-msgstr ""
 
 #: ../../../admin-guide/monitoring/error-messages.en.rst:103
 msgid ""

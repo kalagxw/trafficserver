@@ -39,7 +39,7 @@ msgstr ""
 
 #: ../../developer-guide/plugins/getting-started/a-simple-plugin.en.rst:35
 msgid ""
-"Add the path to your plugin shared library into the :file:`records.config` "
+"Add the path to your plugin shared library into the :file:`records.yaml` "
 "file."
 msgstr ""
 
@@ -87,7 +87,7 @@ msgstr ""
 msgid ""
 "All plugins must be located in the directory specified by the configuration "
 "variable ``proxy.config.plugin.plugin_dir``, which is located in the :file:"
-"`records.config` file. The directory can be specified as an absolute or "
+"`records.yaml` file. The directory can be specified as an absolute or "
 "relative path."
 msgstr ""
 
@@ -95,7 +95,7 @@ msgstr ""
 msgid ""
 "**Note:** in the example above, Traffic Server notes are directed to the "
 "console by specifying ``E`` for ``proxy.config.diags.output.note`` in :file:"
-"`records.config`. The second note shows Traffic Server attempting to load "
+"`records.yaml`. The second note shows Traffic Server attempting to load "
 "the ``hello-world`` plugin. The third line of Traffic Server output is from "
 "your plugin."
 msgstr ""
@@ -112,13 +112,6 @@ msgstr ""
 
 #: ../../developer-guide/plugins/getting-started/a-simple-plugin.en.rst:104
 msgid "Restart Traffic Server"
-msgstr ""
-
-#: ../../developer-guide/plugins/getting-started/a-simple-plugin.en.rst:43
-msgid ""
-"The process for compiling a shared library varies with the platform used, "
-"so the Traffic Server API provides the tsxs tool which you can use to "
-"create shared libraries on all the supported Traffic Server platforms."
 msgstr ""
 
 #: ../../developer-guide/plugins/getting-started/a-simple-plugin.en.rst:60
@@ -150,8 +143,4 @@ msgstr ""
 
 #: ../../developer-guide/plugins/getting-started/a-simple-plugin.en.rst:66
 msgid "or the equivalent to ``sudo`` on your platform."
-msgstr ""
-
-#: ../../developer-guide/plugins/getting-started/a-simple-plugin.en.rst:58
-msgid "tsxs can be found in ``trafficserver-dev`` package."
 msgstr ""

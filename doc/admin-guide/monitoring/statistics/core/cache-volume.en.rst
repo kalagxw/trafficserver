@@ -125,8 +125,37 @@ a configuration with only one cache volume: :literal:`0`.
 .. ts:stat:: global proxy.process.cache.volume_0.ram_cache.hits integer
    :type: counter
 
+   Accumulates the number of hits to the LRU RAM cache for this volume.
+
 .. ts:stat:: global proxy.process.cache.volume_0.ram_cache.misses integer
    :type: counter
+
+   Accumulates the number of misses to the LRU RAM cache for this volume.  Note that this count includes hits to the other memory caches, including the last open read and aggregation buffer caches, so it may not represent the total number of cache accesses that go to disk.
+
+.. ts:stat:: global proxy.process.cache.volume_0.ram_cache.compress.failure integer
+   :type: counter
+
+   Accumulates the number of RAM cache entries the compression library could not compress, for this volume.  Objects that simply did not shrink enough to be worth compressing are not counted, since that is the ordinary outcome for already-compressed content.
+
+.. ts:stat:: global proxy.process.cache.volume_0.ram_cache.decompress.failure integer
+   :type: counter
+
+   Accumulates the number of RAM cache entries that failed to decompress on read, for this volume.  A failed entry is dropped from the RAM cache and the read is treated as a miss.  A nonzero value indicates data corruption or a compression library error, not ordinary cache churn.
+
+.. ts:stat:: global proxy.process.cache.volume_0.last_open_read.hits integer
+   :type: counter
+
+   Accumulates the number of hits to the last open read cache for this volume.  This cache stores the most recent read operation for each open cache volume.
+
+.. ts:stat:: global proxy.process.cache.volume_0.aggregation_buffer.hits integer
+   :type: counter
+
+   Accumulates the number of hits to the aggregation buffer for this volume.  This buffer stores data fragments that are on their way to be written to disk for write aggregation.
+
+.. ts:stat:: global proxy.process.cache.volume_0.all_memory_caches.misses integer
+   :type: counter
+
+   Accumulates the number of misses to all memory caches (LRU RAM cache, last open read cache, and aggregation buffer) for this volume.  This represents the total number of cache accesses that go to disk for this volume.
 
 .. ts:stat:: global proxy.process.cache.volume_0.ram_cache.total_bytes integer
    :type: gauge
@@ -193,7 +222,7 @@ a configuration with only one cache volume: :literal:`0`.
 .. ts:stat:: global proxy.process.cache.volume_0.write.backlog.failure integer
    :type: counter
 
-.. ts:stat:: global proxy.process.cache.volume_0.write_bytes_stat integer
+.. ts:stat:: global proxy.process.cache.volume_0.write_bytes integer
    :type: counter
    :units: bytes
    :ungathered:
@@ -203,4 +232,3 @@ a configuration with only one cache volume: :literal:`0`.
 
 .. ts:stat:: global proxy.process.cache.volume_0.write.success integer
    :type: counter
-

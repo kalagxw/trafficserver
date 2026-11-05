@@ -16,7 +16,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSMutexDestroy
 **************
@@ -28,10 +28,12 @@ Synopsis
 
     #include <ts/ts.h>
 
-.. function:: void TSMutexDestroy(TSMutex mutexp)
+.. function:: void TSMutexDestroy(TSMutex mutexp) noexcept
 
 Description
 ===========
 
 Destroys the indicated :arg:`mutex` previously created via
-:func:`TSMutexCreate`.
+:func:`TSMutexCreate`.  **Note:**  Do not call this function for a mutex that
+was passed to :func:`TSContCreate` as a parameter.  It will be destroyed by call(s)
+to :func:`TSContDestroy`.

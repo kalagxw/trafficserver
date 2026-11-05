@@ -1,4 +1,4 @@
-#!/bin/bash
+#! /usr/bin/env bash
 # vim: sw=4:ts=4:softtabstop=4:ai:et
 
 #  Licensed to the Apache Software Foundation (ASF) under one
@@ -17,9 +17,24 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-ROOT=${ROOT:-$(cd $(dirname $0) && git rev-parse --show-toplevel)}
+fail()
+{
+    echo $1
+    exit 1
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+ROOT=${ROOT:-${SCRIPT_DIR}}
+[ -d "${ROOT}" ] || fail "ROOT: \"${ROOT}\" is not a directory."
+[ -d "${ROOT}/tests" ] || fail "\"${ROOT}/tests\" is not a directory."
+
+PV_VERSION_FILE="${ROOT}/tests/proxy-verifier-version.txt"
+[ -r "${PV_VERSION_FILE}" ] || fail "\"${PV_VERSION_FILE}\" does not exist."
+PV_SUM_FILE="${ROOT}/tests/proxy-verifier-checksum.txt"
+[ -r "${PV_SUM_FILE}" ] || fail "\"${PV_SUM_FILE}\" does not exist."
+
 pv_name="proxy-verifier"
-pv_version=`cat ${ROOT}/tests/proxy-verifier-version.txt`
+read -r pv_version < "${PV_VERSION_FILE}"
 pv_top_dir="${ROOT}/tests/proxy-verifier"
 pv_unpack_dir="${pv_top_dir}/unpack/${pv_version}"
 bin_dir="${pv_unpack_dir}/bin"
@@ -27,16 +42,11 @@ pv_dir="${pv_name}-${pv_version}"
 pv_tar_filename="${pv_dir}.tar.gz"
 pv_tar="${pv_top_dir}/${pv_tar_filename}"
 pv_tar_url="https://ci.trafficserver.apache.org/bintray/${pv_tar_filename}"
-expected_sha1="4ca407c3f8d7cabca20b7f41d19b2c62a091c3ff"
+read -r expected_sha1 < "${PV_SUM_FILE}"
 pv_client="${bin_dir}/verifier-client"
 pv_server="${bin_dir}/verifier-server"
 TAR=${TAR:-tar}
 CURL=${CURL:-curl}
-fail()
-{
-    echo $1
-    exit 1
-}
 # Check to see whether Proxy Verifier has already been unpacked.
 if ! [ -x ${pv_client} -a -x ${pv_server} ]
 then
@@ -52,7 +62,8 @@ then
             SHASUM=${SHASUM:-shasum}
         fi
         mkdir -p ${pv_top_dir}
-        ${CURL} -L --progress-bar -o ${pv_tar} ${pv_tar_url}
+        ${CURL} -L --progress-bar -o ${pv_tar} ${pv_tar_url} || \
+            fail "Failed to download ${pv_tar_url}."
         cat > ${pv_top_dir}/sha1 << EOF
 ${expected_sha1}  ${pv_tar}
 EOF
@@ -67,10 +78,31 @@ EOF
     pv_os_dir=""
     case $(uname -s) in
     Darwin)
-        pv_os_dir="${pv_unpack_dir}/${pv_dir}/mac-os"
+        case $(uname -m) in
+        x86_64)
+            pv_os_dir="${pv_unpack_dir}/${pv_dir}/darwin-amd64"
+            ;;
+        arm64)
+            pv_os_dir="${pv_unpack_dir}/${pv_dir}/darwin-arm64"
+            ;;
+        *)
+            fail "Unrecognized Mac architecture: $(uname -m)"
+            ;;
+        esac
         ;;
     Linux)
         pv_os_dir="${pv_unpack_dir}/${pv_dir}/linux"
+        case $(uname -m) in
+        x86_64)
+            pv_os_dir="${pv_unpack_dir}/${pv_dir}/linux-amd64"
+            ;;
+        aarch64)
+            pv_os_dir="${pv_unpack_dir}/${pv_dir}/linux-arm64"
+            ;;
+        *)
+            fail "Unrecognized Linux architecture: $(uname -m)"
+            ;;
+        esac
         ;;
     *)
         fail "We need to build proxy-verifier for $(uname -s)"

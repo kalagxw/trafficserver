@@ -37,20 +37,21 @@ HttpParser::destroyParser()
 bool
 HttpParser::parse(io::IO &io)
 {
+  using multiplexer_ns::dbg_ctl;
   if (parsed_) {
     return true;
   }
   TSIOBufferBlock block = TSIOBufferReaderStart(io.reader);
   while (block != nullptr) {
-    int64_t size            = 0;
-    const char *const begin = TSIOBufferBlockReadStart(block, io.reader, &size);
-    const char *iterator    = begin;
+    int64_t           size     = 0;
+    const char *const begin    = TSIOBufferBlockReadStart(block, io.reader, &size);
+    const char       *iterator = begin;
 
     parsed_ = (TSHttpHdrParseResp(parser_, buffer_, location_, &iterator, iterator + size) == TS_PARSE_DONE);
     TSIOBufferReaderConsume(io.reader, iterator - begin);
 
     if (parsed_) {
-      TSDebug(PLUGIN_TAG, "HttpParser: response parsing is complete (%u response status code)", statusCode());
+      Dbg(dbg_ctl, "HttpParser: response parsing is complete (%u response status code)", statusCode());
       assert(parser_ != nullptr);
       destroyParser();
       return true;

@@ -46,9 +46,8 @@ Installation
 ============
 
 To make this plugin available, you must enable experimental plugins when
-building |TS|::
-
-    ./configure --enable-experimental-plugins
+building |TS| by passing the ``-DBUILD_EXPERIMENTAL_PLUGINS=ON`` to the ``cmake`` command
+when building.
 
 Configuration
 =============
@@ -84,6 +83,12 @@ but an absolute path may be specified as well. Syntax is as follows::
 
     regex_revalidate.so -d -c <path to rules> -f <path to state file>
 
+The configuration parameter `--match-header` or `-m` may be used to
+populate a supplied client request header name with a base64 encoded
+version of the matched revalidation rule.  This can be useful for checking
+if the plugin has modified cache status. Syntax is a follows::
+
+    regex_revalidate.so -c <path to rules> -m <header name>
 
 Revalidation Rules
 ==================
@@ -121,6 +126,12 @@ the parent. *Use with care* as this will increase bandwidth to the parent.
 During configuration reload, any rule which changes it type will be
 reloaded and treated as a new rule.
 
+NOTE: MISS Should *only* be used when the parent is known to be an origin.
+If the parent is another caching CDN it is likely that the refetch object
+will have the identical DATE header as the object currently in cache.
+In this case matching assets will effectively become no-cache assets
+until the refetch rule expires.
+
 Caveats
 =======
 
@@ -130,7 +141,7 @@ Matches Only Post-Remapping
 The regular expressions in revalidation rules see only the final, remapped URL
 in a transaction. As such, they cannot be used to distinguish between two
 client-facing URLs which are mapped to the same origin object. This is due to
-the fact that the plugin uses :c:data:`TS_HTTP_CACHE_LOOKUP_COMPLETE_HOOK`.
+the fact that the plugin uses :cpp:enumerator:`TS_HTTP_CACHE_LOOKUP_COMPLETE_HOOK`.
 
 Removing Rules
 --------------

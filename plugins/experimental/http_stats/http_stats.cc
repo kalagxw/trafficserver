@@ -43,10 +43,12 @@
 
 constexpr char PLUGIN[] = "http_stats";
 
-#define VDEBUG(fmt, ...) TSDebug(PLUGIN, fmt, ##__VA_ARGS__)
+static DbgCtl dbg_ctl{PLUGIN};
+
+#define VDEBUG(fmt, ...) Dbg(dbg_ctl, fmt, ##__VA_ARGS__)
 
 #if DEBUG
-#define VERROR(fmt, ...) TSDebug(PLUGIN, fmt, ##__VA_ARGS__)
+#define VERROR(fmt, ...) Dbg(dbg_ctl, fmt, ##__VA_ARGS__)
 #else
 #define VERROR(fmt, ...) TSError("[%s] %s: " fmt, PLUGIN, __FUNCTION__, ##__VA_ARGS__)
 #endif
@@ -67,37 +69,42 @@ struct HTTPStatsFormatter {
   {
   }
 
-  uint64_t wrap_unsigned_counter(uint64_t value);
+  uint64_t    wrap_unsigned_counter(uint64_t value);
   std::string output();
 
-  bool csv              = false;
-  bool integer_counters = false;
-  bool wrap_counters    = false;
+  bool        csv              = false;
+  bool        integer_counters = false;
+  bool        wrap_counters    = false;
   std::string buf;
 };
 
 struct HTTPStatsConfig {
   explicit HTTPStatsConfig() {}
 
-  ~HTTPStatsConfig() { TSContDestroy(cont); }
+  ~HTTPStatsConfig()
+  {
+    if (cont) {
+      TSContDestroy(cont);
+    }
+  }
   std::string mimeType;
 
-  int maxAge            = 0;
+  int  maxAge           = 0;
   bool csv              = false;
   bool integer_counters = false;
   bool wrap_counters    = false;
 
-  TSCont cont;
+  TSCont cont{nullptr};
 };
 
 struct HTTPStatsRequest;
 
 union argument_type {
-  void *ptr;
-  intptr_t ecode;
-  TSVConn vc;
-  TSVIO vio;
-  TSHttpTxn txn;
+  void             *ptr;
+  intptr_t          ecode;
+  TSVConn           vc;
+  TSVIO             vio;
+  TSHttpTxn         txn;
   HTTPStatsRequest *trq;
 
   argument_type(void *_p) : ptr(_p) {}
@@ -108,8 +115,8 @@ union argument_type {
 // for each TSVConn; one to push data into the TSVConn and one to pull
 // data out.
 struct IOChannel {
-  TSVIO vio = nullptr;
-  TSIOBuffer iobuf;
+  TSVIO            vio = nullptr;
+  TSIOBuffer       iobuf;
   TSIOBufferReader reader;
 
   IOChannel() : iobuf(TSIOBufferSizedCreate(TS_IOBUFFER_SIZE_INDEX_32K)), reader(TSIOBufferReaderAlloc(iobuf)) {}
@@ -138,8 +145,8 @@ struct IOChannel {
 };
 
 struct HTTPStatsHttpHeader {
-  TSMBuffer buffer;
-  TSMLoc header;
+  TSMBuffer    buffer;
+  TSMLoc       header;
   TSHttpParser parser;
 
   HTTPStatsHttpHeader()
@@ -164,11 +171,11 @@ struct HTTPStatsHttpHeader {
 struct HTTPStatsRequest {
   HTTPStatsRequest() {}
 
-  off_t nbytes        = 0; // Number of bytes to generate.
-  unsigned maxAge     = 0; // Max age for cache responses.
-  unsigned statusCode = 200;
-  IOChannel readio;
-  IOChannel writeio;
+  off_t               nbytes     = 0; // Number of bytes to generate.
+  unsigned            maxAge     = 0; // Max age for cache responses.
+  unsigned            statusCode = 200;
+  IOChannel           readio;
+  IOChannel           writeio;
   HTTPStatsHttpHeader rqheader;
 
   std::string mimeType;
@@ -242,7 +249,7 @@ HeaderFieldStringSet(const HTTPStatsHttpHeader &http, const char *field_name, in
 }
 
 static TSReturnCode
-WriteResponseHeader(HTTPStatsRequest *trq, TSCont contp, TSHttpStatus status)
+WriteResponseHeader(HTTPStatsRequest *trq, TSHttpStatus status)
 {
   HTTPStatsHttpHeader response;
 
@@ -299,7 +306,7 @@ static bool
 HTTPStatsParseRequest(HTTPStatsRequest *trq)
 {
   const char *path;
-  int pathsz;
+  int         pathsz;
 
   // Make sure this is a GET request
   path = TSHttpHdrMethodGet(trq->rqheader.buffer, trq->rqheader.header, &pathsz);
@@ -362,18 +369,18 @@ HTTPStatsInterceptHook(TSCont contp, TSEvent event, void *edata)
   }
 
   case TS_EVENT_VCONN_READ_READY: {
-    argument_type cdata           = TSContDataGet(contp);
+    argument_type        cdata    = TSContDataGet(contp);
     HTTPStatsHttpHeader &rqheader = cdata.trq->rqheader;
 
     VDEBUG("reading vio=%p vc=%p, trq=%p", arg.vio, TSVIOVConnGet(arg.vio), cdata.trq);
 
     TSIOBufferBlock blk;
-    TSParseResult result = TS_PARSE_CONT;
+    TSParseResult   result = TS_PARSE_CONT;
 
     for (blk = TSIOBufferReaderStart(cdata.trq->readio.reader); blk; blk = TSIOBufferBlockNext(blk)) {
-      const char *ptr;
-      const char *end;
-      int64_t nbytes;
+      const char  *ptr;
+      const char  *end;
+      int64_t      nbytes;
       TSHttpStatus status = static_cast<TSHttpStatus>(cdata.trq->statusCode);
 
       ptr = TSIOBufferBlockReadStart(blk, cdata.trq->readio.reader, &nbytes);
@@ -401,7 +408,7 @@ HTTPStatsInterceptHook(TSCont contp, TSEvent event, void *edata)
         cdata.trq->writeio.write(TSVIOVConnGet(arg.vio), contp);
         TSVIONBytesSet(cdata.trq->writeio.vio, 0);
 
-        if (WriteResponseHeader(cdata.trq, contp, status) != TS_SUCCESS) {
+        if (WriteResponseHeader(cdata.trq, status) != TS_SUCCESS) {
           VERROR("failure writing response");
           return TS_EVENT_ERROR;
         }
@@ -512,9 +519,9 @@ HTTPStatsTxnHook(TSCont contp, TSEvent event, void *edata)
 
   switch (event) {
   case TS_EVENT_HTTP_CACHE_LOOKUP_COMPLETE: {
-    int method_length, status;
-    TSMBuffer bufp;
-    TSMLoc hdr_loc;
+    int         method_length, status;
+    TSMBuffer   bufp;
+    TSMLoc      hdr_loc;
     const char *method;
 
     if (TSHttpTxnCacheLookupStatusGet(arg.txn, &status) != TS_SUCCESS) {
@@ -566,7 +573,7 @@ TSRemapInit(TSRemapInterface * /* api_info */, char * /* errbuf */, int /* errbu
 }
 
 TSRemapStatus
-TSRemapDoRemap(void *ih, TSHttpTxn rh, TSRemapRequestInfo *rri)
+TSRemapDoRemap(void *ih, TSHttpTxn rh, TSRemapRequestInfo * /* rri ATS_UNUSED */)
 {
   const TSHttpStatus txnstat = TSHttpTxnStatusGet(rh);
   if (txnstat != TS_HTTP_STATUS_NONE && txnstat != TS_HTTP_STATUS_OK) {
@@ -578,7 +585,7 @@ TSRemapDoRemap(void *ih, TSHttpTxn rh, TSRemapRequestInfo *rri)
 
   if (!cfg) {
     VERROR("No remap context available, check code / config");
-    TSHttpTxnStatusSet(rh, TS_HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    TSHttpTxnStatusSet(rh, TS_HTTP_STATUS_INTERNAL_SERVER_ERROR, PLUGIN);
     return TSREMAP_NO_REMAP;
   }
 
@@ -595,11 +602,13 @@ TSRemapDoRemap(void *ih, TSHttpTxn rh, TSRemapRequestInfo *rri)
 TSReturnCode
 TSRemapNewInstance(int argc, char *argv[], void **ih, char * /* errbuf ATS_UNUSED */, int /* errbuf_size ATS_UNUSED */)
 {
-  static const struct option longopt[] = {{"csv", no_argument, nullptr, 'c'},
-                                          {"integer-counters", no_argument, NULL, 'i'},
-                                          {"wrap-counters", no_argument, NULL, 'w'},
-                                          {"max-age", required_argument, nullptr, 'a'},
-                                          {nullptr, no_argument, nullptr, '\0'}};
+  static const struct option longopt[] = {
+    {"csv",              no_argument,       nullptr, 'c' },
+    {"integer-counters", no_argument,       nullptr, 'i' },
+    {"wrap-counters",    no_argument,       nullptr, 'w' },
+    {"max-age",          required_argument, nullptr, 'a' },
+    {nullptr,            no_argument,       nullptr, '\0'}
+  };
 
   HTTPStatsConfig *cfg = new HTTPStatsConfig;
 
@@ -700,7 +709,8 @@ HTTPStatsFormatter::wrap_unsigned_counter(uint64_t value)
   } while (0)
 
 static void
-json_out_stat(TSRecordType rec_type, void *edata, int registered, const char *name, TSRecordDataType data_type, TSRecordData *datum)
+json_out_stat(TSRecordType /* rec_type ATS_UNUSED */, void *edata, int /* registered ATS_UNUSED */, const char *name,
+              TSRecordDataType data_type, TSRecordData *datum)
 {
   HTTPStatsFormatter *fmtr = static_cast<HTTPStatsFormatter *>(edata);
 
@@ -718,13 +728,14 @@ json_out_stat(TSRecordType rec_type, void *edata, int registered, const char *na
     APPEND_STAT_JSON(fmtr, name, "%s", datum->rec_string);
     break;
   default:
-    TSDebug(PLUGIN, "unknown type for %s: %d", name, data_type);
+    Dbg(dbg_ctl, "unknown type for %s: %d", name, data_type);
     break;
   }
 }
 
 static void
-csv_out_stat(TSRecordType rec_type, void *edata, int registered, const char *name, TSRecordDataType data_type, TSRecordData *datum)
+csv_out_stat(TSRecordType /* rec_type ATS_UNUSED */, void *edata, int /* registered ATS_UNUSED */, const char *name,
+             TSRecordDataType data_type, TSRecordData *datum)
 {
   HTTPStatsFormatter *fmtr = static_cast<HTTPStatsFormatter *>(edata);
 
@@ -742,7 +753,7 @@ csv_out_stat(TSRecordType rec_type, void *edata, int registered, const char *nam
     APPEND_STAT_CSV(fmtr, name, "%s", datum->rec_string);
     break;
   default:
-    TSDebug(PLUGIN, "unknown type for %s: %d", name, data_type);
+    Dbg(dbg_ctl, "unknown type for %s: %d", name, data_type);
     break;
   }
 }
@@ -751,12 +762,12 @@ std::string
 HTTPStatsFormatter::output()
 {
   if (csv) {
-    TSRecordDump((TSRecordType)(TS_RECORDTYPE_PLUGIN | TS_RECORDTYPE_NODE | TS_RECORDTYPE_PROCESS), csv_out_stat, this);
+    TSRecordDump(static_cast<TSRecordType>(TS_RECORDTYPE_PLUGIN | TS_RECORDTYPE_NODE | TS_RECORDTYPE_PROCESS), csv_out_stat, this);
     APPEND_STAT_CSV(this, "version", "%s", TSTrafficServerVersionGet());
   } else {
     APPEND(buf, "{ \"global\": {\n");
 
-    TSRecordDump((TSRecordType)(TS_RECORDTYPE_PLUGIN | TS_RECORDTYPE_NODE | TS_RECORDTYPE_PROCESS), json_out_stat, this);
+    TSRecordDump(static_cast<TSRecordType>(TS_RECORDTYPE_PLUGIN | TS_RECORDTYPE_NODE | TS_RECORDTYPE_PROCESS), json_out_stat, this);
 
     APPEND(buf, "\"server\": \"");
     APPEND(buf, TSTrafficServerVersionGet());

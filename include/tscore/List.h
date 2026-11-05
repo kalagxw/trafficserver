@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -150,9 +150,15 @@ template <class C> struct Link : public SLink<C> {
     static _c *&next_link(_c *c);            \
     static _c *&prev_link(_c *c);            \
   };
-#define LINK_DEFINITION(_c, _f)                                           \
-  inline _c *&Link##_##_c##_##_f::next_link(_c *c) { return c->_f.next; } \
-  inline _c *&Link##_##_c##_##_f::prev_link(_c *c) { return c->_f.prev; }
+#define LINK_DEFINITION(_c, _f)                    \
+  inline _c *&Link##_##_c##_##_f::next_link(_c *c) \
+  {                                                \
+    return c->_f.next;                             \
+  }                                                \
+  inline _c *&Link##_##_c##_##_f::prev_link(_c *c) \
+  {                                                \
+    return c->_f.prev;                             \
+  }
 //
 //      List descriptor for singly-linked list of objects of type C.
 //
@@ -166,7 +172,7 @@ public:
     return head == nullptr;
   }
   void push(C *e);
-  C *pop();
+  C   *pop();
   void
   clear()
   {
@@ -186,9 +192,9 @@ public:
   SLL() : head(nullptr) {}
   SLL(C *c) : head(c) {}
 };
-#define SList(_c, _f) SLL<_c, _c::Link##_##_f>
+#define SList(_c, _f)           SLL<_c, _c::Link##_##_f>
 #define SListM(_c, _m, _ml, _l) SLL<_c, _c::Link##_##_ml##_##_l>
-#define forl_LL(_c, _p, _l) for (_c *_p = (_l).head; _p; _p = (_l).next(_p))
+#define forl_LL(_c, _p, _l)     for (_c *_p = (_l).head; _p; _p = (_l).next(_p))
 
 template <class C, class L>
 inline void
@@ -221,7 +227,7 @@ template <class C, class L = typename C::Link_link> struct DLL {
     return head == nullptr;
   }
   void push(C *e);
-  C *pop();
+  C   *pop();
   void remove(C *e);
   void insert(C *e, C *after);
   bool
@@ -331,10 +337,10 @@ template <class C, class L = typename C::Link_link> struct DLL {
     self_type operator++(int);
 
     /// Equality.
-    bool operator==(self_type const &that);
+    bool operator==(self_type const &that) const;
 
     /// Inequality.
-    bool operator!=(self_type const &that);
+    bool operator!=(self_type const &that) const;
 
   protected:
     const_iterator(C *spot) : _spot(spot) {}
@@ -344,15 +350,16 @@ template <class C, class L = typename C::Link_link> struct DLL {
   const_iterator end() const;
 };
 
-#define DList(_c, _f) DLL<_c, _c::Link##_##_f>
+#define DList(_c, _f)           DLL<_c, _c::Link##_##_f>
 #define DListM(_c, _m, _ml, _l) DLL<_c, _c::Link##_##_ml##_##_l>
 
 template <class C, class L>
 inline void
 DLL<C, L>::push(C *e)
 {
-  if (head)
+  if (head) {
     prev(head) = e;
+  }
   next(e) = head;
   head    = e;
 }
@@ -361,14 +368,18 @@ template <class C, class L>
 inline void
 DLL<C, L>::remove(C *e)
 {
-  if (!head)
+  if (!head) {
     return;
-  if (e == head)
+  }
+  if (e == head) {
     head = next(e);
-  if (prev(e))
+  }
+  if (prev(e)) {
     next(prev(e)) = next(e);
-  if (next(e))
+  }
+  if (next(e)) {
     prev(next(e)) = prev(e);
+  }
   prev(e) = nullptr;
   next(e) = nullptr;
 }
@@ -380,12 +391,14 @@ DLL<C, L>::pop()
   C *ret = head;
   if (ret) {
     head = next(ret);
-    if (head)
+    if (head) {
       prev(head) = nullptr;
+    }
     next(ret) = nullptr;
     return ret;
-  } else
+  } else {
     return nullptr;
+  }
 }
 
 template <class C, class L>
@@ -399,8 +412,9 @@ DLL<C, L>::insert(C *e, C *after)
   prev(e)     = after;
   next(e)     = next(after);
   next(after) = e;
-  if (next(e))
+  if (next(e)) {
     prev(next(e)) = e;
+  }
 }
 
 template <class C, class L>
@@ -509,14 +523,14 @@ DLL<C, L>::const_iterator::operator++(int) -> self_type
 
 template <class C, class L>
 bool
-DLL<C, L>::const_iterator::operator==(DLL::const_iterator::self_type const &that)
+DLL<C, L>::const_iterator::operator==(DLL::const_iterator::self_type const &that) const
 {
   return _spot == that._spot;
 }
 
 template <class C, class L>
 bool
-DLL<C, L>::const_iterator::operator!=(DLL::const_iterator::self_type const &that)
+DLL<C, L>::const_iterator::operator!=(DLL::const_iterator::self_type const &that) const
 {
   return _spot != that._spot;
 }
@@ -528,12 +542,12 @@ template <class C, class L = typename C::Link_link> class Queue : public DLL<C, 
 {
 public:
   using DLL<C, L>::head;
-  C *tail;
+  C   *tail;
   void push(C *e);
-  C *pop();
+  C   *pop();
   void enqueue(C *e);
   void in_or_enqueue(C *e);
-  C *dequeue();
+  C   *dequeue();
   void remove(C *e);
   void insert(C *e, C *after);
   void append(Queue<C, L> q);
@@ -552,7 +566,7 @@ public:
 
   Queue() : tail(nullptr) {}
 };
-#define Que(_c, _f) Queue<_c, _c::Link##_##_f>
+#define Que(_c, _f)           Queue<_c, _c::Link##_##_f>
 #define QueM(_c, _m, _mf, _f) Queue<_c, _c::Link##_##_mf##_##_f>
 
 template <class C, class L>
@@ -560,8 +574,9 @@ inline void
 Queue<C, L>::push(C *e)
 {
   DLL<C, L>::push(e);
-  if (!tail)
+  if (!tail) {
     tail = head;
+  }
 }
 
 template <class C, class L>
@@ -569,8 +584,9 @@ inline C *
 Queue<C, L>::pop()
 {
   C *ret = DLL<C, L>::pop();
-  if (!head)
+  if (!head) {
     tail = nullptr;
+  }
   return ret;
 }
 
@@ -579,18 +595,20 @@ inline void
 Queue<C, L>::insert(C *e, C *after)
 {
   DLL<C, L>::insert(e, after);
-  if (!tail)
+  if (!tail) {
     tail = head;
-  else if (tail == after)
+  } else if (tail == after) {
     tail = e;
+  }
 }
 
 template <class C, class L>
 inline void
 Queue<C, L>::remove(C *e)
 {
-  if (tail == e)
+  if (tail == e) {
     tail = (C *)this->prev(e);
+  }
   DLL<C, L>::remove(e);
 }
 
@@ -599,9 +617,11 @@ inline void
 Queue<C, L>::append(DLL<C, L> q)
 {
   C *qtail = q.head;
-  if (qtail)
-    while (this->next(qtail))
+  if (qtail) {
+    while (this->next(qtail)) {
       qtail = this->next(qtail);
+    }
+  }
   if (!head) {
     head = q.head;
     tail = qtail;
@@ -634,18 +654,20 @@ template <class C, class L>
 inline void
 Queue<C, L>::enqueue(C *e)
 {
-  if (tail)
+  if (tail) {
     insert(e, tail);
-  else
+  } else {
     push(e);
+  }
 }
 
 template <class C, class L>
 inline void
 Queue<C, L>::in_or_enqueue(C *e)
 {
-  if (!this->in(e))
+  if (!this->in(e)) {
     enqueue(e);
+  }
 }
 
 template <class C, class L>
@@ -665,8 +687,9 @@ template <class C, class L = typename C::Link_link> struct SortableQueue : publi
   void
   sort()
   {
-    if (!head)
+    if (!head) {
       return;
+    }
     bool clean = false;
     while (!clean) {
       clean = true;
@@ -677,28 +700,33 @@ template <class C, class L = typename C::Link_link> struct SortableQueue : publi
         if (*n < *v) {
           clean = false;
           // swap 'em
-          if (head == v)
+          if (head == v) {
             head = n;
-          if (tail == n)
+          }
+          if (tail == n) {
             tail = v;
+          }
           // fix prev (p)
           C *p = this->prev(v);
           if (p) {
             this->next(p) = n;
             this->prev(n) = p;
-          } else
+          } else {
             this->prev(n) = nullptr;
+          }
           // fix follow (f)
           if (f) {
             this->prev(f) = v;
             this->next(v) = f;
-          } else
+          } else {
             this->next(v) = nullptr;
+          }
           // fix interior
           this->prev(v) = n;
           this->next(n) = v;
-        } else
+        } else {
           v = n;
+        }
         n = f;
       }
     }
@@ -714,15 +742,15 @@ template <class C, class L = typename C::Link_link> struct CountQueue : public Q
   int size = 0;
   inline CountQueue() {}
   inline void push(C *e);
-  inline C *pop();
+  inline C   *pop();
   inline void enqueue(C *e);
-  inline C *dequeue();
+  inline C   *dequeue();
   inline void remove(C *e);
   inline void insert(C *e, C *after);
   inline void append(CountQueue<C, L> &q);
   inline void append_clear(CountQueue<C, L> &q);
 };
-#define CountQue(_c, _f) CountQueue<_c, _c::Link##_##_f>
+#define CountQue(_c, _f)           CountQueue<_c, _c::Link##_##_f>
 #define CountQueM(_c, _m, _mf, _f) CountQueue<_c, _c::Link##_##_mf##_##_f>
 
 template <class C, class L>
@@ -738,8 +766,9 @@ inline C *
 CountQueue<C, L>::pop()
 {
   C *ret = Queue<C, L>::pop();
-  if (ret)
+  if (ret) {
     size--;
+  }
   return ret;
 }
 
@@ -796,7 +825,7 @@ CountQueue<C, L>::append_clear(CountQueue<C, L> &q)
 //
 
 template <class C, class A = DefaultAlloc> struct ConsCell {
-  C car;
+  C         car;
   ConsCell *cdr;
   ConsCell(C acar, ConsCell *acdr) : car(acar), cdr(acdr) {}
   ConsCell(C acar) : car(acar), cdr(nullptr) {}
@@ -818,10 +847,11 @@ template <class C, class A = DefaultAlloc> struct List {
   C
   first()
   {
-    if (head)
+    if (head) {
       return head->car;
-    else
+    } else {
       return 0;
+    }
   }
   C
   car()
@@ -831,10 +861,11 @@ template <class C, class A = DefaultAlloc> struct List {
   ConsCell<C, A> *
   rest()
   {
-    if (head)
+    if (head) {
       return head->cdr;
-    else
+    } else {
       return 0;
+    }
   }
   ConsCell<C, A> *
   cdr()
@@ -939,7 +970,7 @@ template <class C, class L = typename C::Link_link> struct AtomicSLL {
   AtomicSLL();
 };
 
-#define ASLL(_c, _l) AtomicSLL<_c, _c::Link##_##_l>
+#define ASLL(_c, _l)           AtomicSLL<_c, _c::Link##_##_l>
 #define ASLLM(_c, _m, _ml, _l) AtomicSLL<_c, _c::Link##_##_ml##_##_l>
 
 template <class C, class L> inline AtomicSLL<C, L>::AtomicSLL()

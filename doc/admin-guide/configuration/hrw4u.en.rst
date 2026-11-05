@@ -1,0 +1,1242 @@
+.. Licensed to the Apache Software Foundation (ASF) under one or more contributor license
+   agreements.  See the NOTICE file distributed with this work for additional information regarding
+   copyright ownership.  The ASF licenses this file to you under the Apache License, Version 2.0
+   (the "License"); you may not use this file except in compliance with the License.  You may obtain
+   a copy of the License at
+
+   http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software distributed under the License
+   is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+   or implied.  See the License for the specific language governing permissions and limitations
+   under the License.
+
+.. include:: ../../common.defs
+.. default-domain:: cpp
+.. highlight:: none
+
+.. _admin-hrw4u:
+
+HRW4U DSL
+*********
+
+HRW4U is a next-generation rule language for the existing ATS
+:ref:`admin-plugins-header-rewrite` plugin. It introduces clearer
+syntax, formal grammar, full condition nesting, semantic validation,
+and extensible condition/operator support.
+
+Overview
+========
+
+HRW4U replaces the free-form text parsing of ``header_rewrite`` with a formally defined
+grammar using ANTLR. This makes HRW4U easier to parse, validate, and extend.
+
+Rather than repeating ``header_rewrite`` documentation, please refer to:
+  - :ref:`admin-plugins-header-rewrite` for feature behavior and semantics
+  - This page focuses on syntax and behavior *differences* in HRW4U
+
+Why HRW4U?
+----------
+
+Over time, the ``header_rewrite`` format has become unwieldy and difficult to use.
+HRW4U aims to improve the following:
+
+- Structured grammar and parser
+- Better error diagnostics (line/col, filename, hints)
+- Proper nested condition support using `if (...)` and `{ ... }` blocks
+- Symbol tables for variable declarations and usage
+- Static validation of operand types and value ranges
+- Explicit `VARS` declarations with typed variables (`bool`, `int8`, `int16`)
+- Optional debug output to trace logic evaluation
+
+Building
+--------
+
+Currently, the HRW4U compiler is not built as part of the ATS build process. You need to
+build it separately using Python 3.12+ and uv. There's a ``bootstrap.sh``
+script in the ``tools/hrw4u`` directory that helps with the setup process.
+
+Once set up, simply run:
+
+.. code-block:: none
+
+   make
+   make package
+
+This will produce a PIP package in the ``dist`` directory. You can install it in a
+virtualenv or system-wide using:
+
+.. code-block:: none
+
+   pipx install dist/hrw4u-1.4.0-py3-none-any.whl
+
+Using
+-----
+
+Once installed, you will have a ``hrw4u`` command available. You can run it as
+follows to produce the help output:
+
+.. code-block:: none
+
+   hrw4u --help
+
+Basic Usage
+^^^^^^^^^^^
+
+Compile a single file to stdout:
+
+.. code-block:: none
+
+   hrw4u some_file.hrw4u
+
+Compile from stdin:
+
+.. code-block:: none
+
+   cat some_file.hrw4u | hrw4u
+
+Compile multiple files to stdout (separated by ``# ---``):
+
+.. code-block:: none
+
+   hrw4u file1.hrw4u file2.hrw4u file3.hrw4u
+
+Bulk Compilation
+^^^^^^^^^^^^^^^^
+
+For bulk compilation, use the ``input:output`` format to compile multiple files
+to their respective output files in a single command:
+
+.. code-block:: none
+
+   hrw4u file1.hrw4u:file1.conf file2.hrw4u:file2.conf file3.hrw4u:file3.conf
+
+This is particularly useful for build systems or when processing many configuration
+files at once. All files are processed in a single invocation, improving performance
+for large batches of files.
+
+Exit Status
+^^^^^^^^^^^
+
+====== ==========================================================================
+Status Meaning
+====== ==========================================================================
+0      Every input compiled. Warnings may still have been reported.
+1      At least one input had an error, or the run aborted on a fatal problem:
+       a missing or unreadable input, an unwritable output, or ``input:output``
+       pairs mixed with plain file arguments.
+2      The command line was rejected before any input was read: an unknown
+       option, an invalid option value, or conflicting output modes. This comes
+       from ``argparse`` and follows Python's usage-error convention.
+====== ==========================================================================
+
+A compile error does not stop the run: every input is still compiled before the
+status is decided, so one bad file does not skip the files after it.
+``--stop-on-error`` instead ends the run at the first error, and fatal problems
+such as a missing or unreadable input always end it immediately.
+
+A run that reported an error writes no configuration:
+
+- On standard output the inputs form one document, so nothing is written if any
+  input failed, including when the run ended early.
+- In ``input:output`` form only the failing pairs are skipped. Their output files
+  are left as they were, and pairs already written stay written.
+
+``--ast`` output is written even when the run fails, since it is a parse tree
+rather than a configuration; a target is left untouched only when no tree could
+be built. ``--ast`` skips the semantic checks, so a program that parses but is
+otherwise invalid exits 0 under it.
+
+Reverse Tool (u4wrh)
+^^^^^^^^^^^^^^^^^^^^
+
+In addition to ``hrw4u``, you also have the reverse tool, converting existing ``header_rewrite``
+configurations to ``hrw4u``. This tool is named ``u4wrh`` and supports the same usage patterns:
+
+.. code-block:: none
+
+   # Convert single file to stdout
+   u4wrh existing_config.conf
+
+   # Bulk conversion
+   u4wrh file1.conf:file1.hrw4u file2.conf:file2.hrw4u
+
+For people using IDEs, the package also provides an LSP for this language, named ``hrw4u-lsp``.
+
+Syntax Differences
+==================
+
+The basic structure consists of a `section` name defining the part of the transaction to run,
+followed by conditionals and operators. It uses `if ... {...} elif ... {...} else {...}` conditional syntax
+with `&& , || and ==`. Conditionals support parenthesized grouping for complex expressions (`if (...) {...}`)
+and can be nested up to a maximum depth of 10 levels. Conditions and operators generally follow
+function() or object.style grammar. Operator lines are terminated with `;` and whitespace is still
+insignificant. For instance:
+
+.. code-block:: none
+
+   VARS {
+     Foo: bool;
+     Bar: int8;
+   }
+
+   REMAP {
+     if inbound.status == 403 {
+       inbound.req.X-Fail = "1";
+     } elif inbound.status == 404 {
+       inbound.req.X-NotFound = "1";
+     } else {
+       no-op();
+     }
+   }
+
+   READ_RESPONSE {
+     if inbound.status > 399 {
+       if inbound.status < 500 {
+         # Client error - check specific cases
+         if inbound.status == 404 {
+           counter("errors.not_found");
+         } elif inbound.status == 403 {
+           counter("errors.forbidden");
+         }
+       } else {
+         # Server error
+         counter("errors.server");
+       }
+     }
+   }
+
+There is no `cond` or `set-header` syntax — those are implied by context.
+
+Header Presence
+---------------
+
+In header_rewrite, to test if a header is not present, you must test the value against an empty string (and then negate it to test if the header exists). For instance:
+
+.. code-block:: none
+
+   # header_rewrite - test if header is NOT present
+   cond %{HEADER:Strict-Transport-Security} =""
+
+   # header_rewrite - test if header IS present
+   cond %{HEADER:Strict-Transport-Security} ="" [NOT]
+
+HRW4U uses a more conventional approach:
+
+.. code-block:: none
+
+   # HRW4U - test if header is NOT present
+   if !inbound.req.Strict-Transport-Security {
+       ...
+   }
+
+   # HRW4U - test if header IS present
+   if inbound.req.Strict-Transport-Security {
+       ...
+   }
+
+
+Condition & Operator Mapping
+============================
+
+Key Differences from header_rewrite
+-----------------------------------
+
+==================== ============================= =========================================
+Feature              header_rewrite                HRW4U
+==================== ============================= =========================================
+Context              Context sensitive             Explicit, e.g. ``inbound`` and ``outbound``
+Syntax               Free-form                     Structured `if (...) { ... }`
+Conditions           `cond %{...}`                 Implicit in `if (...)`
+Operators            Raw text (`set-header`)       Structured assignments or statements
+Grouping             `GROUP` / `GROUP:END`         Use `()` inside `if` expressions
+Else branches        `else` with indented ops      `elif ... { ... }` and `else { ... }`
+                                                   with full blocks
+Debugging            Manual with logs              Built-in debug tracing (`--debug`)
+Quotes               Quoted strings optional       Quoted strings required / encouraged
+Validation           Runtime                       Static during parsing and symbol resolution
+==================== ============================= =========================================
+
+.. note::
+    The logical operator precedence is the same as in `header_rewrite`: which is left to right!
+    This differs from most programming languages where `&&` has higher precedence than `||`.
+    The implication being that you may have to use parentheses to get the desired precedence.
+
+Conditions
+----------
+
+Below is a partial mapping of `header_rewrite` condition symbols to their HRW4U equivalents:
+
+================================= ================================== ================================================
+Header Rewrite                    HRW4U                              Description
+================================= ================================== ================================================
+cond %{ACCESS:/path}              access("/path")                    File exists at "/path" and is accessible by ATS
+cond %{CACHE} =hit-fresh          cache() == "hit-fresh"             Cache lookup result status
+cond %{CIDR:24,48} =ip            cidr(24,48) == "ip"                Match masked client IP address
+cond %{CLIENT-HEADER:X} =foo      inbound.req.X == "foo"             Original client request header
+cond %{CLIENT-URL:<C>} =bar       inbound.url.<C> == "bar"           URL component match, <:ref:`C<admin-plugins-header-rewrite-url-parts>`> is ``host``, ``path`` etc.
+cond %{CLIENT-URL:QUERY:<P>} =bar inbound.url.query.<P> == "bar"     Extract specific query parameter ``P`` from URL
+cond %{COOKIE:foo} =bar           {in,out}bound.cookie.foo == "bar"  Check a cookie value
+cond %{FROM-URL:<C>} =bar         from.url.<C> == "bar"              Remap ``From URL`` component match, <:ref:`C<admin-plugins-header-rewrite-url-parts>`> is ``host`` etc.
+cond %{FROM-URL:QUERY:<P>} =bar   from.url.query.<P> == "bar"        Extract specific query parameter ``P`` from remap ``From URL``
+cond %{HEADER:X} =fo              {in,out}bound.{req,resp}.X == "fo" Context sensitive header conditions
+cond %{ID:UNIQUE} =...            id.UNIQUE == "..."                 (:ref:`Unique/request/process<admin-plugins-header-rewrite-id>`) transaction identifier
+cond %{INTERNAL-TRANSACTION}      internal()                         Check if transaction is internally generated
+cond %{INBOUND:CLIENT-CERT:<X>}   inbound.client-cert.<X>            Access the mTLS / client certificate details, on the inbound (client) connection
+cond %{INBOUND:SERVER-CERT:<X>}   inbound.client-cert.<X>            Access the server (handshake) certificate details, on the inbound connection
+cond %{IP:CLIENT} ="..."          inbound.ip == "..."                Client's IP address. Same as ``inbound.REMOTE_ADDR``
+cond %{IP:INBOUND} ="..."         inbound.server == "..."            ATS's IP address to which the client connected
+cond %{IP:SERVER} ="..."          outbound.ip == "..."               Upstream (next-hop) server IP address
+cond %{IP:OUTBOUND} ="..."        outbound.server == "..."           ATS's outbound IP address, connecting upstream
+cond %{LAST-CAPTURE:<#>} ="..."   capture.<#> == "..."               Last capture group from regex match (range: `0-9`)
+cond %{METHOD} =GET               inbound.method == "GET"            HTTP method match
+cond %{NEXT-HOP:<C>} ="bar"       nexthop.<C> == "bar"               Next-hop destination, ``<C>`` is ``host``, ``port``, or ``strategy``
+cond %{NOW:<U>} ="..."            now.<U> == "..."                   Current date/time in format,  <:ref:`U<admin-plugins-header-rewrite-geo>`> selects time unit
+cond %{OUTBOUND:CLIENT-CERT:<X>}  outbound.client-cert.<X>           Access the mTLS / client certificate details, on the outbound (upstream) connection
+cond %{OUTbOUND:SERVER-CERT:<X>}  outbound.client-cert.<X>           Access the server (handshake) certificate details, on the outbound connection
+cond %{RANDOM:500} >250           random(500) > 250                  Random number between 0 and the specified range
+cond %{SERVER-HEADER:X} =foo      outbound.req.X == "foo"            Server request header (sent to origin)
+cond %{SERVER-URL:<C>} =bar       outbound.url.<C> == "bar"          Server request URL component (sent to origin)
+cond %{SSN-TXN-COUNT} >10         ssn-txn-count() > 10               Number of transactions on server connection
+cond %{TO-URL:<C>} =bar           to.url.<C> == "bar"                Remap ``To URL`` component match, <:ref:`C<admin-plugins-header-rewrite-url-parts>`> is ``host`` etc.
+cond %{TO-URL:QUERY:<P>} =bar     to.url.query.<P> == "bar"          Extract specific query parameter ``P`` from remap ``To URL``
+cond %{TXN-COUNT} >10             txn-count() > 10                   Number of transactions on client connection
+cond %{URL:<C> =bar               {in,out}bound.url.<C> == "bar"     Context aware URL component match
+cond %{GEO:<C>} =bar              geo.<C> == "bar"                   IP to Geo mapping. <:ref:`C<admin-plugins-header-rewrite-geo>`> is country, asn, etc.
+cond %{STATUS} =200               inbound.status ==200               Origin http status code
+cond %{TCP-INFO}                  tcp.info                           TCP Info struct field values
+cond %{HTTP-CNTL:<C>}             http.cntl.<C>                      Check the state of the <:ref:`C<admin-plugins-header-rewrite-set-http-cntl>`> HTTP control
+cond %{INBOUND:<C>}               {in,out}bound.conn.<c>             inbound (:ref:`client, user agent<admin-plugins-header-rewrite-inbound>`) connection to ATS
+================================= ================================== ================================================
+
+.. note::
+    **Header and URL prefix summary:**
+
+    - ``inbound.req.<header>`` → ``CLIENT-HEADER`` - Headers from the client request
+    - ``outbound.req.<header>`` → ``SERVER-HEADER`` - Headers in the request sent to origin
+    - ``inbound.url.<part>`` → ``CLIENT-URL`` - URL from the original client request
+    - ``outbound.url.<part>`` → ``SERVER-URL`` - URL in the request sent to origin (after remapping)
+    - ``nexthop.<field>`` → ``NEXT-HOP`` - Network destination info (host, port, strategy)
+
+    The distinction between ``outbound.url`` and ``nexthop`` is important:
+
+    - ``outbound.url`` is the HTTP request URL (what's in the request line/Host header)
+    - ``nexthop`` is the network destination (where ATS connects, may be a parent proxy)
+
+The conditions operating on headers and URLs are also available as operators. E.g.:
+
+.. code-block:: none
+
+   if inbound.req.X == "foo" {
+     inbound.req.X = "bar";
+   }
+
+In general, where it makes sense for the condition to be used as an operator, it is available as an operator.
+The rule of thumb is the conditional is an operator if the value is mutable.
+
+.. note::
+    Each parenthesis group in a conditional will produce a GROUP. Thus, the original header_rewrite
+    config will be more readable with ``if ...`` than `if (...)`.
+
+Operators
+---------
+
+Operators in ``header_rewrite`` map to HRW4U as a mix of assignments and function calls.
+The preference is the assignment style when appropriate.
+
+============================= ================================= ================================================
+Header Rewrite                HRW4U                             Description
+============================= ================================= ================================================
+add-header X-bar foo          inbound.{req,resp}.x-Bar += "bar" Add the header to (possibly) an existing header
+counter my_stat               counter("my_stat")                Increment internal counter
+rm-client-header X-Foo        inbound.req.X-Foo = ""            Remove a client request header
+rm-cookie foo                 {in,out}bound.cookie.foo = ""     Remove the cookie named foo
+rm-destination <C>            inbound.url.<C> = ""              Remove an URL component, ``C`` is path, query etc.
+rm-header X-Foo               {in,out}bound.req.X-Foo = ""      Context sensitive header removal
+rm-destination QUERY ...      remove_query("foo,bar")           Remove specified query keys
+rm-destination QUERY ... [I]  keep_query("foo,bar")             Keep only specified query keys
+run-plugin foo.so "args"      run-plugin("foo.so", "arg1", ...) Run an external remap plugin
+set-body "foo"                inbound.resp.body = "foo"         Set the response body
+set-body-from "\https://..."  set-body-from("\https://...")     Set the response body from a URL
+set-body-from-file "/tmp/b"   set-body-from-file("/tmp/b")      Set the response body from a local file
+set-config <name> 12          set-config("name", 17)            Set a configuration variable to a value
+set-conn-dscp 8               inbound.conn.dscp = 8             Set the DSCP value for the connection
+set-conn-mark 17              inbound.conn.mark = 17            Set the MARK value for the connection
+set-cookie foo bar            {in,out}bound.cookie.foo = "bar"  Set a request/response cookie named foo
+set-destination <C> bar       {in,out}bound.url.<C> = "bar"     Set a URL component, <:ref:`C<admin-plugins-header-rewrite-url-parts>`> is path, query etc.
+set-header X-Bar foo          inbound.{req,resp}.X-Bar = "foo"  Assign a client request/origin response header
+set-plugin-cntl <C> <T>       set-plugin-cntl(<C>) = <T>        Set the plugin control <C> to <T>, see <:ref:`C<admin-plugins-header-rewrite-plugin-cntl>`>
+set-redirect <Code> <URL>     set-redirect(302, "\https://...") Set a redirect response
+set-status 404                http.status = 404                 Set the response status code
+set-status-reason "No"        http.status.reason = "no"         Set the response status reason
+set-http-cntl                 http.cntl.<C> = bool              Turn on/off <:ref:`C<admin-plugins-header-rewrite-set-http-cntl>`> controllers
+============================= ================================= ================================================
+
+Adding Headers with the += Operator
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+HRW4U provides a special ``+=`` operator for adding headers::
+
+    REMAP {
+        # Using += to add a header (maps to add-header)
+        inbound.req.X-Custom-Header += "new-value";
+    }
+
+The ``+=`` operator only works with the following pre-defined symbols:
+
+- ``inbound.req.<header>`` - Client request headers (maps to ``CLIENT-HEADER``)
+- ``inbound.resp.<header>`` - Origin response headers
+- ``outbound.req.<header>`` - Server request headers (maps to ``SERVER-HEADER``)
+- ``outbound.resp.<header>`` - Outbound response headers (context-restricted)
+
+.. note::
+    The ``+=`` operator differs from ``=`` in that ``=`` will replace/set the header value (mapping to
+    ``set-header``), while ``+=`` will add a new instance of the header (mapping to ``add-header``).
+    This is important for headers that can have multiple values, such as ``Set-Cookie`` or custom headers.
+
+In addition to those operators above, HRW4U supports the following special operators without arguments:
+
+================= ============================ ================================
+Header Rewrite    HRW4U Syntax                 Description
+================= ============================ ================================
+no-op             no-op();                     Explicit no-op statement
+no-op [L]         break;                       Exit current section early (last rule)
+set-debug         set-debug()                  Enables ATS txn debug
+skip-remap        skip-remap()                 Skip remap processing (open proxy)
+================= ============================ ================================
+
+String concatenations
+---------------------
+
+You can concatenate values using strings, condition values, and variable expansions
+on the same line in operators. For instance, ``outbound.req.CustomHeader = "Hello from {inbound.ip}:{inbound.port}"``.
+As a result, the set-redirect's ``[QSA]`` flag would be implemented as
+``set-redirect(302, "https://...?{inbound.url.query}")``.
+Note the presence of the ``?`` -- the url.query doesn't include it.
+
+
+Semantics
+=========
+
+Sections
+--------
+
+All HRW4U sections start with a label such as `REMAP`, `READ_RESPONSE`, etc. These map
+directly to `header_rewrite` hook conditions:
+
+=============================== ======================== ================================
+Header Rewrite Hook             HRW4U Section Name       Description
+=============================== ======================== ================================
+TXN_START_HOOK                  TXN_START                Start of transaction
+READ_REQUEST_PRE_REMAP_HOOK     PRE_REMAP                Before remap processing
+REMAP_PSEUDO_HOOK               REMAP                    Default remap hook
+READ_REQUEST_HDR_HOOK           READ_REQUEST             After reading request from client
+SEND_REQUEST_HDR_HOOK           SEND_REQUEST             Before contacting origin
+READ_RESPONSE_HDR_HOOK          READ_RESPONSE            After receiving response from origin
+SEND_RESPONSE_HDR_HOOK          SEND_RESPONSE            Before sending response to client
+TXN_CLOSE_HOOK                  TXN_CLOSE                End of transaction
+=============================== ======================== ================================
+
+A special section `VARS` is used to declare variables. There is no equivalent in
+`header_rewrite`, where you managed the variables manually. Similarly,
+`SESSION_VARS` declares session-scoped variables that persist across all
+transactions on the same client connection (session).
+
+Variables and State Slots
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Each variable type has a limited number of slots available:
+
+- ``bool`` - 16 slots (0-15)
+- ``int8`` - 4 slots (0-3)
+- ``int16`` - 1 slot (0)
+
+These limits apply independently to both ``VARS`` (transaction-scoped) and
+``SESSION_VARS`` (session-scoped) sections. For example, you can have 16 bool
+transaction variables *and* 16 bool session variables.
+
+By default, slots are assigned automatically in declaration order. You can explicitly assign
+a slot number using the ``@`` syntax::
+
+    VARS {
+        priority: bool @7;      # Explicitly use slot 7
+        active: bool;           # Auto-assigned to slot 0
+        config: bool @12;       # Explicitly use slot 12
+        counter: int8 @2;       # Explicitly use int8 slot 2
+    }
+
+    SESSION_VARS {
+        is_suspicious: bool;    # Session-scoped, persists across requests
+        penalty_level: int8;    # Session-scoped 8-bit integer
+    }
+
+Transaction variables (``VARS``) are reset for each new HTTP transaction, while
+session variables (``SESSION_VARS``) persist for the lifetime of the client
+connection. Session variables are useful for tracking state across keep-alive
+requests, such as marking a connection as suspicious after the first bad request.
+
+Explicit slot assignment is useful when you need predictable slot numbers across configurations
+or when integrating with existing header_rewrite rules that reference specific slot numbers. In
+addition, a remap configuration can use ``@PPARAM`` to set one of these slot variables explicitly
+as part of the configuration.
+
+Procedures
+----------
+
+Procedures allow you to define reusable blocks of rules that can be called from
+multiple sections or files. A procedure is a named, parameterized block of
+conditions and operators that expands inline at the call site.
+
+Defining Procedures
+^^^^^^^^^^^^^^^^^^^
+
+Procedures are declared with the ``procedure`` keyword and must use a qualified
+name with the ``::`` namespace separator::
+
+    procedure local::add-debug-header($tag) {
+        inbound.req.X-Debug = "$tag";
+    }
+
+The namespace prefix (``local::`` in this example) groups related procedures.
+Parameters are prefixed with ``$`` and substituted at the call site.
+
+Procedures may be defined in the same file as the sections that use them, or in
+separate ``.hrw4u`` files loaded with the ``use`` directive. Procedure declarations
+must appear before any section blocks.
+
+Using Procedures
+^^^^^^^^^^^^^^^^
+
+Call a procedure from any section by its qualified name::
+
+    procedure local::set-cache-headers($ttl) {
+        outbound.resp.Cache-Control = "max-age=$ttl";
+        outbound.resp.X-Cache-TTL = "$ttl";
+    }
+
+    READ_RESPONSE {
+        local::set-cache-headers("3600");
+    }
+
+    SEND_RESPONSE {
+        local::set-cache-headers("0");
+    }
+
+The procedure body is expanded inline — each section gets its own copy with
+the correct hook context.
+
+Procedure Files and ``use``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For larger projects, procedures can be organized into separate files and loaded
+with the ``use`` directive. The ``use`` spec maps to a file path: ``use Acme::Common``
+loads ``Acme/Common.hrw4u`` from the procedures search path.
+
+The ``--procedures-path`` flag specifies where to search::
+
+    hrw4u --procedures-path /etc/trafficserver/procedures rules.hrw4u
+
+Given this file structure::
+
+    /etc/trafficserver/procedures/
+    └── Acme/
+        └── Common.hrw4u
+
+Where ``Acme/Common.hrw4u`` contains::
+
+    procedure Acme::add-security-headers() {
+        outbound.resp.X-Frame-Options = "DENY";
+        outbound.resp.X-Content-Type-Options = "nosniff";
+    }
+
+Then in ``rules.hrw4u``::
+
+    use Acme::Common
+
+    READ_RESPONSE {
+        Acme::add-security-headers();
+    }
+
+The ``use`` directive enforces namespace consistency: all procedures in a file
+loaded via ``use Acme::Common`` must use the ``Acme::`` namespace prefix.
+
+Parameters and Defaults
+^^^^^^^^^^^^^^^^^^^^^^^
+
+Procedures support positional parameters with optional defaults::
+
+    procedure local::tag-request($env, $version = "v1") {
+        inbound.req.X-Env = "$env";
+        inbound.req.X-Version = "$version";
+    }
+
+    REMAP {
+        local::tag-request("prod");
+        # $version defaults to "v1"
+    }
+
+Groups
+------
+
+`header_rewrite` uses `GROUP` and `GROUP:END`, whereas HRW4U uses `(...)` expressions:
+
+.. code-block:: none
+
+   # header_rewrite
+   cond %{GROUP}
+     cond A [AND]
+     cond B
+   cond %{GROUP:END}
+
+   # HRW4U
+   if (A && B) {
+     ...
+   }
+
+Control Flow
+------------
+
+HRW4U conditionals use ``if``, ``elif``, and ``else`` blocks. Each branch
+takes a condition expression followed by a ``{ ... }`` body of statements:
+
+.. code-block:: none
+
+   if condition {
+     statement;
+   } elif other-condition {
+     statement;
+   } else {
+     statement;
+   }
+
+``elif`` and ``else`` are optional and can be chained. Branches can be nested
+to arbitrary depth:
+
+.. code-block:: none
+
+   REMAP {
+     if inbound.status > 399 {
+       if inbound.status < 500 {
+         if inbound.status == 404 {
+           inbound.resp.X-Error = "not-found";
+         } elif inbound.status == 403 {
+           inbound.resp.X-Error = "forbidden";
+         }
+       } else {
+         inbound.resp.X-Error = "server-error";
+       }
+     }
+   }
+
+The ``break;`` statement exits the current section immediately, skipping any
+remaining statements and branches:
+
+.. code-block:: none
+
+   REMAP {
+     if inbound.req.X-Internal != "1" {
+       break;
+     }
+     # Only reached for internal requests
+     inbound.req.X-Debug = "on";
+   }
+
+Condition operators
+-------------------
+
+HRW4U supports the following condition operators, which are used in ``if`` expressions:
+
+==================== ========================= ============================================
+Operator             HRW4U Syntax              Description
+==================== ========================= ============================================
+==                   foo == "bar"              String or numeric equality
+!=                   foo != "bar"              String or numeric inequality
+>                    foo > 100                 Numeric greater than
+<                    foo < 100                 Numeric less than
+~                    foo ~ /pattern/           Regular expression match
+!~                   foo !~ /pattern/          Regular expression non-match
+in [...]             foo in ["a", "b"]         Membership in a list of values
+!in [...]            foo !in ["a", "b"]        Negated membership in a list of values
+==================== ========================= ============================================
+
+Modifiers
+---------
+
+HRW4U supports the following modifiers for the string conditions:
+
+============= ===============================================
+Modifier      Description
+============= ===============================================
+EXT           Match  extension after last dot (e.g. in a path)
+MID           Match substring
+SUF           Match the end of a string
+PRE           Match the beginning of a string
+NOCASE        Case insensitive match
+NORM          Normalize the value first, currently percent-decoding
+============= ===============================================
+
+These can be used with both sets and equality checks, using the ``with`` keyword:
+
+.. code-block:: none
+
+   if inbound.req.X == "foo" with MID,NOCASE {
+     ...
+   }
+
+   if inbound.url.path in ["mp3", "mp4"] with EXT,NOCASE {
+     ...
+   }
+
+``NORM`` acts on the value rather than on the comparison, so it also applies to
+regular expression matches, and it is the one modifier allowed on an interpolated
+value:
+
+.. code-block:: none
+
+   if inbound.url.path ~ /private-/ with NORM {
+     ...
+   }
+
+   inbound.req.X-Decoded-Path = "{inbound.url.path with NORM}";
+
+Running and Debugging
+=====================
+
+To run HRW4U, just install and run the hrw4u compiler:
+
+.. code-block:: none
+
+   hrw4u /path/to/rules.hrw4u
+
+Run with `--debug all` to trace:
+
+- Lexer, parser, visitor behavior
+- Condition evaluations
+- State and output emission
+
+Sandbox Policy Enforcement
+==========================
+
+Organizations deploying HRW4U across teams can restrict which language features
+are permitted using a sandbox configuration file. Features can be **denied**
+(compilation fails with an error) or **warned** (compilation succeeds but a
+warning is emitted). Both modes support the same feature categories.
+
+Pass the sandbox file with ``--sandbox``:
+
+.. code-block:: none
+
+   hrw4u --sandbox /etc/trafficserver/hrw4u-sandbox.yaml rules.hrw4u
+
+The sandbox file is YAML with a single top-level ``sandbox`` key. A JSON
+Schema for editor validation and autocomplete is provided at
+``tools/hrw4u/schema/sandbox.schema.json``.
+
+.. code-block:: yaml
+
+   sandbox:
+     message: |      # optional: shown once after all errors/warnings
+       ...
+     deny:
+       sections:    [ ... ]   # section names, e.g. TXN_START
+       functions:   [ ... ]   # function names, e.g. run-plugin
+       conditions:  [ ... ]   # condition keys, e.g. geo.
+       operators:   [ ... ]   # operator keys, e.g. inbound.conn.dscp
+       language:    [ ... ]   # break, variables, in, else, elif
+       modifiers:   [ ... ]   # condition modifiers, e.g. NOT, NOCASE
+     warn:
+       functions:   [ ... ]   # same categories as deny
+       conditions:  [ ... ]
+
+All lists are optional. If ``--sandbox`` is omitted, all features are permitted.
+When a sandbox file is provided it must contain a top-level ``sandbox:`` key;
+an empty policy can be expressed as ``sandbox: {}``.
+A feature may not appear in both ``deny`` and ``warn``.
+
+Denied Sections
+---------------
+
+The ``sections`` list accepts any of the HRW4U section names listed in the
+`Sections`_ table, plus ``VARS`` and ``SESSION_VARS`` to deny the variable
+declaration blocks. A denied section causes the entire block to be rejected;
+the body is not validated.
+
+Functions
+---------
+
+The ``functions`` list accepts any of the function names used in HRW4U source,
+both statement functions and the functions that produce a value in an
+expression, including a call written inside a string interpolation such as
+``"{txn-count()}"``. The complete set of deniable functions is:
+
+====================== =============================================
+Function               Description
+====================== =============================================
+``access``             File accessibility check
+``add-header``         Add a header (``+=`` operator equivalent)
+``cache``              Cache lookup result status
+``cidr``               Masked client IP address match
+``counter``            Increment an ATS statistics counter
+``internal``           Internally generated transaction check
+``keep_query``         Keep only specified query parameters
+``no-op``              Explicit no-op statement
+``random``             Random number in the given range
+``remove_query``       Remove specified query parameters
+``run-plugin``         Invoke an external remap plugin
+``set-body``           Set the response body
+``set-body-from``      Set response body from a URL
+``set-body-from-file`` Set response body from a local file
+``set-config``         Override an ATS configuration variable
+``set-debug``          Enable per-transaction ATS debug logging
+``set-plugin-cntl``    Set a plugin control flag
+``set-redirect``       Issue an HTTP redirect response
+``skip-remap``         Skip remap processing (open proxy)
+``ssn-txn-count``      Transaction count on server connection
+``txn-count``          Transaction count on client connection
+====================== =============================================
+
+Conditions and Operators
+------------------------
+
+The ``conditions`` and ``operators`` lists use the same dot-notation keys shown
+in the `Conditions`_ and `Operators`_ tables above (e.g. ``inbound.req.``,
+``geo.``, ``outbound.conn.``). A condition read inside a string interpolation,
+such as ``"{inbound.method}"``, is checked the same way.
+
+Entries ending with ``.`` use **prefix matching** — ``geo.`` denies all
+``geo.*`` lookups (``geo.city``, ``geo.ASN``, etc.). Entries without a trailing
+``.`` are matched exactly, which allows fine-grained control over sub-values:
+
+.. code-block:: yaml
+
+   sandbox:
+     deny:
+       operators:
+         - http.cntl.SKIP_REMAP        # deny just this sub-value
+       conditions:
+         - geo.ASN                      # deny ASN lookups specifically
+     warn:
+       operators:
+         - http.cntl.                   # warn on all other http.cntl.* usage
+       conditions:
+         - geo.                         # warn on remaining geo.* lookups
+
+Prefix entries and exact entries can be combined across ``deny`` and ``warn``
+to create graduated policies — deny the dangerous sub-values while warning on
+the rest.
+
+Language Constructs
+-------------------
+
+The ``language`` list accepts a fixed set of constructs:
+
+================ ===================================================
+Construct        What it controls
+================ ===================================================
+``break``        The ``break;`` statement (early section exit)
+``variables``    The entire ``VARS`` and ``SESSION_VARS`` section and all variable usage
+``else``         The ``else { ... }`` branch of conditionals
+``elif``         The ``elif ... { ... }`` branch of conditionals
+``in``           Set membership: the ``[...]`` value form and
+                 the ``{...}`` IP range form, negated or not
+================ ===================================================
+
+Condition Modifiers
+-------------------
+
+The ``modifiers`` list accepts ``AND``, ``OR``, ``NOT``, ``NOCASE``, ``PRE``,
+``SUF``, ``EXT``, ``MID``, ``I``, ``L`` and ``QSA``. Entries match the modifier
+however it is written, not only the explicit ``with`` form: ``AND`` also covers
+``&&``, ``OR`` also covers ``||``, and ``NOT`` also covers ``!``, ``!=``,
+``!~`` and ``!in``.
+
+Negation that the compiler introduces on its own is not matched. A bare header
+test such as ``if inbound.req.X-Foo`` compiles to
+``cond %{CLIENT-HEADER:X-Foo} ="" [NOT]``, and denying ``NOT`` does not reject
+it — the policy governs what the source writes.
+
+Output
+------
+
+When a denied feature is used the error output looks like:
+
+.. code-block:: none
+
+   rules.hrw4u:3:4: error: 'set-debug' is denied by sandbox policy (function)
+
+   This feature is restricted by CDN-SRE policy.
+   Contact cdn-sre@example.com for exceptions.
+
+When a warned feature is used the compiler emits a warning but succeeds:
+
+.. code-block:: none
+
+   rules.hrw4u:5:4: warning: 'set-config' is warned by sandbox policy (function)
+
+   This feature is restricted by CDN-SRE policy.
+   Contact cdn-sre@example.com for exceptions.
+
+The sandbox message is shown once at the end of the output, regardless of how
+many denial errors or warnings were found. Warnings alone do not cause a
+non-zero exit code.
+
+Example Configuration
+---------------------
+
+A typical policy for a CDN team where remap plugin authors should not have
+access to low-level or dangerous features, with transitional warnings for
+features being phased out:
+
+.. code-block:: yaml
+
+   sandbox:
+     message: |
+       This feature is not permitted by CDN-SRE policy.
+       To request an exception, file a ticket at https://help.example.com/cdn
+
+     deny:
+       # Disallow hooks that run outside the normal remap context
+       sections:
+         - TXN_START
+         - TXN_CLOSE
+         - PRE_REMAP
+
+       # Disallow functions that affect ATS internals or load arbitrary code
+       functions:
+         - run-plugin
+         - skip-remap
+
+       # Deny a specific dangerous sub-value
+       operators:
+         - http.cntl.SKIP_REMAP
+
+     warn:
+       # These functions will be denied in a future release
+       functions:
+         - set-debug
+         - set-config
+
+       # Warn on all remaining http.cntl usage
+       operators:
+         - http.cntl.
+
+Examples
+========
+
+The examples section in :doc:`Header Rewrite <../plugins/header_rewrite.en>` are translated below
+into HRW4U with their original descriptions. These are also part of the testing suite.
+
+Remove Origin Authentication Headers
+------------------------------------
+
+The following ruleset removes any authentication headers from the origin
+response before caching it or returning it to the client. This is accomplished
+by setting the hook context and then removing the cookie and basic
+authentication headers.::
+
+   READ_RESPONSE {
+       outbound.resp.Set-Cookie = "";
+       outbound.resp.WWW-Authenticate = "";
+   }
+
+Count Teapots
+-------------
+
+Maintains a counter statistic, which is incremented every time an origin server
+has decided to be funny by returning HTTP 418::
+
+   SEND_RESPONSE {
+       if outbound.status == 418 {
+           counter("plugin.header_rewrite.teapots");
+       }
+   }
+
+Normalize Statuses
+------------------
+
+For client-facing purposes only (because we set the hook context to just prior
+to delivering the response back to the client, but after all processing and
+possible cache updates have occurred), replaces all 4xx HTTP status codes from
+the origin server with ``404``::
+
+   SEND_RESPONSE {
+       if inbound.status > 399 && inbound.status < 500 {
+           inbound.status = 404;
+       }
+   }
+
+Remove Cache Control to Origins
+-------------------------------
+
+Removes cache control related headers from requests before sending them to an
+origin server::
+
+   SEND_REQUEST {
+      outbound.req.Cache-Control = "";
+      outbound.req.Pragma = "";
+   }
+
+Enable Debugging Per-Request
+----------------------------
+
+Turns on |TS| debugging statements for a transaction, but only when a special
+header is present in the client request::
+
+   READ_REQUEST {
+      if inbound.req.X-Debug == "supersekret" {
+          set-debug();
+      }
+   }
+
+Remove Internal Headers
+-----------------------
+
+Removes special internal/development headers from origin responses, unless the
+client request included a special debug header::
+
+   READ_RESPONSE {
+      if inbound.req.X-Debug != "keep" {
+          outbound.resp.X-Debug-Foo = "";
+          outbound.resp.X-Debug-Bar = "";
+      }
+   }
+
+Return Original Method in Response Header
+-----------------------------------------
+
+This rule copies the original HTTP method that was used by the client into a
+custom response header::
+
+   SEND_RESPONSE {
+       inbound.resp.X-Original-Method = "{inbound.method}";
+   }
+
+Useless Example From Purpose
+----------------------------
+
+Even that useless example from Purpose in the beginning of this document is
+possible to accomplish::
+
+   READ_RESPONSE {
+       if inbound.url.port == 8090 && inbound.method == "HEAD" &&
+         inbound.req.Accept-Language !~ /es-py/ && outbound.status == 304 ||
+         random(500) > 200 {
+       outbound.status = 403;
+       }
+   }
+
+Add Cache Control Headers Based on Origin Path
+----------------------------------------------
+
+This rule adds cache control headers to CDN responses based on matching the origin
+path. One provides a max age and the other provides a "no-cache" statement to
+two different file paths. ::
+
+   READ_RESPONSE {
+      if inbound.url.path ~ /examplepath1/ {
+          outbound.resp.Cache-Control = "max-age=3600";
+          break;
+      }
+   }
+
+   READ_RESPONSE {
+      if inbound.url.path ~ /examplepath2\/examplepath3\/.*/ {
+          outbound.resp.Cache-Control = "no-cache";
+          break;
+      }
+   }
+
+Redirect when the Origin Server Times Out
+-----------------------------------------
+
+This rule sends a 302 redirect to the client with the requested URI's Path and
+Query string when the Origin server times out or the connection is refused::
+
+   READ_RESPONSE {
+       if outbound.status in [502, 504] {
+           set-redirect(302, "http://different_origin.example.com/{inbound.url.path}?{inbound.url.query}");
+       }
+   }
+
+Flag Unrecognized ASNs
+----------------------
+
+This rule flags requests whose origin ASN is not in a known allowlist,
+using the negated membership operator ``!in``::
+
+   REMAP {
+       if geo.ASN !in ["64496", "64511"] {
+           inbound.req.X-Known-ASN = "false";
+       }
+   }
+
+Restrict to Internal Networks
+-----------------------------
+
+This rule rejects requests that do not originate from known internal
+IP ranges, using ``!in`` with an IP range::
+
+   REMAP {
+       if inbound.ip !in {192.168.0.0/16, 10.0.0.0/8} {
+           http.status = 403;
+       }
+   }
+
+Check for existence of a header
+-------------------------------
+
+This rule will modify the ``Cache-Control`` header, but only if it is not
+already set to some value, and the status code is a 2xx::
+
+   READ_RESPONSE {
+      if outbound.resp.Cache-Control == "" && outbound.status > 199 && outbound.status < 300 {
+          outbound.resp.Cache-Control = "max-age=600, public";
+       }
+   }
+
+Add HSTS
+--------
+
+Add the HTTP Strict Transport Security (HSTS) header if it does not exist and the inbound connection is TLS::
+
+   READ_RESPONSE {
+      if outbound.resp.Strict-Transport-Security == "" && inbound.conn.TLS != "" {
+          outbound.resp.Strict-Transport-Security  = "max-age=63072000; includeSubDomains; preload";
+      }
+   }
+
+This is mostly used by being attached to a remap rule that maps to a host known to support TLS. If
+the parallel `OUTBOUND` supported is added then this could be done by checking for inbound TLS both
+outbound TLS in the `SEND_REQUEST_HDR_HOOK`. However this technique may be used for a non-TLS
+upstream if the goal is to require the user agent to connect to |TS| over TLS.
+
+Close Connections for draining
+------------------------------
+
+When a healthcheck file is missing (in this example, ``/path/to/the/healthcheck/file.txt``),
+add a ``Connection: close`` header to have clients drop their connection,
+allowing the server to drain. Although the Connection header is only available on
+HTTP/1.1 in terms of protocols, this also works for HTTP/2 connections
+because the header triggers HTTP/2 graceful shutdown. This should be a global
+configuration.::
+
+   SEND_RESPONSE {
+      if !access("/path/to/the/healthcheck/file.txt") {
+          inbound.resp.Connection = "close";
+      }
+   }
+
+Use Internal header to pass data
+--------------------------------
+
+In |TS|, a header that begins with ``@`` does not leave |TS|. Thus, you can use
+this to pass data to different |TS| systems. For instance, a series of remap rules
+could each be tagged with a consistent name to make finding logs easier.::
+
+   REMAP {
+       inbound.req.@PropertyName = "someproperty";
+   }
+
+(Then in :file:`logging.yaml`, log ``%<{@PropertyName}cqh>``)
+
+.. note::
+    Remember using the variables in ``HRW4u`` can often be more efficient than using
+    these internal headers.
+
+Remove Client Query Parameters
+------------------------------------
+
+The following ruleset removes any query parameters set by the client.::
+
+   REMAP {
+       inbound.url.query = "";
+   }
+
+Remove only a few select query parameters::
+
+   REMAP {
+       remove_query("foo,bar");
+   }
+
+Keep only a few select query parameters -- removing the rest::
+
+   REMAP {
+       keep_query("foo,bar");
+   }
+
+Mimic X-Debug Plugin's X-Cache Header
+-------------------------------------
+
+This rule can mimic X-Debug plugin's ``X-Cache`` header by accumulating
+the ``CACHE`` condition results to a header.::
+
+   SEND_RESPONSE {
+       if inbound.resp.All-Cache != "" {
+           inbound.resp.All-Cache = "{inbound.resp.All-Cache}, {cache()}";
+       }
+       if inbound.resp.All-Cache == "" {
+           inbound.resp.All-Cache = "{cache()}";
+       }
+   }
+
+And finally, a  much more efficient solution, using the ``else`` clause.::
+
+   SEND_RESPONSE {
+       if inbound.resp.All-Cache == "" {
+           inbound.resp.All-Cache = "{cache()}";
+       } else {
+           inbound.resp.All-Cache = "{inbound.resp.All-Cache}, {cache()}";
+       }
+   }
+
+Add Identifier from Server with Data
+------------------------------------
+
+This rule adds a unique identifier from the server if the data is fresh from
+the cache or if the identifier has not been generated yet. This will inform
+the client where the requested data was served from.::
+
+   SEND_RESPONSE {
+       if inbound.resp.ATS-SRVR-UUID == "" || cache() == "hit-fresh" {
+           inbound.resp.ATS-SRVR-UUID = "{id(UNIQUE)}";
+       }
+   }
+
+Apply rate limiting for some select requests
+--------------------------------------------
+
+This rule will conditionally, based on the client request headers, apply rate
+limiting to the request.::
+
+   REMAP {
+       if inbound.req.Some-Special-Header == "yes" {
+           run-plugin("rate_limit.so", "--limit=300", "--error=429");
+       }
+   }
+
+Route Based on Query Parameter Value
+------------------------------------
+
+This rule extracts a specific query parameter value and uses it to make routing
+decisions or set custom headers. The ``query.<param_name>`` syntax allows
+extracting individual query parameter values::
+
+   REMAP {
+       if inbound.url.query.version == "v2" {
+           inbound.req.X-API-Version = "v2";
+       }
+   }
+
+   SEND_RESPONSE {
+       inbound.resp.X-Debug-Param = "{inbound.url.query.debug}";
+   }
+
+.. note::
+   Query parameter names are case-sensitive and matched as-is without URL
+   decoding. For example, ``inbound.url.query.my%20param`` matches the literal
+   parameter name ``my%20param``, not ``my param``.
+
+References
+==========
+
+- :ref:`admin-plugins-header-rewrite`

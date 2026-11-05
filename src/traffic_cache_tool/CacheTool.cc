@@ -2,7 +2,7 @@
 
     Main program file for Cache Tool.
 
-    @section license License
+    @par License
 
     Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
@@ -21,6 +21,9 @@
     limitations under the License.
  */
 
+#include <cstdio>
+
+#include <algorithm>
 #include <iostream>
 #include <list>
 #include <memory>
@@ -38,33 +41,35 @@
 
 #include "tscore/ink_memory.h"
 #include "tscore/ink_file.h"
-#include "tscore/BufferWriter.h"
 #include "tscore/CryptoHash.h"
 #include "tscore/ArgParser.h"
+#include "tscore/Demangle.h"
 #include <thread>
 
 #include "CacheDefs.h"
 #include "CacheScan.h"
 
+using swoc::Errata;
+using swoc::MemSpan;
+using ts::make_errno_code;
+
 using ts::Bytes;
-using ts::Megabytes;
+using ts::CacheDirEntry;
 using ts::CacheStoreBlocks;
 using ts::CacheStripeBlocks;
-using ts::StripeMeta;
 using ts::CacheStripeDescriptor;
-using ts::Errata;
-using ts::CacheDirEntry;
-using ts::MemSpan;
 using ts::Doc;
+using ts::Megabytes;
+using ts::StripeMeta;
 
 enum { SILENT = 0, NORMAL, VERBOSE } Verbosity = NORMAL;
-extern int cache_config_min_average_object_size;
+extern int              cache_config_min_average_object_size;
 extern CacheStoreBlocks Vol_hash_alloc_size;
-extern int OPEN_RW_FLAG;
-const Bytes ts::CacheSpan::OFFSET{CacheStoreBlocks{1}};
-ts::file::path SpanFile;
-ts::file::path VolumeFile;
-ts::ArgParser parser;
+extern int              OPEN_RW_FLAG;
+const Bytes             ts::CacheSpan::OFFSET{CacheStoreBlocks{1}};
+swoc::file::path        SpanFile;
+swoc::file::path        VolumeFile;
+ts::ArgParser           parser;
 
 Errata err;
 
@@ -74,9 +79,9 @@ namespace ct
 /// A live volume.
 /// Volume data based on data from loaded spans.
 struct Volume {
-  int _idx;               ///< Volume index.
-  CacheStoreBlocks _size; ///< Amount of storage allocated.
-  std::vector<Stripe *> _stripes;
+  int                     _idx;  ///< Volume index.
+  CacheStoreBlocks        _size; ///< Amount of storage allocated.
+  std::vector<StripeSM *> _stripes;
 
   /// Remove all data related to @a span.
   //  void clearSpan(Span *span);
@@ -88,7 +93,7 @@ struct Volume {
 void
 Volume::clearSpan(Span* span)
 {
-  auto spot = std::remove_if(_stripes.begin(), _stripes.end(), [span,this](Stripe* stripe) { return stripe->_span == span ? ( this->_size -= stripe->_len , true ) : false; });
+  auto spot = std::remove_if(_stripes.begin(), _stripes.end(), [span,this](StripeSM* stripe) { return stripe->_span == span ? ( this->_size -= stripe->_len , true ) : false; });
   _stripes.erase(spot, _stripes.end());
 }
 #endif
@@ -102,14 +107,14 @@ Volume::clear()
 /* --------------------------------------------------------------------------------------- */
 /// Data parsed from the volume config file.
 struct VolumeConfig {
-  Errata load(ts::file::path const &path);
+  Errata load(swoc::file::path const &path);
 
   /// Data direct from the config file.
   struct Data {
-    int _idx     = 0;         ///< Volume index.
-    int _percent = 0;         ///< Size if specified as a percent.
-    Megabytes _size{0};       ///< Size if specified as an absolute.
-    CacheStripeBlocks _alloc; ///< Allocation size.
+    int               _idx     = 0; ///< Volume index.
+    int               _percent = 0; ///< Size if specified as a percent.
+    Megabytes         _size{0};     ///< Size if specified as an absolute.
+    CacheStripeBlocks _alloc;       ///< Allocation size.
 
     // Methods handy for parsing
     bool
@@ -183,10 +188,10 @@ VolumeConfig::convertToAbsolute(const ts::CacheStripeBlocks &n)
 struct Cache {
   ~Cache();
 
-  Errata loadSpan(ts::file::path const &path);
-  Errata loadSpanConfig(ts::file::path const &path);
-  Errata loadSpanDirect(ts::file::path const &path, int vol_idx = -1, const Bytes &size = Bytes(-1));
-  Errata loadURLs(ts::file::path const &path);
+  Errata loadSpan(swoc::file::path const &path);
+  Errata loadSpanConfig(swoc::file::path const &path);
+  Errata loadSpanDirect(swoc::file::path const &path, int vol_idx = -1, const Bytes &size = Bytes(-1));
+  Errata loadURLs(swoc::file::path const &path);
 
   Errata allocStripe(Span *span, int vol_idx, const CacheStripeBlocks &len);
 
@@ -196,18 +201,18 @@ struct Cache {
   void clearAllocation();
 
   enum class SpanDumpDepth { SPAN, STRIPE, DIRECTORY };
-  void dumpSpans(SpanDumpDepth depth);
-  void dumpVolumes();
-  void build_stripe_hash_table();
-  Stripe *key_to_stripe(CryptoHash *key, const char *hostname, int host_len);
+  void      dumpSpans(SpanDumpDepth depth);
+  void      dumpVolumes();
+  void      build_stripe_hash_table();
+  StripeSM *key_to_stripe(CryptoHash *key, const char *hostname, int host_len);
   //  ts::CacheStripeBlocks calcTotalSpanPhysicalSize();
   ts::CacheStripeBlocks calcTotalSpanConfiguredSize();
 
-  std::list<Span *> _spans;
-  std::map<int, Volume> _volumes;
-  std::vector<Stripe *> globalVec_stripe;
+  std::list<std::unique_ptr<Span>>   _spans;
+  std::map<int, Volume>              _volumes;
+  std::vector<StripeSM *>            globalVec_stripe;
   std::unordered_set<ts::CacheURL *> URLset;
-  unsigned short *stripes_hash_table;
+  ats_scoped_mem<unsigned short>     stripes_hash_table;
 };
 
 Errata
@@ -215,10 +220,10 @@ Cache::allocStripe(Span *span, int vol_idx, const CacheStripeBlocks &len)
 {
   auto rv = span->allocStripe(vol_idx, len);
   std::cout << span->_path.string() << ":" << vol_idx << std::endl;
-  if (rv.isOK()) {
+  if (rv.is_ok()) {
     _volumes[vol_idx]._stripes.push_back(rv);
   }
-  return rv.errata();
+  return std::move(rv.errata());
 }
 
 #if 0
@@ -233,7 +238,7 @@ Cache::clearSpan(Span* span)
 void
 Cache::clearAllocation()
 {
-  for (auto span : _spans) {
+  for (auto &span : _spans) {
     span->clear();
   }
   for (auto &item : _volumes) {
@@ -246,10 +251,10 @@ class VolumeAllocator
 {
   /// Working struct that tracks allocation information.
   struct V {
-    VolumeConfig::Data const &_config; ///< Configuration instance.
-    CacheStripeBlocks _size;           ///< Current actual size.
-    int64_t _deficit;                  ///< fractional deficit
-    int64_t _shares;                   ///< relative amount of free space to allocate
+    VolumeConfig::Data const &_config;  ///< Configuration instance.
+    CacheStripeBlocks         _size;    ///< Current actual size.
+    int64_t                   _deficit; ///< fractional deficit
+    int64_t                   _shares;  ///< relative amount of free space to allocate
 
     V(VolumeConfig::Data const &config, const CacheStripeBlocks &size, int64_t deficit = 0, int64_t shares = 0)
       : _config(config), _size(size), _deficit(deficit), _shares(shares)
@@ -268,17 +273,17 @@ class VolumeAllocator
   using AV = std::vector<V>;
   AV _av; ///< Working vector of volume data.
 
-  Cache _cache;       ///< Current state.
-  VolumeConfig _vols; ///< Configuration state.
+  Cache        _cache; ///< Current state.
+  VolumeConfig _vols;  ///< Configuration state.
 
 public:
   VolumeAllocator();
 
-  Errata load(ts::file::path const &spanFile, ts::file::path const &volumeFile);
+  Errata load(swoc::file::path const &spanFile, swoc::file::path const &volumeFile);
   Errata fillEmptySpans();
   Errata fillAllSpans();
-  Errata allocateSpan(ts::file::path const &spanFile);
-  void dumpVolumes();
+  Errata allocateSpan(swoc::file::path const &spanFile);
+  void   dumpVolumes();
 
 protected:
   /// Update the allocation for a span.
@@ -288,15 +293,15 @@ protected:
 VolumeAllocator::VolumeAllocator() = default;
 
 Errata
-VolumeAllocator::load(ts::file::path const &spanFile, ts::file::path const &volumeFile)
+VolumeAllocator::load(swoc::file::path const &spanFile, swoc::file::path const &volumeFile)
 {
   Errata zret;
 
   if (volumeFile.empty()) {
-    zret.push(0, 9, "Volume config file not set");
+    zret.note("Volume config file not set");
   }
   if (spanFile.empty()) {
-    zret.push(0, 9, "Span file not set");
+    zret.note("Span file not set");
   }
 
   if (zret) {
@@ -308,7 +313,7 @@ VolumeAllocator::load(ts::file::path const &spanFile, ts::file::path const &volu
         _vols.convertToAbsolute(total);
         for (auto &vol : _vols) {
           CacheStripeBlocks size(0);
-          auto spot = _cache._volumes.find(vol._idx);
+          auto              spot = _cache._volumes.find(vol._idx);
           if (spot != _cache._volumes.end()) {
             size = round_down(spot->second._size);
           }
@@ -331,7 +336,7 @@ VolumeAllocator::fillEmptySpans()
 {
   Errata zret;
   // Walk the spans, skipping ones that are not empty.
-  for (auto span : _cache._spans) {
+  for (auto &span : _cache._spans) {
     if (span->isEmpty()) {
       this->allocateFor(*span);
     }
@@ -340,14 +345,14 @@ VolumeAllocator::fillEmptySpans()
 }
 
 Errata
-VolumeAllocator::allocateSpan(ts::file::path const &input_file_path)
+VolumeAllocator::allocateSpan(swoc::file::path const &input_file_path)
 {
   Errata zret;
-  for (auto span : _cache._spans) {
+  for (auto &span : _cache._spans) {
     if (span->_path.view() == input_file_path.view()) {
       std::cout << "===============================" << std::endl;
       if (span->_header) {
-        zret.push(0, 1, "Disk already initialized with valid header");
+        zret.note("Disk already initialized with valid header");
       } else {
         this->allocateFor(*span);
         span->updateHeader();
@@ -373,7 +378,7 @@ VolumeAllocator::fillAllSpans()
   }
   // Allocate for each span, clearing as it goes.
   _cache.clearAllocation();
-  for (auto span : _cache._spans) {
+  for (auto &span : _cache._spans) {
     this->allocateFor(*span);
   }
   return zret;
@@ -385,8 +390,8 @@ VolumeAllocator::allocateFor(Span &span)
   Errata zret;
 
   /// Scaling factor for shares, effectively the accuracy.
-  static const int64_t SCALE = 1000;
-  int64_t total_shares       = 0;
+  static const int64_t SCALE        = 1000;
+  int64_t              total_shares = 0;
 
   if (Verbosity >= NORMAL) {
     std::cout << "Allocating " << CacheStripeBlocks(round_down(span._len)).count() << " stripe blocks from span "
@@ -397,8 +402,8 @@ VolumeAllocator::allocateFor(Span &span)
   for (auto &v : _av) {
     auto delta = v._config._alloc - v._size;
     if (delta > 0) {
-      v._deficit = (delta.count() * SCALE) / v._config._alloc.count();
-      v._shares  = delta.count() * v._deficit;
+      v._deficit    = (delta.count() * SCALE) / v._config._alloc.count();
+      v._shares     = delta.count() * v._deficit;
       total_shares += v._shares;
     } else {
       v._shares = 0;
@@ -418,11 +423,11 @@ VolumeAllocator::allocateFor(Span &span)
       // Not sure why this is needed. But a large and empty volume can dominate the shares
       // enough to get more than it actually needs if the other volume are relative small or full.
       // I need to do more math to see if the weighting can be adjusted to not have this happen.
-      n = std::min(n, delta);
-      v._size += n;
-      span_used += n;
+      n             = std::min(n, delta);
+      v._size      += n;
+      span_used    += n;
       total_shares -= v._shares;
-      Errata z = _cache.allocStripe(&span, v._config._idx, round_up(n));
+      Errata z      = _cache.allocStripe(&span, v._config._idx, round_up(n));
       if (Verbosity >= NORMAL) {
         std::cout << "           " << n << " to volume " << v._config._idx << std::endl;
       }
@@ -453,17 +458,17 @@ VolumeAllocator::allocateFor(Span &span)
 }
 /* --------------------------------------------------------------------------------------- */
 Errata
-Cache::loadSpan(ts::file::path const &path)
+Cache::loadSpan(swoc::file::path const &path)
 {
-  Errata zret;
+  Errata          zret;
   std::error_code ec;
-  auto fs = ts::file::status(path, ec);
+  auto            fs = swoc::file::status(path, ec);
 
   if (path.empty()) {
-    zret = Errata::Message(0, EINVAL, "A span file specified by --spans is required");
-  } else if (!ts::file::is_readable(path)) {
-    zret = Errata::Message(0, EPERM, '\'', path.string(), "' is not readable.");
-  } else if (ts::file::is_regular_file(fs)) {
+    zret = Errata(make_errno_code(EINVAL), "A span file specified by --spans is required");
+  } else if (!swoc::file::is_readable(path)) {
+    zret = Errata(make_errno_code(EPERM), R"("{}" is not readable.)", path);
+  } else if (swoc::file::is_regular_file(fs)) {
     zret = this->loadSpanConfig(path);
   } else {
     zret = this->loadSpanDirect(path);
@@ -472,18 +477,18 @@ Cache::loadSpan(ts::file::path const &path)
 }
 
 Errata
-Cache::loadSpanDirect(ts::file::path const &path, int vol_idx, const Bytes &size)
+Cache::loadSpanDirect(swoc::file::path const &path, int vol_idx, [[maybe_unused]] const Bytes &size)
 {
-  Errata zret;
+  Errata                zret;
   std::unique_ptr<Span> span(new Span(path));
   zret = span->load();
   if (zret) {
     if (span->_header) {
       int nspb = span->_header->num_diskvol_blks;
       for (auto i = 0; i < nspb; ++i) {
-        ts::CacheStripeDescriptor &raw = span->_header->stripes[i];
-        Stripe *stripe                 = new Stripe(span.get(), raw.offset, raw.len);
-        stripe->_idx                   = i;
+        ts::CacheStripeDescriptor &raw    = span->_header->stripes[i];
+        StripeSM                  *stripe = new StripeSM(span.get(), raw.offset, raw.len);
+        stripe->_idx                      = i;
         if (raw.free == 0) {
           stripe->_vol_idx = raw.vol_idx;
           stripe->_type    = raw.type;
@@ -500,71 +505,71 @@ Cache::loadSpanDirect(ts::file::path const &path, int vol_idx, const Bytes &size
     } else {
       span->clear();
     }
-    _spans.push_back(span.release());
+    _spans.emplace_back(std::move(span.release()));
   }
   return zret;
 }
 
 Errata
-Cache::loadSpanConfig(ts::file::path const &path)
+Cache::loadSpanConfig(swoc::file::path const &path)
 {
-  static const ts::TextView TAG_ID("id");
-  static const ts::TextView TAG_VOL("volume");
+  static const swoc::TextView TAG_ID("id");
+  static const swoc::TextView TAG_VOL("volume");
 
-  Errata zret;
+  Errata          zret;
   std::error_code ec;
-  std::string load_content = ts::file::load(path, ec);
+  std::string     load_content = swoc::file::load(path, ec);
   if (ec.value() == 0) {
-    ts::TextView content(load_content);
+    swoc::TextView content(load_content);
     while (content) {
-      ts::TextView line = content.take_prefix_at('\n');
+      swoc::TextView line = content.take_prefix_at('\n');
       line.ltrim_if(&isspace);
       if (line.empty() || '#' == *line) {
         continue;
       }
-      ts::TextView localpath = line.take_prefix_if(&isspace);
+      swoc::TextView localpath = line.take_prefix_if(&isspace);
       if (localpath) {
         // After this the line is [size] [id=string] [volume=#]
         while (line) {
-          ts::TextView value(line.take_prefix_if(&isspace));
+          swoc::TextView value(line.take_prefix_if(&isspace));
           if (value) {
-            ts::TextView tag(value.take_prefix_at('='));
+            swoc::TextView tag(value.take_prefix_at('='));
             if (!tag) { // must be the size
             } else if (0 == strcasecmp(tag, TAG_ID)) {
             } else if (0 == strcasecmp(tag, TAG_VOL)) {
-              ts::TextView text;
-              auto n = ts::svtoi(value, &text);
+              swoc::TextView text;
+              auto           n = swoc::svtoi(value, &text);
               if (text == value && 0 < n && n < 256) {
               } else {
-                zret.push(0, 0, "Invalid volume index '", value, "'");
+                zret.note("Invalid volume index '{}'", value);
               }
             }
           }
         }
-        zret = this->loadSpan(ts::file::path(localpath));
+        zret = this->loadSpan(swoc::file::path(localpath));
       }
     }
   } else {
-    zret = Errata::Message(0, EBADF, "Unable to load ", path.string());
+    zret = Errata(make_errno_code(EBADF), "Unable to load {}", path);
   }
   return zret;
 }
 
 Errata
-Cache::loadURLs(ts::file::path const &path)
+Cache::loadURLs(swoc::file::path const &path)
 {
-  static const ts::TextView TAG_VOL("url");
-  ts::URLparser loadURLparser;
-  Errata zret;
+  static const swoc::TextView TAG_VOL("url");
+  ts::URLparser               loadURLparser;
+  Errata                      zret;
 
   std::error_code ec;
-  std::string load_content = ts::file::load(path, ec);
+  std::string     load_content = swoc::file::load(path, ec);
   if (ec.value() == 0) {
-    ts::TextView content(load_content);
+    swoc::TextView content(load_content);
     while (!content.empty()) {
-      ts::TextView blob = content.take_prefix_at('\n');
+      swoc::TextView blob = content.take_prefix_at('\n');
 
-      ts::TextView tag(blob.take_prefix_at('='));
+      swoc::TextView tag(blob.take_prefix_at('='));
       if (tag.empty()) {
       } else if (0 == strcasecmp(tag, TAG_VOL)) {
         std::string url;
@@ -580,7 +585,7 @@ Cache::loadURLs(ts::file::path const &path)
       }
     }
   } else {
-    zret = Errata::Message(0, EBADF, "Unable to load ", path.string());
+    zret = Errata(make_errno_code(EBADF), "Unable to load ", path.string());
   }
   return zret;
 }
@@ -589,7 +594,7 @@ void
 Cache::dumpSpans(SpanDumpDepth depth)
 {
   if (depth >= SpanDumpDepth::SPAN) {
-    for (auto span : _spans) {
+    for (auto &span : _spans) {
       if (nullptr == span->_header) {
         std::cout << "Span: " << span->_path.string() << " is uninitialized" << std::endl;
       } else {
@@ -602,9 +607,8 @@ Cache::dumpSpans(SpanDumpDepth depth)
 
         for (auto stripe : span->_stripes) {
           std::cout << "\n>>>>>>>>> Stripe " << static_cast<int>(stripe->_idx) << " @ " << stripe->_start
-                    << " len=" << stripe->_len.count() << " blocks "
-                    << " vol=" << static_cast<int>(stripe->_vol_idx) << " type=" << static_cast<int>(stripe->_type) << " "
-                    << (stripe->isFree() ? "free" : "in-use") << std::endl;
+                    << " len=" << stripe->_len.count() << " blocks " << " vol=" << static_cast<int>(stripe->_vol_idx)
+                    << " type=" << static_cast<int>(stripe->_type) << " " << (stripe->isFree() ? "free" : "in-use") << std::endl;
 
           std::cout << "      " << stripe->_segments << " segments with " << stripe->_buckets << " buckets per segment for "
                     << stripe->_buckets * stripe->_segments * ts::ENTRIES_PER_BUCKET << " total directory entries taking "
@@ -665,7 +669,7 @@ Cache::calcTotalSpanConfiguredSize()
 {
   ts::CacheStripeBlocks zret(0);
 
-  for (auto span : _spans) {
+  for (auto &span : _spans) {
     zret += round_down(span->_len);
   }
   return zret;
@@ -687,35 +691,39 @@ Cache::calcTotalSpanPhysicalSize()
 
 Cache::~Cache()
 {
-  for (auto *span : _spans) {
-    delete span;
+  // The URL set is owned solely by this instance; the stripe hash table owns itself.
+  for (auto *url : URLset) {
+    delete url;
   }
 }
 
 Errata
 Span::load()
 {
-  Errata zret;
+  Errata          zret;
   std::error_code ec;
-  auto fs = ts::file::status(_path, ec);
+  auto            fs = swoc::file::status(_path, ec);
 
-  if (!ts::file::is_readable(_path)) {
-    zret = Errata::Message(0, EPERM, _path.string(), " is not readable.");
-  } else if (ts::file::is_char_device(fs) || ts::file::is_block_device(fs)) {
-    zret = this->loadDevice();
-  } else if (ts::file::is_dir(fs)) {
-    zret.push(0, 1, "Directory support not yet available");
-  } else {
-    zret.push(0, EBADF, _path.string(), " is not a valid file type");
+  if (!swoc::file::is_readable(_path)) {
+    return Errata(make_errno_code(EPERM), R"("{}" is not readable.)", _path);
   }
-  return zret;
+
+  if (swoc::file::is_char_device(fs) || swoc::file::is_block_device(fs)) {
+    return this->loadDevice();
+  }
+
+  if (swoc::file::is_dir(fs)) {
+    return Errata("Directory support not yet available");
+  }
+
+  return Errata(make_errno_code(EBADF), R"("{}" is not a valid file type)", _path);
 }
 
 Errata
 Span::loadDevice()
 {
   Errata zret;
-  int flags;
+  int    flags;
 
   flags = OPEN_RW_FLAG
 #if defined(O_DIRECT)
@@ -730,11 +738,11 @@ Span::loadDevice()
 
   if (fd.isValid()) {
     if (ink_file_get_geometry(fd, _geometry)) {
-      off_t offset = ts::CacheSpan::OFFSET;
-      CacheStoreBlocks span_hdr_size(1);                        // default.
+      off_t                offset = ts::CacheSpan::OFFSET;
+      CacheStoreBlocks     span_hdr_size(1);                    // default.
       static const ssize_t BUFF_SIZE = CacheStoreBlocks::SCALE; // match default span_hdr_size
-      alignas(512) char buff[BUFF_SIZE];
-      ssize_t n = pread(fd, buff, BUFF_SIZE, offset);
+      alignas(512) char    buff[BUFF_SIZE];
+      ssize_t              n = pread(fd, buff, BUFF_SIZE, offset);
       if (n >= BUFF_SIZE) {
         ts::SpanHeader &span_hdr = reinterpret_cast<ts::SpanHeader &>(buff);
         _base                    = round_up(offset);
@@ -754,7 +762,7 @@ Span::loadDevice()
           }
           _len = _header->num_blocks;
         } else {
-          zret = Errata::Message(0, 0, _path.string(), " header is uninitialized or invalid");
+          zret.note("{} header is uninitialized or invalid", _path);
           std::cout << "Span: " << _path.string() << " header is uninitialized or invalid" << std::endl;
           _len = round_down(_geometry.totalsz) - _base;
         }
@@ -762,22 +770,22 @@ Span::loadDevice()
         _fd     = fd.release();
         _offset = _base + span_hdr_size;
       } else {
-        zret = Errata::Message(0, errno, "Failed to read from ", _path.string(), '[', errno, ':', strerror(errno), ']');
+        zret = Errata(make_errno_code(), "Failed to read from {}", _path);
       }
     } else {
-      zret = Errata::Message(0, 23, "Unable to get device geometry for ", _path.string());
+      zret = Errata("Unable to get device geometry for {}", _path);
     }
   } else {
-    zret = Errata::Message(0, errno, "Unable to open ", _path.string());
+    zret = Errata(make_errno_code(), "Unable to open {}", _path);
   }
   return zret;
 }
 
-ts::Rv<Stripe *>
+swoc::Rv<StripeSM *>
 Span::allocStripe(int vol_idx, const CacheStripeBlocks &len)
 {
   for (auto spot = _stripes.begin(), limit = _stripes.end(); spot != limit; ++spot) {
-    Stripe *stripe = *spot;
+    StripeSM *stripe = *spot;
     if (stripe->isFree()) {
       if (len < stripe->_len) {
         // If the remains would be less than a stripe block, just take it all.
@@ -786,32 +794,31 @@ Span::allocStripe(int vol_idx, const CacheStripeBlocks &len)
           stripe->_type    = 1;
           return stripe;
         } else {
-          Stripe *ns = new Stripe(this, stripe->_start, len);
+          StripeSM *ns    = new StripeSM(this, stripe->_start, len);
           stripe->_start += len;
-          stripe->_len -= len;
-          ns->_vol_idx = vol_idx;
-          ns->_type    = 1;
+          stripe->_len   -= len;
+          ns->_vol_idx    = vol_idx;
+          ns->_type       = 1;
           _stripes.insert(spot, ns);
           return ns;
         }
       }
     }
   }
-  return ts::Rv<Stripe *>(nullptr,
-                          Errata::Message(0, 15, "Failed to allocate stripe of size ", len, " - no free block large enough"));
+  return Errata("Failed to allocate stripe of size {} - no free block large enough", len);
 }
 
 bool
 Span::isEmpty() const
 {
-  return std::all_of(_stripes.begin(), _stripes.end(), [](Stripe *s) { return s->_vol_idx == 0; });
+  return std::all_of(_stripes.begin(), _stripes.end(), [](StripeSM *s) { return s->_vol_idx == 0; });
 }
 
 Errata
 Span::clear()
 {
-  Stripe *stripe;
-  std::for_each(_stripes.begin(), _stripes.end(), [](Stripe *s) { delete s; });
+  StripeSM *stripe;
+  std::for_each(_stripes.begin(), _stripes.end(), [](StripeSM *s) { delete s; });
   _stripes.clear();
 
   // Gah, due to lack of anything better, TS depends on the number of usable blocks to be consistent
@@ -820,7 +827,7 @@ Span::clear()
   // The maximum number of volumes that can store stored, accounting for the space used to store the descriptors.
   int n   = (eff - sizeof(ts::SpanHeader)) / (CacheStripeBlocks::SCALE + sizeof(CacheStripeDescriptor));
   _offset = _base + round_up(sizeof(ts::SpanHeader) + (n - 1) * sizeof(CacheStripeDescriptor));
-  stripe  = new Stripe(this, _offset, _len - _offset);
+  stripe  = new StripeSM(this, _offset, _len - _offset);
   stripe->vol_init_data();
   stripe->InitializeMeta();
   _stripes.push_back(stripe);
@@ -832,12 +839,12 @@ Span::clear()
 Errata
 Span::updateHeader()
 {
-  Errata zret;
-  int n = _stripes.size();
-  CacheStripeDescriptor *sd;
-  CacheStoreBlocks hdr_size = round_up(sizeof(ts::SpanHeader) + (n - 1) * sizeof(ts::CacheStripeDescriptor));
-  void *raw                 = ats_memalign(512, hdr_size);
-  ts::SpanHeader *hdr       = static_cast<ts::SpanHeader *>(raw);
+  Errata                              zret;
+  int                                 n = _stripes.size();
+  CacheStripeDescriptor              *sd;
+  CacheStoreBlocks                    hdr_size = round_up(sizeof(ts::SpanHeader) + (n - 1) * sizeof(ts::CacheStripeDescriptor));
+  void                               *raw      = ats_memalign(512, hdr_size);
+  ts::SpanHeader                     *hdr      = static_cast<ts::SpanHeader *>(raw);
   std::bitset<ts::MAX_VOLUME_IDX + 1> volume_mask;
 
   hdr->magic            = ts::SpanHeader::MAGIC;
@@ -869,7 +876,7 @@ Span::updateHeader()
   if (OPEN_RW_FLAG) {
     ssize_t r = pwrite(_fd, hdr, hdr_size, ts::CacheSpan::OFFSET);
     if (r < ts::CacheSpan::OFFSET) {
-      zret.push(0, errno, "Failed to update span - ", strerror(errno));
+      zret = Errata(make_errno_code(errno), "Failed to update span.");
     }
   } else {
     std::cout << "Writing not enabled, no updates performed" << std::endl;
@@ -941,50 +948,50 @@ next_rand(unsigned int *p)
 void
 Cache::build_stripe_hash_table()
 {
-  int num_stripes = globalVec_stripe.size();
+  int              num_stripes = globalVec_stripe.size();
   CacheStoreBlocks total;
-  unsigned int *forvol         = static_cast<unsigned int *>(ats_malloc(sizeof(unsigned int) * num_stripes));
-  unsigned int *gotvol         = static_cast<unsigned int *>(ats_malloc(sizeof(unsigned int) * num_stripes));
-  unsigned int *rnd            = static_cast<unsigned int *>(ats_malloc(sizeof(unsigned int) * num_stripes));
-  unsigned short *ttable       = static_cast<unsigned short *>(ats_malloc(sizeof(unsigned short) * VOL_HASH_TABLE_SIZE));
-  unsigned int *rtable_entries = static_cast<unsigned int *>(ats_malloc(sizeof(unsigned int) * num_stripes));
-  unsigned int rtable_size     = 0;
-  int i                        = 0;
-  uint64_t used                = 0;
+  unsigned int    *forvol         = static_cast<unsigned int *>(ats_malloc(sizeof(unsigned int) * num_stripes));
+  unsigned int    *gotvol         = static_cast<unsigned int *>(ats_malloc(sizeof(unsigned int) * num_stripes));
+  unsigned int    *rnd            = static_cast<unsigned int *>(ats_malloc(sizeof(unsigned int) * num_stripes));
+  unsigned short  *ttable         = static_cast<unsigned short *>(ats_malloc(sizeof(unsigned short) * STRIPE_HASH_TABLE_SIZE));
+  unsigned int    *rtable_entries = static_cast<unsigned int *>(ats_malloc(sizeof(unsigned int) * num_stripes));
+  unsigned int     rtable_size    = 0;
+  int              i              = 0;
+  uint64_t         used           = 0;
 
   // estimate allocation
   for (auto &elt : globalVec_stripe) {
     // printf("stripe length %" PRId64 "\n", elt->_len.count());
-    rtable_entries[i] = static_cast<int64_t>(elt->_len) / Vol_hash_alloc_size;
-    rtable_size += rtable_entries[i];
-    uint64_t x = elt->hash_id.fold();
+    rtable_entries[i]  = static_cast<int64_t>(elt->_len) / Vol_hash_alloc_size;
+    rtable_size       += rtable_entries[i];
+    uint64_t x         = elt->hash_id.fold();
     // seed random number generator
-    rnd[i] = static_cast<unsigned int>(x);
-    total += elt->_len;
+    rnd[i]  = static_cast<unsigned int>(x);
+    total  += elt->_len;
     i++;
   }
   i = 0;
   for (auto &elt : globalVec_stripe) {
-    forvol[i] = total ? static_cast<int64_t>(VOL_HASH_TABLE_SIZE * elt->_len) / total : 0;
-    used += forvol[i];
-    gotvol[i] = 0;
+    forvol[i]  = total ? static_cast<int64_t>(STRIPE_HASH_TABLE_SIZE * elt->_len) / total : 0;
+    used      += forvol[i];
+    gotvol[i]  = 0;
     i++;
   }
 
   // spread around the excess
-  int extra = VOL_HASH_TABLE_SIZE - used;
+  int extra = STRIPE_HASH_TABLE_SIZE - used;
   for (int i = 0; i < extra; i++) {
     forvol[i % num_stripes]++;
   }
 
   // initialize table to "empty"
-  for (int i = 0; i < VOL_HASH_TABLE_SIZE; i++) {
-    ttable[i] = VOL_HASH_EMPTY;
+  for (int i = 0; i < STRIPE_HASH_TABLE_SIZE; i++) {
+    ttable[i] = STRIPE_HASH_EMPTY;
   }
 
   // generate random numbers proportional to allocation
   rtable_pair *rtable = static_cast<rtable_pair *>(ats_malloc(sizeof(rtable_pair) * rtable_size));
-  int rindex          = 0;
+  int          rindex = 0;
   for (int i = 0; i < num_stripes; i++) {
     for (int j = 0; j < static_cast<int>(rtable_entries[i]); j++) {
       rtable[rindex].rval = next_rand(&rnd[i]);
@@ -995,11 +1002,11 @@ Cache::build_stripe_hash_table()
   assert(rindex == (int)rtable_size);
   // sort (rand #, vol $ pairs)
   qsort(rtable, rtable_size, sizeof(rtable_pair), cmprtable);
-  unsigned int width = (1LL << 32) / VOL_HASH_TABLE_SIZE;
+  unsigned int width = (1LL << 32) / STRIPE_HASH_TABLE_SIZE;
   unsigned int pos; // target position to allocate
   // select vol with closest random number for each bucket
   i = 0; // index moving through the random numbers
-  for (int j = 0; j < VOL_HASH_TABLE_SIZE; j++) {
+  for (int j = 0; j < STRIPE_HASH_TABLE_SIZE; j++) {
     pos = width / 2 + j * width; // position to select closest to
     while (pos > rtable[i].rval && i < static_cast<int>(rtable_size) - 1) {
       i++;
@@ -1010,6 +1017,7 @@ Cache::build_stripe_hash_table()
   for (int i = 0; i < num_stripes; i++) {
     printf("build_vol_hash_table index %d mapped to %d requested %d got %d\n", i, i, forvol[i], gotvol[i]);
   }
+  // Assigning releases any table a previous call installed.
   stripes_hash_table = ttable;
 
   ats_free(forvol);
@@ -1019,75 +1027,75 @@ Cache::build_stripe_hash_table()
   ats_free(rtable);
 }
 
-Stripe *
-Cache::key_to_stripe(CryptoHash *key, const char *hostname, int host_len)
+StripeSM *
+Cache::key_to_stripe(CryptoHash *key, [[maybe_unused]] const char *hostname, [[maybe_unused]] int host_len)
 {
-  uint32_t h = (key->slice32(2) >> DIR_TAG_WIDTH) % VOL_HASH_TABLE_SIZE;
+  uint32_t h = (key->slice32(2) >> DIR_TAG_WIDTH) % STRIPE_HASH_TABLE_SIZE;
   return globalVec_stripe[stripes_hash_table[h]];
 }
 
 /* --------------------------------------------------------------------------------------- */
 Errata
-VolumeConfig::load(ts::file::path const &path)
+VolumeConfig::load(swoc::file::path const &path)
 {
-  static const ts::TextView TAG_SIZE("size");
-  static const ts::TextView TAG_VOL("volume");
+  static const swoc::TextView TAG_SIZE("size");
+  static const swoc::TextView TAG_VOL("volume");
 
   Errata zret;
 
   int ln = 0;
 
   std::error_code ec;
-  std::string load_content = ts::file::load(path, ec);
+  std::string     load_content = swoc::file::load(path, ec);
   if (ec.value() == 0) {
-    ts::TextView content(load_content);
+    swoc::TextView content(load_content);
     while (content) {
       Data v;
 
       ++ln;
-      ts::TextView line = content.take_prefix_at('\n');
+      swoc::TextView line = content.take_prefix_at('\n');
       line.ltrim_if(&isspace);
       if (line.empty() || '#' == *line) {
         continue;
       }
 
       while (line) {
-        ts::TextView value(line.take_prefix_if(&isspace));
-        ts::TextView tag(value.take_prefix_at('='));
+        swoc::TextView value(line.take_prefix_if(&isspace));
+        swoc::TextView tag(value.take_prefix_at('='));
         if (tag.empty()) {
-          zret.push(0, 1, "Line ", ln, " is invalid");
+          zret.note("Line {} is invalid", ln);
         } else if (0 == strcasecmp(tag, TAG_SIZE)) {
           if (v.hasSize()) {
-            zret.push(0, 5, "Line ", ln, " has field ", TAG_SIZE, " more than once");
+            zret.note("Line {} has field {} more than once", ln, TAG_SIZE);
           } else {
-            ts::TextView text;
-            auto n = ts::svtoi(value, &text);
+            swoc::TextView text;
+            auto           n = swoc::svtoi(value, &text);
             if (text) {
-              ts::TextView percent(text.data_end(), value.data_end()); // clip parsed number.
+              swoc::TextView percent(text.data_end(), value.data_end()); // clip parsed number.
               if (percent.empty()) {
                 v._size = CacheStripeBlocks(round_up(Megabytes(n)));
                 if (v._size.count() != n) {
-                  zret.push(0, 0, "Line ", ln, " size ", n, " was rounded up to ", v._size);
+                  zret.note("Line {} size {} was rounded up to {}", ln, n, v._size);
                 }
               } else if ('%' == *percent && percent.size() == 1) {
                 v._percent = n;
               } else {
-                zret.push(0, 3, "Line ", ln, " has invalid value '", value, "' for ", TAG_SIZE, " field");
+                zret.note("Line {} has invalid value '{}' for {} field", ln, value, TAG_SIZE);
               }
             } else {
-              zret.push(0, 2, "Line ", ln, " has invalid value '", value, "' for ", TAG_SIZE, " field");
+              zret.note("Line {} has invalid value '{}' for {} field", ln, value, TAG_SIZE);
             }
           }
         } else if (0 == strcasecmp(tag, TAG_VOL)) {
           if (v.hasIndex()) {
-            zret.push(0, 6, "Line ", ln, " has field ", TAG_VOL, " more than once");
+            zret.note("Line {} has field {} more than once", ln, TAG_VOL);
           } else {
-            ts::TextView text;
-            auto n = ts::svtoi(value, &text);
+            swoc::TextView text;
+            auto           n = swoc::svtoi(value, &text);
             if (text == value) {
               v._idx = n;
             } else {
-              zret.push(0, 4, "Line ", ln, " has invalid value '", value, "' for ", TAG_VOL, " field");
+              zret.note("Line {} has invalid value '{}' for {} field", ln, value, TAG_VOL);
             }
           }
         }
@@ -1096,15 +1104,15 @@ VolumeConfig::load(ts::file::path const &path)
         _volumes.push_back(std::move(v));
       } else {
         if (!v.hasSize()) {
-          zret.push(0, 7, "Line ", ln, " does not have the required field ", TAG_SIZE);
+          zret.note("Line {} does not have the required field {}", ln, TAG_SIZE);
         }
         if (!v.hasIndex()) {
-          zret.push(0, 8, "Line ", ln, " does not have the required field ", TAG_VOL);
+          zret.note("Line {} does not have the required field {}", ln, TAG_VOL);
         }
       }
     }
   } else {
-    zret = Errata::Message(0, EBADF, "Unable to load ", path.string());
+    zret = Errata(make_errno_code(EBADF), "Unable to load ", path);
   }
   return zret;
 }
@@ -1139,14 +1147,14 @@ Simulate_Span_Allocation()
   VolumeAllocator va;
 
   if (VolumeFile.empty()) {
-    err.push(0, 9, "Volume config file not set");
+    err.note("Volume config file not set");
   }
   if (SpanFile.empty()) {
-    err.push(0, 9, "Span file not set");
+    err.note("Span file not set");
   }
 
   if (err) {
-    if ((err = va.load(SpanFile, VolumeFile)).isOK()) {
+    if ((err = va.load(SpanFile, VolumeFile)).is_ok()) {
       err = va.fillAllSpans();
       va.dumpVolumes();
     }
@@ -1159,19 +1167,19 @@ Clear_Spans()
   Cache cache;
 
   if (!OPEN_RW_FLAG) {
-    err.push(0, 1, "Writing Not Enabled.. Please use --write to enable writing to disk");
+    err.note("Writing Not Enabled.. Please use --write to enable writing to disk");
     return;
   }
 
   if ((err = cache.loadSpan(SpanFile))) {
-    for (auto *span : cache._spans) {
+    for (auto &span : cache._spans) {
       span->clearPermanently();
     }
   }
 }
 
 void
-Find_Stripe(ts::file::path const &input_file_path)
+Find_Stripe(swoc::file::path const &input_file_path)
 {
   // scheme=http user=u password=p host=172.28.56.109 path=somepath query=somequery port=1234
   // input file format: scheme://hostname:port/somepath;params?somequery user=USER password=PASS
@@ -1193,13 +1201,13 @@ Find_Stripe(ts::file::path const &input_file_path)
     cache.dumpSpans(Cache::SpanDumpDepth::SPAN);
     cache.build_stripe_hash_table();
     for (auto host : cache.URLset) {
-      CryptoContext ctx;
-      CryptoHash hashT;
-      ts::LocalBufferWriter<33> w;
+      CryptoContext               ctx;
+      CryptoHash                  hashT;
+      swoc::LocalBufferWriter<33> w;
       ctx.update(host->url.data(), host->url.size());
       ctx.update(&host->port, sizeof(host->port));
       ctx.finalize(hashT);
-      Stripe *stripe_ = cache.key_to_stripe(&hashT, host->url.data(), host->url.size());
+      StripeSM *stripe_ = cache.key_to_stripe(&hashT, host->url.data(), host->url.size());
       w.print("{}", hashT);
       printf("hash of %.*s is %.*s: Stripe  %s \n", static_cast<int>(host->url.size()), host->url.data(),
              static_cast<int>(w.size()), w.data(), stripe_->hashText.data());
@@ -1226,7 +1234,7 @@ walk_bucket_chain(const std::string &devicePath)
   Cache cache;
   if ((err = cache.loadSpan(SpanFile))) {
     cache.dumpSpans(Cache::SpanDumpDepth::SPAN);
-    for (auto sp : cache._spans) {
+    for (auto &sp : cache._spans) {
       if (devicePath.size() > 0 && sp->_path.view() == devicePath) {
         for (auto strp : sp->_stripes) {
           strp->loadMeta();
@@ -1244,7 +1252,7 @@ Clear_Span(const std::string &devicePath)
   Cache cache;
   if ((err = cache.loadSpan(SpanFile))) {
     cache.dumpSpans(Cache::SpanDumpDepth::SPAN);
-    for (auto sp : cache._spans) {
+    for (auto &sp : cache._spans) {
       if (devicePath.size() > 0 && sp->_path.view() == devicePath) {
         printf("clearing %s\n", devicePath.data());
         sp->clearPermanently();
@@ -1260,7 +1268,7 @@ Check_Freelist(const std::string &devicePath)
   Cache cache;
   if ((err = cache.loadSpan(SpanFile))) {
     cache.dumpSpans(Cache::SpanDumpDepth::SPAN);
-    for (auto sp : cache._spans) {
+    for (auto &sp : cache._spans) {
       if (devicePath.size() > 0 && sp->_path.view() == devicePath) {
         printf("Scanning %s\n", devicePath.data());
         for (auto strp : sp->_stripes) {
@@ -1277,13 +1285,13 @@ Check_Freelist(const std::string &devicePath)
 }
 
 void
-Init_disk(ts::file::path const &input_file_path)
+Init_disk(swoc::file::path const &input_file_path)
 {
-  Cache cache;
+  Cache           cache;
   VolumeAllocator va;
 
   if (!OPEN_RW_FLAG) {
-    err.push(0, 1, "Writing Not Enabled.. Please use --write to enable writing to disk");
+    err.note("Writing Not Enabled.. Please use --write to enable writing to disk");
     return;
   }
 
@@ -1292,7 +1300,7 @@ Init_disk(ts::file::path const &input_file_path)
 }
 
 void
-Get_Response(ts::file::path const &input_file_path)
+Get_Response(swoc::file::path const &input_file_path)
 {
   // scheme=http user=u password=p host=172.28.56.109 path=somepath query=somequery port=1234
   // input file format: scheme://hostname:port/somepath;params?somequery user=USER password=PASS
@@ -1309,13 +1317,13 @@ Get_Response(ts::file::path const &input_file_path)
     cache.dumpSpans(Cache::SpanDumpDepth::SPAN);
     cache.build_stripe_hash_table();
     for (auto host : cache.URLset) {
-      CryptoContext ctx;
-      CryptoHash hashT;
-      ts::LocalBufferWriter<33> w;
+      CryptoContext               ctx;
+      CryptoHash                  hashT;
+      swoc::LocalBufferWriter<33> w;
       ctx.update(host->url.data(), host->url.size());
       ctx.update(&host->port, sizeof(host->port));
       ctx.finalize(hashT);
-      Stripe *stripe_ = cache.key_to_stripe(&hashT, host->url.data(), host->url.size());
+      StripeSM *stripe_ = cache.key_to_stripe(&hashT, host->url.data(), host->url.size());
       w.print("{}", hashT);
       printf("hash of %.*s is %.*s: Stripe  %s \n", static_cast<int>(host->url.size()), host->url.data(),
              static_cast<int>(w.size()), w.data(), stripe_->hashText.data());
@@ -1327,9 +1335,9 @@ Get_Response(ts::file::path const &input_file_path)
   }
 }
 
-void static scan_span(Span *span, ts::file::path const &regex_path)
+void static scan_span(Span &span, swoc::file::path const &regex_path)
 {
-  for (auto strp : span->_stripes) {
+  for (auto strp : span._stripes) {
     strp->loadMeta();
     strp->loadDir();
 
@@ -1344,17 +1352,17 @@ void static scan_span(Span *span, ts::file::path const &regex_path)
 }
 
 void
-Scan_Cache(ts::file::path const &regex_path)
+Scan_Cache(swoc::file::path const &regex_path)
 {
-  Cache cache;
+  Cache                    cache;
   std::vector<std::thread> threadPool;
   if ((err = cache.loadSpan(SpanFile))) {
-    if (err.size()) {
+    if (err.length()) {
       return;
     }
     cache.dumpSpans(Cache::SpanDumpDepth::SPAN);
-    for (auto sp : cache._spans) {
-      threadPool.emplace_back(scan_span, sp, regex_path);
+    for (auto &sp : cache._spans) {
+      threadPool.emplace_back(scan_span, std::ref(*sp), regex_path);
     }
     for (auto &th : threadPool) {
       th.join();
@@ -1363,10 +1371,10 @@ Scan_Cache(ts::file::path const &regex_path)
 }
 
 int
-main(int argc, const char *argv[])
-{
-  ts::file::path input_url_file;
-  std::string inputFile;
+main([[maybe_unused]] int argc, const char *argv[])
+try {
+  swoc::file::path input_url_file;
+  std::string      inputFile;
 
   parser.add_global_usage(std::string(argv[0]) + " --spans <SPAN> --volume <FILE> <COMMAND> [<SUBCOMMAND> ...]\n");
   parser.require_commands()
@@ -1424,10 +1432,13 @@ main(int argc, const char *argv[])
     arguments.invoke();
   }
 
-  if (err.size()) {
+  if (err.length()) {
     std::cerr << err;
     exit(1);
   }
 
   return 0;
+} catch (...) {
+  fprintf(stderr, "traffic_cache_tool: terminating on an unhandled %s\n", ts::describe_current_exception().c_str());
+  return 1;
 }

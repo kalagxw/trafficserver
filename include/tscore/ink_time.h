@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -53,6 +53,7 @@ using ts_hr_time  = ts_hr_clock::time_point;
 
 using ts_seconds      = std::chrono::seconds;
 using ts_milliseconds = std::chrono::milliseconds;
+using ts_nanoseconds  = std::chrono::nanoseconds;
 
 /// Equivalent of 0 for @c ts_time. This should be used as the default initializer.
 static constexpr ts_time TS_TIME_ZERO;
@@ -72,7 +73,7 @@ int cftime_replacement(char *s, int maxsize, const char *format, const time_t *c
 
 ink_time_t convert_tm(const struct tm *tp);
 
-char *ink_ctime_r(const ink_time_t *clock, char *buf);
+char      *ink_ctime_r(const ink_time_t *clock, char *buf);
 struct tm *ink_localtime_r(const ink_time_t *clock, struct tm *res);
 
 /*===========================================================================*
@@ -83,7 +84,7 @@ struct tm *ink_localtime_r(const ink_time_t *clock, struct tm *res);
 inline int
 ink_timezone()
 {
-  struct timeval tp;
+  struct timeval  tp;
   struct timezone tzp;
   ink_assert(!gettimeofday(&tp, &tzp));
   return tzp.tz_minuteswest * 60;

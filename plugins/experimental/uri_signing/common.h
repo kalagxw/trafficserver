@@ -20,21 +20,28 @@
 
 #define PLUGIN_NAME "uri_signing"
 
-#ifdef URI_SIGNING_UNIT_TEST
+#ifdef UNITTEST
 #include <stdio.h>
 #include <stdarg.h>
 
 #define PluginDebug(fmt, ...) PrintToStdErr("(%s) %s:%d:%s() " fmt "\n", PLUGIN_NAME, __FILE__, __LINE__, __func__, ##__VA_ARGS__)
 #define PluginError(fmt, ...) PrintToStdErr("(%s) %s:%d:%s() " fmt "\n", PLUGIN_NAME, __FILE__, __LINE__, __func__, ##__VA_ARGS__)
-#define TSmalloc(x) malloc(x)
-#define TSfree(p) free(p)
+#define TSmalloc(x)           malloc(x)
+#define TSfree(p)             free(p)
 void PrintToStdErr(const char *fmt, ...);
 
 #else
 
-#include "ts/ts.h"
-#define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
-#define PluginDebug(fmt, ...) TSDebug(PLUGIN_NAME, "[%s:% 4d] %s(): " fmt, __FILENAME__, __LINE__, __func__, ##__VA_ARGS__);
+#include <ts/ts.h>
+
+namespace uri_signing_ns
+{
+extern DbgCtl dbg_ctl;
+}
+using namespace uri_signing_ns;
+
+#define __FILENAME__          (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
+#define PluginDebug(fmt, ...) Dbg(dbg_ctl, fmt, ##__VA_ARGS__);
 #define PluginError(fmt, ...)      \
   PluginDebug(fmt, ##__VA_ARGS__); \
   TSError("[%s:% 4d] %s(): " fmt, __FILENAME__, __LINE__, __func__, ##__VA_ARGS__);

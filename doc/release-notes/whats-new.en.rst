@@ -19,8 +19,196 @@
 
 .. _whats_new:
 
-What's New in ATS v10.x
+
+What's New in ATS v11.x
 =======================
+
+Security
+--------
+
+This release carries a large body of security work. Most of it tightens what |TS|
+accepts rather than adding anything, so the operator-visible effect -- changed
+defaults, messages now refused, ACL conditions that now apply as written, and
+plugins that now require configuration -- is described in
+:ref:`upgrading`. Read that section before upgrading.
+
+Several fixes in this release carry CVE identifiers. Refer to the security
+advisory for this release for the identifiers, severities and affected version
+ranges.
+
+Configuration
+-------------
+
+* Added :ts:cv:`proxy.config.http.reject_head_with_content` to control whether a
+  ``HEAD`` request carrying ``Content-Length`` or ``Transfer-Encoding`` is
+  refused. Enabled by default.
+* Added :ts:cv:`proxy.config.regex.anchor_policy_rules` to require that a regex
+  driving a security or routing decision match the whole subject. Disabled by
+  default; when disabled, each unanchored rule is named once at config load so
+  the effect of enabling it can be measured first. See
+  :ref:`admin-regex-best-practices`.
+* Added :ts:cv:`proxy.config.http2.max_ping_frames_per_minute_out` to limit
+  PING frames from origins separately from PING frames from clients. It
+  defaults to ``300``; origin connections previously shared the client limit,
+  ``60`` by default.
+* :ts:cv:`proxy.config.http2.default_buffer_water_mark` now defaults to ``32768``
+  and no longer accepts values below ``1024``.
+* :ts:cv:`proxy.config.http.header_field_max_size` and
+  :ts:cv:`proxy.config.hostdb.round_robin_max_count` are now range checked, at
+  ``0`` to ``65535`` and ``1`` to ``1024`` respectively. Their defaults are
+  unchanged, but a value outside the range is no longer accepted.
+* :file:`ip_allow.yaml` ships default outbound rules denying ``CONNECT`` tunnels
+  to unspecified, loopback, private, link-local and IPv4-mapped IPv6 destinations.
+
+Metrics
+-------
+
+* Added :ts:stat:`proxy.process.ssl.user_agent_resumed_cert_rejected`, counting
+  inbound connections rejected because the session they resumed carried no client
+  certificate where the current SNI's ``verify_client`` policy requires one.
+  Sessions are bound to the policy that issued them, so an out-of-scope session
+  completes a full handshake rather than reaching this counter, which is normally
+  zero.
+* Added :ts:stat:`proxy.process.net.inactivity_cop_visited`.
+* Added :ts:stat:`proxy.process.net.inactivity_cop_budget_exhausted`.
+* Added :ts:stat:`proxy.process.net.inactivity_cop_passes`.
+* Added :ts:stat:`proxy.process.net.inactivity_cop_fired`.
+* Added :ts:stat:`proxy.process.net.inactivity_cop_pass_time_us`.
+* Added :ts:stat:`proxy.process.net.inactivity_cop_pass_max_us`.
+
+Performance
+-----------
+
+* Connection timeouts are now dispatched from a per-thread timer wheel instead
+  of a once-per-second walk of every open connection, so the cost of a timeout
+  check scales with the number of deadlines that have come due rather than with
+  the number of connections open. See :ref:`developer-doc-net-timeouts`.
+
+  This changes how :ts:cv:`proxy.config.net.inactivity_check_frequency` should
+  be tuned; see :ref:`upgrading` if you have raised it from the default.
+
+Plugins
+-------
+
+* ``tsmemcache``: the listener binds to the loopback address by default, and an
+  optional second plugin argument sets the address to bind instead.
+* ``magick``: a signing key is now required. The plugin refuses to load without
+  one, and the ImageMagick ``convert`` operators it will run are allowlisted.
+
+
+What's New in ATS v10.1
+=======================
+
+Metrics
+-------
+
+* Added ``proxy.process.http.total_parent_marked_down_timeout``
+* Added ``proxy.process.http.total_client_connections_uds``
+* Added ``proxy.process.ssl.group.user_agent.P-256``
+* Added ``proxy.process.ssl.group.user_agent.P-384``
+* Added ``proxy.process.ssl.group.user_agent.P-521``
+* Added ``proxy.process.ssl.group.user_agent.X25519``
+* Added ``proxy.process.ssl.group.user_agent.P-224``
+* Added ``proxy.process.ssl.group.user_agent.X448``
+* Added ``proxy.process.ssl.group.user_agent.X25519MLKEM768``
+* Added :ts:stat:`proxy.process.net.per_client.connections_exempt_currently_open`
+* :ts:stat:`proxy.process.net.per_client.connections_exempt_in` now counts
+  connections from exempt addresses when
+  :ts:cv:`proxy.config.net.per_client.max_connections_in` is 0.
+
+Plugins
+-------
+
+* stats_over_http: Add prometheus metrics format option
+* header_rewrite: Add ``set-plugin-cntl`` operator
+* header_rewrite: Add ``LAST-CAPTURE`` condition to access the last capture
+  group of a regex
+* header_rewrite: Add support for state variables that can be used in conditions
+  and operators.
+* header_rewrite: Add support for an else clause in conditions
+* header_rewrite: Add a ``GROUP`` condition
+* header_rewrite: Add a ``HTTP-CNTL`` condition to control if expensive rules
+  are run.
+* header_rewrite: Add the ``set-body-from`` operator to set the response body
+  from a URL
+* header_rewrite: The ``set-body-from`` operator now defers renabling the
+  transaction until after the fetch of the URL providing the response body
+* slice: Support unix domain socket paths
+* slice: Add configuration to limit slicing of some objects.
+* access_control: Generate a session cookie when ``exp=0`` appears in a
+  ``TokenRespHdr`` origin response header.
+* compress:  Add range request control options to adjust behavior based on the
+  ``Accept-Encoding`` or ``Range`` headers
+* lua: Add support for millisecond sleep
+* escalate: Now handles dispatching to the failover server if the original server is down
+* ja3_fingerprint: Add the ``--preserve`` option to avoid modifing some existing
+  ja* fields.
+* ja4_fingerprint: Added this new plugin
+* rate_limit: Add a ``--rate`` option to limit by RPS
+
+TS API
+------
+
+* Add ``TSVConnPPInfoGet`` to get Proxy Protocol information.
+* Add ``TSContScheduleOnEntirePool`` and ``TSContScheduleEveryOnEntirePool`` to
+  schedule continuations on every thread in a pool.
+
+Features
+--------
+
+* Add :file:`plugin.yaml`, a YAML-based replacement for :file:`plugin.config`.
+  New features include disabling plugins without deleting lines
+  (``enabled: false``), explicit ``load_order``, inline ``config`` content, and
+  startup logging. See :doc:`../admin-guide/files/plugin.yaml.en`.
+* traffic_ctl: Add ``plugin list`` to show loaded plugins and their status via
+  JSONRPC.
+* traffic_ctl: Add ``config convert plugin_config`` to migrate
+  :file:`plugin.config` to :file:`plugin.yaml`.
+* Add the ``cqssg`` log field for TLS group name logging
+* traffic_ctl: Add a new :ref:`server <traffic-control-command-server-status>` command to show some basic internal
+  information
+* traffic_ctl: Now displays YAML format output when the ``--records`` option is
+  set.
+* traffic_ctl: Added the ``server debug`` command to enable/disable diagnostics
+  and debug tags at runtime with a single command.
+* cripts: Add some new high level  :ref:`convenience <cripts-convenience>` APIs
+* cripts: Add optional reason parameter to ``Error::Status``
+* sni.yaml: Add ``server_cipher_suite`` and ``server_TLSv1_3_cipher_suites`` to
+  allow overriding the setting from ``records.yaml``
+* Add support for getting authority information from Proxy Protocol V2. with new
+  ``ppa`` log formatter.
+* Add support for getting UDP address info from Proxy Protocol.
+* Added support for listening on a Unix Domain Socket. See :ts:cv:`proxy.config.http.server_ports`
+* Added option for :ts:cv:`proxy.config.http.auth_server_session_private` to only mark the connection private if ``Proxy-Authorization`` or ``Www-Authenticate`` headers are present
+* It is now an ``ERROR`` if a remap ACL has more than one ``@action`` parameter.
+  This was an error in ATS 10.0.x
+* Add a ``fragment_size`` option in storage.yaml to control the fragment size
+  of the volume.
+* Add an optional ``avg_obj_size`` to ``storage.yaml`` to control the directory
+  entry sizing.
+* The ``proxy.config.http.cache.post_method`` is now an overridable config.
+* Defer deleting the copied plugin shared object file to startup to make it
+  easier to debug crashes in plugins.
+
+
+Configuration
+-------------
+
+* Added :ts:cv:`proxy.config.http.negative_revalidating_list` to configure the
+  list of status codes that apply to the negative revalidating feature
+* :ts:cv:`proxy.config.http.cache.targeted_cache_control_headers` now defaults
+  to ``CDN-Cache-Control``. Set it to an empty string to disable targeted cache
+  control.
+* The ``ssl_multicert.config`` file has been replaced with :file:`ssl_multicert.yaml`.
+  Use ``traffic_ctl config convert ssl_multicert`` to convert existing configuration files.
+* :ts:cv:`proxy.config.http.per_client.connection.exempt_list` now also
+  exempts client connections from :ts:cv:`proxy.config.net.connections_throttle`.
+
+
+
+What's New in ATS v10.0
+=======================
+
 
 This version of |ATS| includes over <x> commits, from <y> pull requests. A
 total of <z> contributors have participated in this development cycle.
@@ -31,12 +219,102 @@ total of <z> contributors have participated in this development cycle.
 New Features
 ------------
 
+* JSON-RPC based interface for administrative API
+
+   |TS| now exposes a JSON-RPC node to interact with external tools. Check :ref:`developer-guide-jsonrpc` for more details.
+
+* traffic_ctl has a new command ``monitor`` to show a continuously updating list of metrics
+
+* :file:`ip_allow.yaml` and :file:`remap.config` now support named IP ranges via IP
+  Categories. See the ``ip_categories`` key definition in :file:`ip_allow.yaml`
+  for information about their use and definitions.
+
+* :file:`sni.yaml` ``fqdn:tunnel_route``, beside the already supported match group
+  number, configuration now also supports the destination port using a variable specification
+  either for the incoming connection port or the port that was specified by the
+  incoming Proxy Protocol payload. Check :file:`sni.yaml` for more information.
+
+* The records.yaml entry :ts:cv:`proxy.config.system_clock` was added to control the underlying
+  system clock that ATS uses for internal timing
+
+* OCSP requests is now be able to use GET method. See :ts:cv:`proxy.config.ssl.ocsp.request_mode` for more information.
+
+* TSHttpSsnInfoIntGet has been added.
 
 New or modified Configurations
 ------------------------------
 
+ip_allow.yaml and remap.config ACL actions
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+There are two new sets of actions for HTTP request method filtering introduced in |TS| 10.x:
+
+- Both :file:`ip_allow.yaml` and :file:`remap.config` now support the ``set_allow`` and ``set_deny`` actions. These
+  actions both behave like ``allow`` and ``deny`` did for :file:`ip_allow.yaml` pre |TS| 10.x.
+- In addition, :file:`remap.config` now supports ``add_allow`` and ``add_deny`` actions. These behave like ``allow``
+  and ``deny`` actions did for :file:`remap.config` ACLs pre |TS| 10.x.
+
+The details about the motivation and behavior of these actions are documented in :ref:`acl-filters`.
+
 Logging and Metrics
 -------------------
 
+The numbers of HTTP/2 frames received have been added as metrics.
+
 Plugins
 -------
+
+* authproxy - ``--forward-header-prefix`` parameter has been added
+* prefetch - Cmcd-Request header support has been added
+* xdebug - ``--enable`` option to selectively enable features has been added
+* system_stats - Stats about memory have been added
+* slice plugin - This plugin was promoted to stable.
+* compress plugin - Added support for Zstandard (zstd) compression algorithm.
+
+JSON-RPC
+^^^^^^^^
+
+   Remote clients, like :ref:`traffic_ctl_jsonrpc` have now bi-directional access to the plugin space. For more details check :ref:`jsonrpc_development`.
+
+Replaced autotools build system with cmake
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+See :ref:`admin-installing` for more information
+
+Switch to C++20
+^^^^^^^^^^^^^^^
+
+Plugins are now required to be compiled as C++ code, rather than straight C.
+The API is tested with C++20, so code compatible with this version is preferred.
+``TSDebug`` and related functions are removed.  Debug tracing should now be done
+using cpp:func:`Dbg` and related functions, as in |TS| core code.
+
+C++ Plugin API Deprecated
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+It is deprecated in this release.  It will be deleted in ATS 11.
+
+Symbols With INKUDP Prefix
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In the plugin API, all types and functions starting with the prefix INKUDP are removed.
+
+New plugin hook for request sink transformation
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A new hook, ``TS_HTTP_REQUEST_CLIENT_HOOK``, has been added. This provides the analoguas functionality of
+``TS_HTTP_RESPONSE_CLIENT_HOOK``, for request bodies.
+
+HTTP/2
+^^^^^^
+
+* Support for HTTP/2 on origin server connections has been added. This is disabled by default. For more details check :ts:cv:`proxy.config.ssl.client.alpn_protocols`
+* Support for CONNECT method has been added.
+* Window size control has been improved. For more details check :ts:cv:`proxy.config.http2.flow_control.policy_in`
+
+HTTP UI Removed
+^^^^^^^^^^^^^^^
+
+The stats and cache inspector pages were unmaintained and removed in this
+release.
+

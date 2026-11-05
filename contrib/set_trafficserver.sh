@@ -29,7 +29,7 @@
 #       v1.0.3   - Check to force /mnt based cache.db
 
 REMAP_FILE=/usr/local/etc/trafficserver/remap.config
-STORAGE_FILE=/usr/local/etc/trafficserver/storage.config
+STORAGE_FILE=/usr/local/etc/trafficserver/storage.yaml
 EC2_CACHE_LOC=/mnt/trafficserver_cache
 
 # Base settings to use for testing and benchmarking
@@ -37,7 +37,7 @@ function recordsConfig() {
     startServer
 
     traffic_ctl config set proxy.config.reverse_proxy.enabled 1
-    traffic_ctl config set proxy.config.exec_thread.autoconfig 1
+    traffic_ctl config set proxy.config.exec_thread.autoconfig.enabled 1
 
     # Good default on a dedicated box or SMP VM.
     #traffic_ctl config set proxy.config.exec_thread.autoconfig.scale 3.000000

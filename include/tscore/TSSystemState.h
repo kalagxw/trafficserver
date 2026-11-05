@@ -1,7 +1,7 @@
 /**
   @file TSSystemState.h
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -57,7 +57,7 @@ public:
     return unlikely(_instance().event_system_shut_down);
   }
 
-  // Keeps track if the server is in draining state, follows the proxy.node.config.draining metric.
+  // Keeps track if the server is in draining state, follows the proxy.process.proxy.draining metric.
   //
   static bool
   is_draining()

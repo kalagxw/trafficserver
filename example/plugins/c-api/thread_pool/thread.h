@@ -26,37 +26,36 @@
 #define PLUGIN_NAME "psi"
 
 #define MAGIC_ALIVE 0xfeedbabe
-#define MAGIC_DEAD 0xdeadbeef
+#define MAGIC_DEAD  0xdeadbeef
 
 /* If more than MAX_JOBS_ALARM are present in queue, the plugin
    will log error messages. This should be tuned based on your application */
 #define MAX_JOBS_ALARM 1000
 
-typedef int (*ExecFunc)(TSCont, void *);
+using ExecFunc = int (*)(TSCont, void *);
 
 /* Structure that contains all information for a job execution */
-typedef struct {
+struct Job {
   unsigned int magic;
-  TSCont cont;   /* Continuation to call once job is done */
-  ExecFunc func; /* Job function */
-  void *data;    /* Any data to pass to the job function */
-} Job;
+  TSCont       cont; /* Continuation to call once job is done */
+  ExecFunc     func; /* Job function */
+  void        *data; /* Any data to pass to the job function */
+};
 
 /* Implementation of the queue for jobs */
-struct cell_rec {
+struct Cell {
   unsigned int magic;
-  void *ptr_data;
-  struct cell_rec *ptr_next;
-  struct cell_rec *ptr_prev;
+  void        *ptr_data;
+  struct Cell *ptr_next;
+  struct Cell *ptr_prev;
 };
-typedef struct cell_rec Cell;
 
-typedef struct {
-  Cell *head;
-  Cell *tail;
-  int nb_elem;
+struct Queue {
+  Cell   *head;
+  Cell   *tail;
+  int     nb_elem;
   TSMutex mutex;
-} Queue;
+};
 
 /* queue manipulation functions */
 void init_queue(Queue *q);

@@ -38,6 +38,20 @@ plugin allows the following:
    blocks that can be spread across multiple storage
    devices and within cache groups.
 
+How It Works
+============
+
+The `slice` plugin takes GET requests and breaks them into
+successive aligned range requested blocks.  It issues these
+range requests back into the ATS instance and relies on the
+`cache_range_requests` plugin to interact with the caching layer.
+
+This design was chosen because the `cache_range_requests`
+plugin was already proven to work well with the ATS caching layer.
+The `slice` plugin has the already difficult task of managing
+multiple block requests and all of the associated flow control
+between the cache_range_requests plugin and the downstream clients.
+
 Configuration
 =============
 
@@ -118,20 +132,75 @@ The slice plugin supports the following options::
         to indicate that the slice plugin should be skipped.
         -s for short
 
-    --crr-ims-header=<header name> (default: X-Crr-Ims)
+    --crr-ident-header=<header name> (default: X-Crr-Ident)
         Header name used by the slice plugin to tell the
-        `cache_range_requests` plugin that a request should
-        be marked as STALE.  Used for self healing.
-        This must match the `--ims-header` option used by the
-        `cache_range_requests` plugin.
-        -i for short
+        `cache_range_requests` plugin the identifier of the
+        first/reference slice fetched.  First Etag is preferred
+        followed by Last-Modified. The `cache_range_requests`
+				plugin uses this header to flip cache lookup status
+				to STALE or FRESH depending on the header.
 
     --prefetch-count=<int> (optional)
         Default is 0
         Prefetches successive 'n' slice block requests in the background
-        and cached. Especially for large objects, prefetching can improve
-        cache miss latency.
+        and caches (with `cache_range_requests` plugin). Prefetching is only
+        enabled when first block (of the client request) is a cacheable object
+        with miss or hit-stale status. Especially for large objects, prefetching
+        can improve cache miss latency.
         -f for short
+
+    --strip-range-for-head (optional)
+        Enable slice plugin to strip Range header for HEAD requests.
+        -h for short
+
+    --minimum-size (optional)
+    --metadata-cache-size (optional)
+    --stats-prefix (optional)
+        In combination, these three options allow for conditional slice.
+        Specify the minimum size object to slice with --minimum-size.  Allowed
+        values are the same as --blockbytes.  Conditional slicing uses a cache
+        of object sizes to make the decision of whether to slice.  The cache
+        will only store the URL of large objects as they are discovered in
+        origin responses.  You should set the --metadata-cache-size to by
+        estimating the working set size of large objects.  You can use
+        stats to determine whether --metadata-cache-size was set optimally.
+        Stat names are prefixed with the value of --stats-prefix.  The names
+        are:
+
+        <prefix>.metadata_cache.true_large_objects - large object cache hits
+        <prefix>.metadata_cache.true_small_objects - small object cache hits
+        <prefix>.metadata_cache.false_large_objects - large object cache misses
+        <prefix>.metadata_cache.false_small_objects - small object cache misses
+        <prefix>.metadata_cache.no_content_length - number of responses without content length
+        <prefix>.metadata_cache.bad_content_length - number of responses with invalid content length
+        <prefix>.metadata_cache.no_url - number of responses where URL parsing failed
+
+        If an object size is not found in the object size cache, the plugin
+        will not slice the object, and will turn off ATS cache on this request.
+        The object size will be cached in following requests, and slice will
+        proceed normally if the object meets the minimum size requirement.
+
+        Range requests from the client for small objects are passed through the
+        plugin unchanged.  If you use the `cache_range_requests` plugin, slice plugin
+        will communicate with `cache_range_requests` using an internal header
+        that causes `cache_range_requests` to be bypassed in such requests, and
+        allow ATS to handle those range requests internally.
+
+    --purge-probe-blocks=<int> (optional)
+        Default is 8
+        How many consecutive uncached slice blocks a PURGE walks, before any block
+        has reported the object's extent, until it concludes that nothing about the
+        object is cached.  May be overridden per request with the header named by
+        ``--purge-probe-header``.  See `Purge Requests`_.
+        -q for short
+
+    --purge-probe-header=<string> (optional)
+        Default is X-Slice-Purge-Probe
+        Name of the request header a PURGE may use to override
+        ``--purge-probe-blocks`` for that request.  A malformed value is ignored
+        in favour of the configured default.  Slice strips this header from the
+        block requests it issues.
+        -H for short
 
 Examples::
 
@@ -246,31 +315,145 @@ Self Healing
 ------------
 
 The slice plugin uses the very first slice as a reference slice which
-uses content-length and last-modified and/or etags to ensure assembled
+uses content-length and etag or last-modified headers to ensure assembled
 blocks come from the same asset.  In the case where a slice from a parent
 is fetched which indicates that the asset has changed, the slice plugin
 will attempt to self heal the asset.  The `cache_range_requests` plugin
-must be configured with the `--consider-ims` parameter in order for
+must be configured with the `--consider-ident` parameter in order for
 this to work.
 
 Example `remap.config` configuration::
 
   map http://slice/ http://parent/ @plugin=slice.so @pparam=--remap-host=cache_range_requests
-  map http://cache_range_requests/ http://parent/ @plugin=cache_range_requests.so @pparam=--consider-ims
+  map http://cache_range_requests/ http://parent/ @plugin=cache_range_requests.so @pparam=--consider-ident
 
-When a request is served, the slice plugin uses reference slice 0 to
-build a response to the client.  When subsequent slices are fetched they
-are checked against this reference slice.  If a mismatch occurs an IMS
-request for the offending slice is made through the `cache_range_requests`
-plugin using an X-Crr-Ims header.  If the refetched slice still mismatches
-then the client connection is aborted a crr IMS request is made for
-the reference slice in an attempt to refetch it.
+When a request is served, the slice plugin uses the header from slice 0
+requested range build a response to the client. When subsequent slices
+are requested from the parent the X-Crr-Ident header is populated with
+the reference identifier (etag or last-modified) and the request is made
+through the `cache_range_requests` plugin.  The `cache_range_requests`
+plugin will then decide whether to send back the current cached slice
+(if the identifier matches) or attempt to refetch or "heal" that slice
+by marking it STALE.
 
-Optionally (but not recommended) the plugin may be configured to use
-the first slice in the request as the reference slice.  This option
-is faster since it does not visit any slices outside those needed to
-fulfill a request.  However this may still cause problems if the
-requested range was calculated from a newer version of the asset.
+If the slice returned by the cache_range_requests plugin still
+doesn't match the reference slice then client side of the transaction
+is aborted.  The plugin will then attempt to "heal" the reference
+slice.  The X-Crr-Ident header is populated with the new identifer
+and the reference slice is re-requested with the intent of having the
+`cache_range_requests` plugin "heal" the reference slice.
+
+The plugin may be configured to use the first slice of the request
+as the reference slice instead of the asset slice 0.  This option is
+faster as it does not visit any slices outside those needed to fulfill
+a request. This option may cause serious out of sync issues as range
+requests may end up being served from temporally different assets.
+
+Purge Requests
+--------------
+
+The slice plugin supports PURGE requests, discarding the requested object from
+cache. Without a range every block is discarded; with a range, the blocks that
+range covers are. Two cases below purge more than the range names: a suffix range,
+and block 0 when ``--ref-relative`` is disabled.
+
+Slice issues one PURGE per block and walks every block it was asked for, whether
+or not each one is currently cached. A block that is already absent answers 404
+internally; that is simply noted and the walk continues, so a gap left by
+per-block eviction cannot leave the blocks behind it in cache.
+
+Slice learns where the object ends from the blocks it removes. PURGE is a Traffic
+Server extension, so a successful block purge reports the removed object's extent
+in a ``X-Purged-Content-Range`` header, and the walk continues to the last block that
+extent implies. Blocks of one object can disagree about its length when the origin
+object has been replaced in place; slice takes the largest extent any block
+reports, so the longer generation's tail is not left behind.
+
+Until some block has reported an extent, a walk over an open-ended range has no
+end but the miss bound: it stops after ``--purge-probe-blocks`` consecutive
+uncached blocks and reports that nothing was found. That is what bounds a PURGE
+for a URL which is not cached at all.
+
+An operator often knows more about the object than the plugin does, since the
+block count is just the object's size divided by the block size. That count can be
+supplied per request with the header named by ``--purge-probe-header``, default
+``X-Slice-Purge-Probe``::
+
+    PURGE /obj HTTP/1.1
+    X-Slice-Purge-Probe: 64
+
+This only changes how long the walk keeps going without having found anything; it
+never limits how many blocks are purged once an extent is known.
+
+The bound has to be able to span a whole object, because in the worst case only
+the object's last block is still cached, so the value an operator wants is the
+object's size divided by the block size: a 10 GB object in 1 MB blocks needs
+10240. There is no ceiling on it beyond that, since reaching the bound costs one
+internal cache lookup per block and PURGE is already restricted by
+:file:`ip_allow.yaml`. A malformed value is ignored in favour of the configured
+default, and slice strips the header from the block requests it issues.
+
+If the bound is reached, slice logs that it gave up and reports ``404`` even though
+later blocks may still be cached. Raise ``--purge-probe-blocks``, or send the
+override, for objects whose leading blocks are routinely absent.
+
+A client range that is already closed, such as ``bytes=0-6399999999``, bounds the
+walk directly, and is clamped against the object's extent as soon as some block
+reports one. An over-estimate therefore costs no extra block PURGEs beyond the end
+of the object, and if no block is cached at all the miss bound stops the walk.
+
+A suffix range, ``bytes=-<n>``, names its blocks by their distance from an end
+slice does not know yet, and purging is the only way it could find out. Rather
+than guess at the start, such a purge is widened to the whole object: a superset of
+what was asked for, so the named blocks certainly go. A ``GET`` with the same header
+is unaffected and still returns exactly the last *n* bytes.
+
+The response is sent once the walk is complete: ``200`` if at least one block was
+removed, ``404`` if none was found. This matches what Traffic Server reports for a
+PURGE of an object that is not sliced.
+
+A block whose PURGE returns neither ``200`` nor ``404`` — a ``403`` from
+:file:`ip_allow.yaml`, for instance, or a ``502`` — says nothing about whether that
+block was cached, and nothing about the blocks behind it. The walk stops there and that
+status is reported in place of ``200``, so the two success statuses keep meaning what
+they say: ``200`` that the object is gone and ``404`` that it was not there, never that
+this proxy could not tell. Blocks the walk had already removed stay removed, and blocks
+behind the failing one are left cached, so such a PURGE is worth repeating once
+whatever refused it has been dealt with.
+
+The functionality works with ``--ref-relative`` both enabled and disabled. With it
+disabled, block 0 is always the first block walked, so a PURGE whose range does not
+cover block 0 still purges it.
+
+Conditional Slicing
+-------------------
+
+The goal of conditional slicing is to slice large objects and avoid the cost of slicing on small
+objects.  If `--minimum-size` is specified, conditional slicing is enabled and works as follows.
+
+The plugin builds a object size cache in memory.  The key is the URL of the object.  Only
+large object URLs are written to the cache.  The object size cache uses CLOCK eviction algorithm
+in order to have lazy promotion behavior.
+
+When a URL not found in the object size cache, the plugin treats the object as a small object.  It
+will not intercept the request.  The request is processed by ATS without any slice logic.  Upon
+receiving a response, the slice plugin will check the response content length to update the object
+size cache if necessary.
+
+When a large URL is requested for the first time, conditional slicing will not intercept that
+request since the URL is not known to be large.  This will cause an ATS cache miss and the request
+will go to origin server.  Slice plugin will turn off writing to cache for this response, because
+it expects to slice this object in future requests.
+
+If the object size cache evicts a URL, the size of the object for that URL will need to be learned
+again in a subsequent request, and the behavior above will happen again.
+
+If the URL is found in the object size cache, conditional slicing treats the object as a large object
+and will activate the slicing logic as described in the rest of this document.
+
+If the client sends a range request, and that URL is not in the object size cache, the slice plugin
+will forward the range request to ATS core.  It also attaches an internal header in order to deactivate
+the `cache_range_requests` plugin for this range request.
 
 Important Notes
 ===============

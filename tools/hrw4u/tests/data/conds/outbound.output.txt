@@ -1,0 +1,3 @@
+cond %{SEND_REQUEST_HDR_HOOK} [AND]
+cond %{SERVER-URL:HOST} /foo|bar/
+    set-header X-Valid "%{SERVER-URL:PORT}"

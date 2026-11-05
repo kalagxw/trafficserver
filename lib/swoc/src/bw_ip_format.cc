@@ -138,13 +138,15 @@ bwformat(BufferWriter &w, Spec const &spec, sockaddr const *addr) {
       bwformat(w, spec, reinterpret_cast<sockaddr_in6 const *>(addr)->sin6_addr);
       break;
     default:
-      w.print("*Not IP address [{}]*", addr->sa_family);
+      w.print("*Invalid IP family [{}]*", addr->sa_family);
       break;
     }
-    if (bracket_p)
+    if (bracket_p) {
       w.write(']');
-    if (port_p)
+    }
+    if (port_p) {
       w.write(':');
+    }
   }
   if (port_p) {
     if (local_numeric_fill_p) {
@@ -158,8 +160,9 @@ bwformat(BufferWriter &w, Spec const &spec, sockaddr const *addr) {
   }
   if (family_p) {
     local_spec._min = 0;
-    if (addr_p || port_p)
+    if (addr_p || port_p) {
       w.write(' ');
+    }
     if (spec.has_numeric_type()) {
       bwformat(w, local_spec, static_cast<uintmax_t>(addr->sa_family));
     } else {
@@ -208,6 +211,38 @@ bwformat(BufferWriter &w, Spec const &spec, IP6Addr const &addr) {
 }
 
 BufferWriter &
+bwformat(BufferWriter &w, Spec const &spec, IP4Srv const &srv) {
+  bwformat(w, spec, srv.addr());
+  if (srv.host_order_port()) {
+    w.print(":{}", srv.host_order_port());
+  }
+  return w;
+}
+
+BufferWriter &
+bwformat(BufferWriter &w, Spec const &spec, IP6Srv const &srv) {
+  auto port = srv.host_order_port();
+  if (port) {
+    w.write('[');
+    bwformat(w, spec, srv.addr());
+    w.print("]:{}", port);
+  } else {
+    bwformat(w, spec, srv.addr());
+  }
+  return w;
+}
+
+BufferWriter &
+bwformat(BufferWriter &w, Spec const &spec, IPSrv const &srv) {
+  if (srv.is_ip4()) {
+    bwformat(w, spec, IP4Srv(srv));
+  } else if (srv.is_ip6()) {
+    bwformat(w, spec, IP6Srv(srv));
+  }
+  return w;
+}
+
+BufferWriter &
 bwformat(BufferWriter &w, Spec const &spec, IPAddr const &addr) {
   Spec local_spec{spec}; // Format for address elements and port.
   bool addr_p{true};
@@ -238,7 +273,7 @@ bwformat(BufferWriter &w, Spec const &spec, IPAddr const &addr) {
 
   if (addr_p) {
     if (addr.is_ip4()) {
-      swoc::bwformat(w, spec, static_cast<IP4Addr const &>(addr));
+      swoc::bwformat(w, spec, addr.ip4());
     } else if (addr.is_ip6()) {
       swoc::bwformat(w, spec, addr.ip6().network_order());
     } else {
@@ -312,13 +347,19 @@ bwformat(BufferWriter &w, Spec const &spec, IP6Range const &range) {
 
 BufferWriter &
 bwformat(BufferWriter &w, Spec const &spec, IPRange const &range) {
-  return range.is(AF_INET) ? bwformat(w, spec, range.ip4()) :
-                             range.is(AF_INET6) ? bwformat(w, spec, range.ip6()) : w.write("*-*"_tv);
+  return range.is(AF_INET)  ? bwformat(w, spec, range.ip4()) :
+         range.is(AF_INET6) ? bwformat(w, spec, range.ip6()) :
+                              w.write("*-*"_tv);
+}
+
+BufferWriter &
+bwformat(BufferWriter &w, Spec const &spec, IPRangeView const &rv) {
+  return rv.is(AF_INET) ? bwformat(w, spec, rv.ip4()) : rv.is(AF_INET6) ? bwformat(w, spec, rv.ip6()) : w.write("*-*"_tv);
 }
 
 BufferWriter &
 bwformat(BufferWriter &w, Spec const &spec, IP4Net const &net) {
-  bwformat(w, spec, net.lower_bound());
+  bwformat(w, spec, net.min());
   w.write('/');
   bwformat(w, Spec{}, net.mask().width());
   return w;
@@ -326,7 +367,7 @@ bwformat(BufferWriter &w, Spec const &spec, IP4Net const &net) {
 
 BufferWriter &
 bwformat(BufferWriter &w, Spec const &spec, IP6Net const &net) {
-  bwformat(w, spec, net.lower_bound());
+  bwformat(w, spec, net.min());
   w.write('/');
   bwformat(w, Spec{}, net.mask().width());
   return w;

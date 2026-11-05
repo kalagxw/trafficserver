@@ -36,8 +36,14 @@
 
 #define PLUGIN_NAME "protocol"
 
+namespace protocol_ns
+{
+extern DbgCtl dbg_ctl;
+}
+using namespace protocol_ns;
+
 #define MAX_SERVER_NAME_LENGTH 1024
-#define MAX_FILE_NAME_LENGTH 1024
+#define MAX_FILE_NAME_LENGTH   1024
 
 /* MAX_SERVER_NAME_LENGTH + MAX_FILE_NAME_LENGTH + strlen("\n\n") */
 #define MAX_REQUEST_LENGTH 2050

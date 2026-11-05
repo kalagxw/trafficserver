@@ -34,9 +34,7 @@ into a single rate limiter.
     This is still work in progress, in particularly the configuration and
     the IP reputation system needs some work. In particular:
 
-    * We need a proper YAML configuration overall, allowing us to configure
-      better per service controls as well as sharing resources between remap
-      rules or SNI.
+    * The remap configuration needs YAML support.
     * We need reloadable configurations.
     * The IP reputation currently only works with the global plugin settings.
     * There is no support for adding allow listed IPs to the IP reputation.
@@ -51,7 +49,13 @@ are available:
 
 .. option:: --limit
 
-   The maximum number of active client transactions.
+   The maximum number of active client transactions. This option can also be
+   used in conjunction with ``--rate``.
+
+.. option:: --rate
+
+   The acceptable rate, in transaction or connections per second, that we will
+   allow. This option can also be used in conjunction with ``--limit``.
 
 .. option:: --queue
 
@@ -60,21 +64,21 @@ are available:
    queued transactions we will allow. When this threshold is reached, all
    additional transactions are immediately served with an error message.
 
-   The queue is effectively disabled if this is set to `0`, which implies
+   The queue is effectively disabled if this is set to ``0``, which implies
    that when the transaction limit is reached, we immediately start serving
    error responses.
 
-   The default queue size is `UINT_MAX`, which is essentially unlimited.
+   The default queue size is ``UINT_MAX``, which is essentially unlimited.
 
 .. option:: --error
 
    An optional HTTP status error code, to be used together with the
-   :option:`--queue` option above. The default is `429`.
+   :option:`--queue` option above. The default is ``429``.
 
 .. option:: --retry
 
-   An optional retry-after value, which if set will cause rejected (e.g. `429`)
-   responses to also include a header `Retry-After`.
+   An optional retry-after value, which if set will cause rejected (e.g. ``429``)
+   responses to also include a header ``Retry-After``.
 
 .. option:: --header
 
@@ -83,13 +87,16 @@ are available:
    header is the delay, in milliseconds. This can be useful to for example
    log the delays for later analysis.
 
-   It is recommended that an `@` header is used here, e.g. `@RateLimit-Delay`,
+   It is recommended that an `@` header is used here, e.g. ``@RateLimit-Delay``,
    since this header will not leave the ATS server instance.
 
 .. option:: --maxage
 
-   An optional `max-age` for how long a transaction can sit in the delay queue.
-   The value (default 0) is the age in milliseconds.
+   An optional maximum age for how long a transaction can sit in the delay queue.
+   The value (default 0) is the age in **milliseconds**.
+
+   Note that the equivalent YAML setting, ``max_age`` under a ``queue`` node, is in
+   seconds.
 
 .. option:: --prefix
 
@@ -103,6 +110,16 @@ are available:
    noting that in the latter exampe, the non-standard scheme and port led to
    ":8080" being appended to the string.
 
+.. option:: --conntrack
+
+   This flag tells the limiter that rather than limiting the number of active transactions,
+   it should limit the number of active connections. This allows an established connection
+   to make any number of transactions, but limits the number of connections that can be
+   active at any one time.
+
+   Note that it's highly recommended that you keep a very low ``keep-alive`` timeout for the
+   connections that are using this rate limiter.
+
 Global Plugin
 -------------
 
@@ -110,9 +127,10 @@ As a global plugin, the rate limiting currently applies only for TLS enabled
 connections, based on the SNI from the TLS handshake. As a global plugin we
 also have the support of an IP reputation system, see below for configurations.
 
-The basic use is as::
+In addition, the global plugin must be configured via a reloadable YAML
+configuration file. The basic use is as::
 
-    rate_limit.so SNI=www1.example.com,www2.example.com --limit=2 --queue=2 --maxage=10000
+    rate_limit.so some_config.yaml
 
 .. Note::
 
@@ -122,72 +140,162 @@ The basic use is as::
     done using e.g. the ``conf_remap`` plugin,
     :ts:cv:`proxy.config.http.keep_alive_no_activity_timeout_in`.
 
-The following options are available:
 
-.. program:: rate-limit
+The YAML configuration can have the following format, where the various sections
+and nodes are documented below.
 
-.. option:: --limit
+   .. code-block:: yaml
 
-   The maximum number of active client transactions.
+      selector:
+         - sni: test1.example.com
+            limit: 1000
+            rate: 200
+            queue:
+               size: 1000
+               max_age: 30
+            metrics:
+               tag: example.com
+               prefix: ddos
+            ip-rep: main
+            exclude: internal
+         - sni: test2.example.com
+            aliases: [test3.example.com, test4.example.com]
+            limit: 100
+      ip-rep:
+         - name: main
+            buckets: 10
+            size: 15
+            percentage: 90
+            max_age: 300
+            perma-block:
+               limit: 100
+               threshold: 1
+               max_age: 1800
+      lists:
+         - name: internal
+            cidr:
+               - 10.0.0.0/8
+               - 192.168.0.0/16
 
-.. option:: --queue
 
-   When the limit (above) has been reached, all new connections are placed
-   on a FIFO queue. This option (optional) sets an upper bound on how many
-   queued transactions we will allow. When this threshold is reached, all
-   additional connections are immediately errored out in the TLS handshake.
+For the top level `selector` node, the following options are available:
 
-   The queue is effectively disabled if this is set to `0`, which implies
-   that when the transaction limit is reached, we immediately start serving
-   error responses.
+.. option:: sni
 
-   The default queue size is `UINT_MAX`, which is essentially unlimited.
+   The SNI to match for this rate limiter.
 
-.. option:: --maxage
+.. option:: limit
 
-   An optional `max-age` for how long a transaction can sit in the delay queue.
-   The value (default 0) is the age in milliseconds.
+   The maximum number of active client transactions. This can also be used
+   in conjunction with the ``rate`` option.
 
-.. option:: --prefix
+.. option:: rate
 
-   An optional metric prefix to use instead of the default (plugin.rate_limiter).
+   This limits the number of new sessions per second. It can be used in
+   conjunction with the ``limit`` option.
 
-.. option:: --tag
+.. option:: aliases
 
-   An optional metric tag to use instead of the default. When a tag is not specified
-   the plugin will use the FQDN of the SNI associated with each rate limiter instance
-   created during plugin initialization.
+      A list of aliases for the SNI, which will also be matched by this rate limiter.
 
-.. option:: --iprep_buckets
+.. option:: ip-rep
+
+      The name of the IP reputation node to use for this rate limiter. If not
+      specified, the IP reputation system is not used for this rate limiter.
+
+.. option:: exclude
+
+      A list of IP CIDR ranges to exclude from any rate limiting. Any IP matching
+      this list will not be rate limited, even if the SNI matches.
+
+.. option:: queue
+
+   If enabled, when the limit (above) has been reached, all new connections
+   are placed on a FIFO queue. This option sets an upper bound on
+   how many queued transactions we will allow. When this threshold is reached,
+   all additional connections are immediately errored out in the TLS handshake.
+
+   The queue option can include a `size` and a `max_age` option. The size defaults
+   to ``UINT_MAX``, which is essentially unlimited. The max_age is in seconds and
+   defaults to ``0``, which means no age limit.
+
+   No queue is enabled without this configuration directive, but it can also be
+   disabled explicitly if the size is set to ``0``.
+
+.. option:: metrics
+
+   This is an optional node, which can be used to configure the metrics for
+   this rate limiter. If not specified, no metrics will be added.
+
+   The metrics node can include a `tag` and a `prefix` option. The tag is
+   default to the SNI, and the prefix is default to ``plugin.rate_limiter``.
+
+The `lists` node is used to configure IP lists, which can be used to exclude
+certain address ranges from the rate limiting. The following options are used:
+
+.. option:: name
+
+   The name of the IP reputation setup, used to refer to it from the rate limiters.
+
+.. option:: cidr
+
+   A list of CIDR ranges to add to this rule. The format is e.g. `10.0.0.0/8`.
+
+The `ip-rep`` node is used to configure the IP reputation system, there can be
+zero, one or many IP reputation setups. Each setup is configured with a name,
+and the following options:
+
+.. option:: name
+
+   The name of the IP reputation setup, used to refer to it from the rate limiters.
+
+.. option:: buckets
+
    The number of LRU buckets to use for the IP reputation. A good number here
-   is 10, but can be configured. The reason for the different buckets is to
-   account for a pseudo-sorted list of IPs on the frequency seen. Too few buckets
-   will not be enough to keep such a sorting, rendering the algorithm useless. To
-   function in our setup, the number of buckets must be less than ``100``.
+   is ``10``, which is the default, but can be configured. The reason for the different
+   buckets is to account for a pseudo-sorted list of IPs on the frequency seen. Too
+   few buckets will not be enough to keep such sorting, rendering the algorithm useless.
+   To function in our setup, the number of buckets must be less than ``100``.
 
-.. option:: --iprep_bucketsize
-   This is the size of the largest LRU bucket (the `entry bucket`), `15` is a good
-   value. This is a power of 2, so `15` means the largest LRU can hold `32768` entries.
-   Note that this option must be bigger then the `--iprep_buckets` setting, for the
+.. option:: size
+
+   This is the size of the largest LRU bucket (the ``entry bucket``), ``15`` is a good
+   value. This is a power of 2, so ``15`` means the largest LRU can hold ``32768`` entries.
+   Note that this option must be bigger then the ``--iprep_buckets`` setting, for the
    bucket halfing to function.
 
-.. option:: --iprep_maxage
-   This is used for aging out entries out of the LRU, the default is `0` which means
+   The default here is ``0``, which means the IP reputation filter is not enabled!
+
+.. option:: percentage
+
+   This is the minimum percentage of the ``limit`` that the pressure must be at, before
+   we start blocking IPs. The default is ``0.9`` which means ``90%`` of the limit.
+
+.. option:: max_age
+
+   This is used for aging out entries out of the LRU, the default is ``0`` which means
    no aging happens. Even with no aging, entries will eventually fall out of buckets
    because of the LRU mechanism that kicks in. The aging is here to make sure a spike
    in traffic from an IP doesn't keep the entry for too long in the LRUs.
 
-.. option:: --iprep_permablock_limit
+In addition, there's an optional configuration for the permanently blocking buckets,
+`perma-block`. This is a special bucket, which is only used for IPs which have been
+blocked for a long time. The configuration for this bucket is:
+
+.. option:: limit
+
    The minimum number of hits an IP must reach to get moved to the permanent bucket.
    In this bucket, entries will stay for 2x
 
-.. option:: --iprep_permablock_pressure
-   This option specifies from which bucket an IP is allowed to move from into the
-   perma block bucket. A good value here is likely `0` or `1`, which is very conservative.
+.. option:: threshold
 
-.. option:: --iprep_permablock_maxage
-   Similar to `--iprep_maxage` above, but only applies to the long term (`perma-block`)
-   bucket. Default is `0`, which means no aging to this bucket is applied.
+   This option specifies from which bucket an IP is allowed to move from into the
+   perma block bucket. A good value here is likely ``0`` or ``1``, which is very conservative.
+
+.. option:: max_age
+
+   Like above, but only applies to the long term (`perma-block`) bucket. Default is
+   ``0``, which means no aging to this bucket is applied.
 
 Metrics
 -------
@@ -252,9 +360,9 @@ for longer term blocking, only the most abusive elements would end up here.
 Examples
 --------
 
-This example shows a simple rate limiting of `128` concurrently active client
-transactions, with a maximum queue size of `256`. The default of HTTP status
-code `429` is used when queue is full: ::
+This example shows a simple rate limiting of ``128`` concurrently active client
+transactions, with a maximum queue size of ``256``. The default of HTTP status
+code ``429`` is used when queue is full: ::
 
     map http://cdn.example.com/ http://some-server.example.com \
       @plugin=rate_limit.so @pparam=--limit=128 @pparam=--queue=256
@@ -268,7 +376,7 @@ queue, and add a header with the transaction delay if it was queued: ::
       @pparam=--header=@RateLimit-Delay
 
 This final example will limit the active transaction, queue size, and also
-add a `Retry-After` header once the queue is full and we return a `429` error: ::
+add a ``Retry-After`` header once the queue is full and we return a ``429`` error: ::
 
     map http://cdn.example.com/ http://some-server.example.com \
       @plugin=rate_limit.so @pparam=--limit=256 @pparam=--queue=1024 \

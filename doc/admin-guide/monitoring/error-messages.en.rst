@@ -30,7 +30,7 @@ Fatal Process Messages
 ======================
 
 ``Accept port is not between 1 and 65535. Please check configuration``
-   The port specified in :file:`records.config` that accepts
+   The port specified in :file:`records.yaml` that accepts
    incoming HTTP requests is not valid.
 
 ``Self loop is detected in parent proxy configuration``
@@ -70,58 +70,10 @@ Process Warnings
    too many errors. The disk might be corrupt and might have to be
    replaced.
 
-``No cache disks specified in storage.config file: cache disabled``
-   The Traffic Server :file:`storage.config` file does not list any cache
+``No cache disks specified in storage.yaml file: cache disabled``
+   The Traffic Server :file:`storage.yaml` file does not list any cache
    disks; Traffic Server is running in proxy-only mode. You must add
-   the disks you want to use for the cache to :file:`storage.config`.
-
-Alarm Messages
-==============
-
-``[ConfigManager::ConfigManager] Config file is read-only: <filename>``
-   Go to the Traffic Server ``config`` directory and check the
-   indicated file permissions; change if necessary.
-
-``[ConfigManager::ConfigManager] Unable to read or write config file <filename>``
-   Go to the Traffic Server ``config`` directory and make sure the
-   indicated file exists. Check permissions and modify if necessary.
-
-``[Traffic Manager] Configuration File Update Failed: <error number>``
-   Go to the Traffic Server ``config`` directory and check the
-   indicated file permissions; change if necessary.
-
-``[Traffic Manager] Mgmt <==>Proxy conn. closed``
-   An informational message to inform you that the :program:`traffic_server`
-   process is down.
-
-``Access logging suspended - configured space allocation exhausted.``
-   The space allocated to the event log files is full; you must either
-   increase the space or delete some log files so that access logging
-   to continue. To prevent this error, consider rolling log files more
-   frequently and enabling the autodelete feature.
-
-``Access logging suspended - no more space on the logging partition.``
-   The entire partition containing the event logs is full; you must
-   delete or move some log files to enable access logging to continue.
-   To prevent this error, consider rolling log files more frequently
-   and enabling the autodelete feature.
-
-``Created zero length place holder for config file <filename>``
-   Go to the Traffic Server ``config`` directory and check the
-   indicated file. If it is indeed zero in length, then use a backup
-   copy of the configuration file.
-
-``Traffic Server could not open logfile <filename>``
-   Check permissions for the indicated file and the logging directory.
-
-``Traffic Server failed to parse line <line number> of the logging config file <filename>``
-   Check your custom log configuration file; there could be syntax
-   errors. Refer to :ref:`admin-logging-fields` for correct custom log format fields.
-
-``vip_config binary is not setuid root, manager will be unable to enable virtual ip addresses``
-   The :program:`traffic_manager` process is not able to set virtual IP
-   addresses. You must ``setuid root`` for the ``vip_config`` file in
-   the Traffic Server ``bin`` directory.
+   the disks you want to use for the cache to :file:`storage.yaml`.
 
 .. _body-factory:
 
@@ -155,6 +107,47 @@ it would be used instead of ``cache#read_error`` if there is no ``apache_cache#r
 
 The text for an error message is processed as if it were a :ref:`admin-logging-fields` which
 enables customization by values present in the transaction for which the error occurred.
+
+.. _body-factory-info:
+
+Template Set Metadata
+---------------------
+
+Each template set directory must contain a ``.body_factory_info`` file for the template set to be
+loaded. This file controls the ``Content-Type``, ``Content-Language``, and character set of the
+HTTP response headers sent with error pages.
+
+The following directives are supported:
+
+``Content-Language``
+   The natural language of the error pages. This value is sent in the ``Content-Language`` HTTP
+   response header. Default: ``en``.
+
+``Content-Charset``
+   The character encoding of the error pages. When ``Content-Type`` is not explicitly configured,
+   this value is appended to the default ``text/html`` type as a ``charset`` parameter. Default:
+   ``utf-8``.
+
+``Content-Type``
+   The complete MIME type for the error response. The value is used exactly as configured, so include
+   a ``charset`` parameter here when one is desired. Default: ``text/html; charset=utf-8``.
+
+For example, to serve plain text error pages in English::
+
+   Content-Language: en
+   Content-Charset: utf-8
+   Content-Type: text/plain
+
+This would produce the response header ``Content-Type: text/plain``. To declare the character set as
+well, configure ``Content-Type: text/plain; charset=utf-8``.
+
+To describe Korean error pages encoded in the ``iso-2022-kr`` character set::
+
+   Content-Language: ko-KR
+   Content-Charset: iso-2022-kr
+
+If the file is empty or contains only comments, the defaults are used: English ``text/html`` in
+the ``utf-8`` character set. If the file is absent, the entire template set directory is skipped.
 
 The following table lists the hard-coded Traffic Server HTTP messages,
 with corresponding HTTP response codes and customizable files.
@@ -317,4 +310,3 @@ with corresponding HTTP response codes and customizable files.
    Could not process this request because the request uri
    was too long ..
    ``request#uri_len_too_long``
-

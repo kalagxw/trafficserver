@@ -16,7 +16,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSHttpTxnAborted
 ================
@@ -28,17 +28,21 @@ Synopsis
 
     #include <ts/ts.h>
 
-.. c:function:: TSReturnCode TSHttpTxnAborted(TSHttpTxn txnp)
+.. function:: TSReturnCode TSHttpTxnAborted(TSHttpTxn txnp, bool *client_abort)
 
 Description
 -----------
 
-:c:func:`TSHttpTxnAborted` returns :c:data:`TS_SUCCESS` if the requested
+:func:`TSHttpTxnAborted` returns :enumerator:`TS_SUCCESS` if the requested
 transaction is aborted. This function should be used to determine whether
 a transaction has been aborted before attempting to cache the results.
+
+Broadly, transaction aborts can be classified into either client side aborts or
+server side. To distinguish between these, we have another boolean parameter
+which gets set to TRUE in case of client side aborts.
 
 Return values
 -------------
 
-The API returns :c:data:`TS_SUCCESS`, if the requested transaction is aborted,
-:c:data:`TS_ERROR` otherwise.
+The API returns :enumerator:`TS_SUCCESS`, if the requested transaction is aborted,
+:enumerator:`TS_ERROR` otherwise.

@@ -106,15 +106,22 @@ Client/|TS| connections, you must do the following:
    and exchange encryption keys.
 
 #. Set the port number used for SSL communication using
-   :ts:cv:`proxy.config.http.server_ports` in :file:`records.config`.
+   :ts:cv:`proxy.config.http.server_ports` in :file:`records.yaml`.
 
 #. Set the appropriate base path for your SSL certificates and private keys
-   in :file:`records.config`. ::
+   in :file:`records.yaml`.
 
-        CONFIG proxy.config.ssl.server.cert.path STRING /opt/ts/etc/ssl/certs/
-        CONFIG proxy.config.ssl.server.private_key.path STRING /opt/ts/etc/ssl/keys/
+   .. code-block:: yaml
 
-#. Add an entry to :file:`ssl_multicert.config` for each certificate and key
+     records:
+       ssl:
+         server:
+           cert:
+             path: /opt/ts/etc/ssl/certs/
+           private_key:
+             path: /opt/ts/etc/ssl/keys
+
+#. Add an entry to :file:`ssl_multicert.yaml` for each certificate and key
    which your |TS| system will be using to terminate SSL connections
    with clients. ::
 
@@ -122,16 +129,21 @@ Client/|TS| connections, you must do the following:
         dest_ip=* ssl_cert_name=default.pem
 
 #. *Optional*: Configure the use of client certificates using the variable
-   :ts:cv:`proxy.config.ssl.client.certification_level` in :file:`records.config`.
+   :ts:cv:`proxy.config.ssl.client.certification_level` in :file:`records.yaml`.
    If you configure |TS| to require client certificates, then Traffic
    Server verifies the client certificate during the SSL handshake that
    authenticates the client. If you configure |TS| to not require
    client certificates, or if you configure certificates to be optional and the
    connecting client does not present one, then access to |TS| is
    managed through other |TS| options that have been set (such as
-   rules in :file:`ip_allow.yaml`). ::
+   rules in :file:`ip_allow.yaml`).:
 
-        CONFIG proxy.config.ssl.client.certification_level INT 0
+   .. code-block:: yaml
+
+      records:
+        ssl:
+          client:
+            certification_level: 0
 
    This variable permits one of the following values to be set:
 
@@ -146,11 +158,18 @@ Client/|TS| connections, you must do the following:
 #. *Optional*: Configure the use of Certification Authorities (CAs). CAs add
    security by verifying the identity of the person requesting a certificate.
    The list of acceptable CA signers is configured with
-   :ts:cv:`proxy.config.ssl.CA.cert.path` in :file:`records.config`. ::
+   :ts:cv:`proxy.config.ssl.CA.cert.path` in :file:`records.yaml`.:
 
-        CONFIG proxy.config.ssl.CA.cert.path STRING /opt/CA/certs/private-ca.pem
+   .. code-block:: yaml
 
-#. Run the command :option:`traffic_ctl server restart` to restart |TS|.
+      records:
+        ssl:
+          CA:
+            cert:
+              path: /opt/CA/certs/private-ca.pem
+
+
+#. Restart Traffic Server.
 
 .. _traffic-server-and-origin-server-connections:
 
@@ -207,35 +226,62 @@ and origin server connections, you must do the following:
    Certificate Authority recognized by your origin server.
 
    If you are using a client certificate, you must add its location to
-   :file:`records.config` in the setting :ts:cv:`proxy.config.ssl.client.cert.path`
-   and :ts:cv:`proxy.config.ssl.client.cert.filename`. ::
+   :file:`records.yaml` in the setting :ts:cv:`proxy.config.ssl.client.cert.path`
+   and :ts:cv:`proxy.config.ssl.client.cert.filename`.:
 
-        CONFIG proxy.config.ssl.client.cert.path STRING /opt/ts/etc/ssl/certs/
-        CONFIG proxy.config.ssl.client.cert.filename STRING client.pem
+   .. code-block:: yaml
+
+      records:
+        ssl:
+          client:
+            cert:
+              filename: client.pem
+              path: /opt/ts/etc/ssl/certs/
 
    You must also provide the paths to the private key for this certificate,
    unless the key is contained within the same file as the certificate, using
    :ts:cv:`proxy.config.ssl.client.private_key.path` and
-   :ts:cv:`proxy.config.ssl.client.private_key.filename`. ::
+   :ts:cv:`proxy.config.ssl.client.private_key.filename`.:
 
-        CONFIG proxy.config.ssl.client.private_key.path STRING /opt/ts/etc/ssl/keys/
-        CONFIG proxy.config.ssl.client.private_key.filename STRING client.pem
+   .. code-block:: yaml
+
+      records:
+        ssl:
+          client:
+            private_key:
+              filename: client.pem
+              path: /opt/ts/etc/ssl/keys/
+
 
 #. Enable or disable, per your security policy, server SSL certificate
    verification using :ts:cv:`proxy.config.ssl.client.verify.server.policy` in
-   :file:`records.config`. ::
+   :file:`records.yaml`. :
 
-        CONFIG proxy.config.ssl.client.verify.server.policy STRING ENFORCED
+.. code-block:: yaml
+
+   records:
+     ssl:
+       client:
+         verify:
+           server:
+             policy: ENFORCED
 
 #. Add the collection of authorized Certificate Authorities to the Traffic
-   Server configuration in :file:`records.config` using the settings
+   Server configuration in :file:`records.yaml` using the settings
    :ts:cv:`proxy.config.ssl.client.CA.cert.path` and
-   :ts:cv:`proxy.config.ssl.client.CA.cert.filename`. ::
+   :ts:cv:`proxy.config.ssl.client.CA.cert.filename`.:
 
-        CONFIG proxy.config.ssl.client.CA.cert.path STRING /opt/ts/etc/ssl/certs/
-        CONFIG proxy.config.ssl.client.CA.cert.filename STRING CAs.pem
+.. code-block:: yaml
 
-#. Run the command :option:`traffic_ctl server restart` to restart |TS|.
+   records:
+     ssl:
+       client:
+         CA:
+           cert:
+             filename: CAs.pem
+             path: /opt/ts/etc/ssl/certs/
+
+#. Restart Traffic Server.
 
 :doc:`mtls.en`
 ==============
@@ -256,7 +302,7 @@ a ticket key file as a reverse queue in 48-byte chunks.
 
 #. *Optional*: Delete the last ticket key from the ticket key file.
 
-#. Touch :file:`ssl_multicert.config` to indicate that the SSL configuration is stale.
+#. Touch :file:`ssl_multicert.yaml` to indicate that the SSL configuration is stale.
 
 #. Run the command :option:`traffic_ctl config reload` to apply the new ticket key.
 
@@ -289,7 +335,7 @@ Authority Information Access field of the signed certificate. For example::
                 CA Issuers - URI:http://cacerts.digicert.com/DigiCertSHA2SecureServerCA.crt
 
 |TS| can also use prefetched OCSP stapling responses if ssl_ocsp_name parameter
-is used in :file:`ssl_multicert.config`. Take into account that when using prefetched
+is used in :file:`ssl_multicert.yaml`. Take into account that when using prefetched
 OCSP stapling responses, |TS| will not refresh them and it should be done
 externally. This can be done using OpenSSL::
 
@@ -310,10 +356,11 @@ Support for OCSP Stapling can be tested using the -status option of the OpenSSL 
 Details of the OCSP Stapling TLS extension can be found in :rfc:`6961`.
 
 To configure |TS| to use OCSP Stapling, edit the following variables
-in :file:`records.config` file:
+in :file:`records.yaml` file:
 
 * :ts:cv:`proxy.config.ssl.ocsp.enabled`
 * :ts:cv:`proxy.config.ssl.ocsp.cache_timeout`
+* :ts:cv:`proxy.config.ssl.ocsp.request_mode`
 * :ts:cv:`proxy.config.ssl.ocsp.request_timeout`
 * :ts:cv:`proxy.config.ssl.ocsp.update_period`
 * :ts:cv:`proxy.config.ssl.ocsp.response.path`
@@ -338,9 +385,14 @@ To configure Split DNS:
    These rules are located in :file:`splitdns.config`.
 
 #. Enable the *Split DNS* option by adjusting :ts:cv:`proxy.config.dns.splitDNS.enabled`
-   in :file:`records.config`. ::
+   in :file:`records.yaml`.:
 
-        CONFIG proxy.config.dns.splitDNS.enabled INT 1
+.. code-block:: yaml
+
+   records:
+     dns:
+       splitDNS:
+         enabled: 1
 
 #. Run the command :option:`traffic_ctl config reload` to apply the configuration changes.
 

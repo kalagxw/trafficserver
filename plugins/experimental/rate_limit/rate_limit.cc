@@ -21,6 +21,7 @@
 
 #include "ts/ts.h"
 #include "ts/remap.h"
+#include "ts/remap_version.h"
 #include "tscore/ink_config.h"
 #include "txn_limiter.h"
 #include "utilities.h"
@@ -47,37 +48,16 @@ TSPluginInit(int argc, const char *argv[])
     return;
   }
 
-  TSUserArgIndexReserve(TS_USER_ARGS_VCONN, PLUGIN_NAME, "VConn state information", &gVCIdx);
+  if (-1 == gVCIdx) {
+    TSUserArgIndexReserve(TS_USER_ARGS_VCONN, PLUGIN_NAME, "VConn state information", &gVCIdx);
+  }
 
-  if (argc > 1) {
-    if (!strncasecmp(argv[1], "SNI=", 4)) {
-      TSCont sni_cont       = TSContCreate(sni_limit_cont, nullptr);
-      SniSelector *selector = new SniSelector();
-
-      TSReleaseAssert(sni_cont);
-      TSContDataSet(sni_cont, selector);
-
-      // Have to skip the first one, which is considered the 'program' name
-      --argc;
-      ++argv;
-
-      size_t num_sni = selector->factory(argv[0] + 4, argc, argv);
-      TSDebug(PLUGIN_NAME, "Finished loading %zu SNIs", num_sni);
-
-      TSHttpHookAdd(TS_SSL_CLIENT_HELLO_HOOK, sni_cont);
-      TSHttpHookAdd(TS_VCONN_CLOSE_HOOK, sni_cont);
-
-      selector->setupQueueCont(); // Start the queue processing continuation
-    } else if (!strncasecmp(argv[1], "HOST=", 5)) {
-      // TODO: Do we need to implement this ?? Or can we just defer this to the remap version?
-      --argc; // Skip the "HOST" arg of course when parsing the real parameters
-      ++argv;
-      // TSCont host_cont = TSContCreate(globalHostCont, nullptr);
-    } else {
-      TSError("[%s] unknown global limiter type: %s", PLUGIN_NAME, argv[1]);
-    }
+  if (argc == 2) {
+    // Make sure we start the global SNI selector before we do anything else.
+    // This selector can be replaced later, during configuration reload.
+    SniSelector::startup(argv[1]);
   } else {
-    TSError("[%s] Usage: rate_limit.so SNI|HOST [option arguments]", PLUGIN_NAME);
+    TSError("[%s] Usage: rate_limit.so <config.yaml>", PLUGIN_NAME);
   }
 }
 
@@ -87,18 +67,8 @@ TSPluginInit(int argc, const char *argv[])
 TSReturnCode
 TSRemapInit(TSRemapInterface *api_info, char *errbuf, int errbuf_size)
 {
-  if (!api_info) {
-    strncpy(errbuf, "[tsremap_init] - Invalid TSRemapInterface argument", errbuf_size - 1);
-    return TS_ERROR;
-  }
-
-  if (api_info->tsremap_version < TSREMAP_VERSION) {
-    snprintf(errbuf, errbuf_size - 1, "[TSRemapInit] - Incorrect API version %ld.%ld", api_info->tsremap_version >> 16,
-             (api_info->tsremap_version & 0xffff));
-    return TS_ERROR;
-  }
-
-  TSDebug(PLUGIN_NAME, "plugin is successfully initialized");
+  CHECK_REMAP_API_COMPATIBILITY(api_info, errbuf, errbuf_size);
+  Dbg(dbg_ctl, "plugin is successfully initialized");
   return TS_SUCCESS;
 }
 
@@ -111,10 +81,10 @@ TSRemapDeleteInstance(void *ih)
 TSReturnCode
 TSRemapNewInstance(int argc, char *argv[], void **ih, char * /* errbuf ATS_UNUSED */, int /* errbuf_size ATS_UNUSED */)
 {
-  TxnRateLimiter *limiter = new TxnRateLimiter();
+  auto *limiter = new TxnRateLimiter();
 
-  // set the description based on the pristine remap URL prior to advancing the pointer below
-  limiter->description = getDescriptionFromUrl(argv[0]);
+  // set the name based on the pristine remap URL prior to advancing the pointer below
+  limiter->setName(getDescriptionFromUrl(argv[0]));
 
   // argv contains the "to" and "from" URLs. Skip the first so that the
   // second one poses as the program name.
@@ -125,8 +95,14 @@ TSRemapNewInstance(int argc, char *argv[], void **ih, char * /* errbuf ATS_UNUSE
   limiter->initialize(argc, const_cast<const char **>(argv));
   *ih = static_cast<void *>(limiter);
 
-  TSDebug(PLUGIN_NAME, "Added active_in limiter rule (limit=%u, queue=%u, max-age=%ldms, error=%u)", limiter->limit,
-          limiter->max_queue, static_cast<long>(limiter->max_age.count()), limiter->error);
+  if (limiter->rate() > 0) {
+    // Setup rate based limit, if configured (this is rate as in "requests per second")
+    limiter->addBucket();
+  }
+
+  Dbg(dbg_ctl, "Added active_in limiter rule (limit=%u, rate=%u, queue=%u, max-age=%ldms, error=%u, conntrack=%s)",
+      limiter->limit(), limiter->rate(), limiter->max_queue(), static_cast<long>(limiter->max_age().count()), limiter->error(),
+      limiter->conntrack() ? "yes" : "no");
 
   return TS_SUCCESS;
 }
@@ -135,24 +111,50 @@ TSRemapNewInstance(int argc, char *argv[], void **ih, char * /* errbuf ATS_UNUSE
 // This is the main "entry" point for the plugin, called for every request.
 //
 TSRemapStatus
-TSRemapDoRemap(void *ih, TSHttpTxn txnp, TSRemapRequestInfo *rri)
+TSRemapDoRemap(void *ih, TSHttpTxn txnp, TSRemapRequestInfo * /* rri ATS_UNUSED */)
 {
-  TxnRateLimiter *limiter = static_cast<TxnRateLimiter *>(ih);
+  auto *limiter = static_cast<TxnRateLimiter *>(ih);
 
   if (limiter) {
-    if (!limiter->reserve()) {
-      if (!limiter->max_queue || limiter->full()) {
+    TSHttpSsn ssnp = TSHttpTxnSsnGet(txnp);
+
+    if (limiter->conntrack()) {
+      int count = TSHttpSsnTransactionCount(ssnp);
+
+      if (count > 1) { // The first transaction is the connect, so we need to have at least 2 to be "established"
+        Dbg(dbg_ctl, "Allowing an established connection to pass through, txn=%d", count);
+        return TSREMAP_NO_REMAP;
+      }
+    }
+
+    auto status = limiter->reserve();
+
+    switch (status) {
+    case ReserveStatus::UNLIMITED:
+      // No limits, just let it pass through
+      break;
+    case ReserveStatus::RESERVED:
+      if (limiter->conntrack()) {
+        limiter->setupSsnCont(ssnp);
+        Dbg(dbg_ctl, "Adding ssn-close hook, we're not at capacity");
+      } else {
+        limiter->setupTxnCont(txnp, TS_HTTP_TXN_CLOSE_HOOK);
+        Dbg(dbg_ctl, "Adding txn-close hook, we're not at capacity");
+      }
+      break;
+
+    case ReserveStatus::FULL:
+    case ReserveStatus::HIGH_RATE:
+      if (!limiter->max_queue() || limiter->full()) {
         // We are running at limit, and the queue has reached max capacity, give back an error and be done.
-        TSHttpTxnStatusSet(txnp, static_cast<TSHttpStatus>(limiter->error));
+        TSHttpTxnStatusSet(txnp, static_cast<TSHttpStatus>(limiter->error()), PLUGIN_NAME);
         limiter->setupTxnCont(txnp, TS_HTTP_SEND_RESPONSE_HDR_HOOK);
-        TSDebug(PLUGIN_NAME, "Rejecting request, we're at capacity and queue is full");
+        Dbg(dbg_ctl, "Rejecting request, we're at %s and queue is full", status == ReserveStatus::FULL ? "capacity" : "high rate");
       } else {
         limiter->setupTxnCont(txnp, TS_HTTP_POST_REMAP_HOOK);
-        TSDebug(PLUGIN_NAME, "Adding rate limiting hook, we are at capacity");
+        Dbg(dbg_ctl, "Adding queue delay hook, we are at %s", status == ReserveStatus::FULL ? "capacity" : "high rate");
       }
-    } else {
-      limiter->setupTxnCont(txnp, TS_HTTP_TXN_CLOSE_HOOK);
-      TSDebug(PLUGIN_NAME, "Adding txn-close hook, we're not at capacity");
+      break;
     }
   }
 

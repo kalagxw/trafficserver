@@ -18,11 +18,15 @@
 
 #pragma once
 
+#include <string>
+#include <string_view>
 #include <ts/ts.h>
 #include <netinet/in.h>
 #include <memory>
 
-#define AuthLogDebug(fmt, ...) TSDebug("authproxy", "%s: " fmt, __func__, ##__VA_ARGS__)
+extern DbgCtl Auth_dbg_ctl;
+
+#define AuthLogDebug(fmt, ...) Dbg(Auth_dbg_ctl, "%s: " fmt, __func__, ##__VA_ARGS__)
 #define AuthLogError(fmt, ...) TSError(fmt, ##__VA_ARGS__)
 
 template <typename T>
@@ -41,7 +45,7 @@ AuthDelete(T *ptr)
 }
 
 struct HttpIoBuffer {
-  TSIOBuffer buffer;
+  TSIOBuffer       buffer;
   TSIOBufferReader reader;
 
   explicit HttpIoBuffer(TSIOBufferSizeIndex size = TS_IOBUFFER_SIZE_INDEX_32K)
@@ -71,7 +75,7 @@ struct HttpIoBuffer {
   }
 
   // noncopyable
-  HttpIoBuffer(const HttpIoBuffer &) = delete;            // delete
+  HttpIoBuffer(const HttpIoBuffer &)            = delete; // delete
   HttpIoBuffer &operator=(const HttpIoBuffer &) = delete; // delete
 };
 
@@ -86,10 +90,10 @@ struct HttpHeader {
   }
 
   TSMBuffer buffer;
-  TSMLoc header;
+  TSMLoc    header;
 
   // noncopyable
-  HttpHeader(const HttpHeader &) = delete;            // delete
+  HttpHeader(const HttpHeader &)            = delete; // delete
   HttpHeader &operator=(const HttpHeader &) = delete; // delete
 };
 
@@ -102,8 +106,18 @@ unsigned HttpGetContentLength(TSMBuffer mbuf, TSMLoc mhdr);
 // Set the value of an arbitrary HTTP header.
 void HttpSetMimeHeader(TSMBuffer mbuf, TSMLoc mhdr, const char *name, const char *value);
 void HttpSetMimeHeader(TSMBuffer mbuf, TSMLoc mhdr, const char *name, unsigned value);
+void HttpSetMimeHeader(TSMBuffer mbuf, TSMLoc mhdr, const std::string_view name, const std::string_view value);
+
+// Remove every instance of an HTTP header.
+void HttpRemoveMimeHeader(TSMBuffer mbuf, TSMLoc mhdr, const char *name);
 
 // Dump the given HTTP header to the debug log.
 void HttpDebugHeader(TSMBuffer mbuf, TSMLoc mhdr);
 
+// Check if the string contains the prefix
+inline bool
+ContainsPrefix(const std::string_view str, const std::string &prefix)
+{
+  return str.size() < prefix.size() ? false : (strncasecmp(str.data(), prefix.data(), prefix.size()) == 0);
+}
 // vim: set ts=4 sw=4 et :

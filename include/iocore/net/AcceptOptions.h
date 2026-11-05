@@ -1,0 +1,136 @@
+/** @file
+
+  This file implements an I/O Processor for network I/O
+
+  @par License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+
+ */
+
+#pragma once
+
+#include "tscore/ink_inet.h"
+
+#include <sys/stat.h>
+#include <sys/types.h>
+
+struct AcceptOptions {
+  using self = AcceptOptions; ///< Self reference type.
+
+  /// Port on which to listen.
+  /// 0 => don't care, which is useful if the socket is already bound.
+  int local_port = 0;
+  /// Local address to bind for accept.
+  /// If not set -> any address.
+  IpAddr local_ip;
+  UnAddr local_path;
+  mode_t unix_perm = 0666;
+  uid_t  unix_uid  = static_cast<uid_t>(-1);
+  gid_t  unix_gid  = static_cast<gid_t>(-1);
+  /// IP address family.
+  /// @note Ignored if an explicit incoming address is set in the
+  /// the configuration (@c local_ip). If neither is set IPv4 is used.
+  int ip_family = AF_INET;
+  /// Should we use accept threads? If so, how many?
+  int accept_threads = -1;
+  /** If @c true, the continuation is called back with
+      @c NET_EVENT_ACCEPT_SUCCEED
+      or @c NET_EVENT_ACCEPT_FAILED on success and failure resp.
+  */
+  bool localhost_only = false;
+  /// Are frequent accepts expected?
+  /// Default: @c false.
+  bool frequent_accept = true;
+
+  /// Socket receive buffer size.
+  /// 0 => OS default.
+  int recv_bufsize = 0;
+  /// Socket transmit buffer size.
+  /// 0 => OS default.
+  int send_bufsize = 0;
+  /// defer accept for @c sockopt.
+  /// 0 => OS default.
+  int defer_accept = 0;
+  /// Socket options for @c sockopt.
+  /// 0 => do not set options.
+  uint32_t sockopt_flags        = 0;
+  uint32_t packet_mark          = 0;
+  uint32_t packet_tos           = 0;
+  uint32_t packet_notsent_lowat = 0;
+
+  int tfo_queue_length = 0;
+
+  /** Transparency on client (user agent) connection.
+      @internal This is irrelevant at a socket level (since inbound
+      transparency must be set up when the listen socket is created)
+      but it's critical that the connection handling logic knows
+      whether the inbound (client / user agent) connection is
+      transparent.
+  */
+  bool f_inbound_transparent = false;
+
+  /** MPTCP enabled on listener.
+      @internal For logging and metrics purposes to know whether the
+      listener enabled MPTCP or not.
+  */
+  bool f_mptcp = false;
+
+  /// Proxy Protocol enabled
+  bool f_proxy_protocol            = false;
+  bool f_proxy_protocol_client_src = false;
+
+  /** Exempt this listener from event thread watchdog accept backpressure.
+
+      Set on the loopback companion listeners opened alongside each configured proxy port when the
+      watchdog is enabled, so that a local connection is still accepted and served while inbound
+      backpressure is shedding everything arriving from off box. Because the exemption is a property
+      of the listen socket rather than of an individual connection, it can be honored *before*
+      @c accept4 - which is what lets backpressure leave non-exempt connections in the kernel accept
+      queue rather than having to accept them to discover where they came from.
+  */
+  bool f_watchdog_exempt = false;
+
+  /** Exempt this listener from watchdog accept backpressure without changing its listener topology.
+
+      Set on ports the operator explicitly bound to a loopback address (@c ip-in=127.0.0.1, @c ip-in=::1). Unlike
+      @c f_watchdog_exempt it does not alter how the listener is built, so such a port keeps the per-thread or
+      accept-thread model it was configured with. Unix domain ports are never marked.
+  */
+  bool f_watchdog_local_only = false;
+
+  /** Set @c SO_REUSEPORT on the listen socket even when not listening per thread.
+
+      Required on both sockets when two listeners overlap on the same port - a wildcard bind plus a
+      more specific bind, as the watchdog's loopback companion listener does. On Linux @c SO_REUSEADDR
+      does not permit overlapping binds for listening sockets; only @c SO_REUSEPORT does, and every
+      socket in the overlap must set it before @c bind.
+
+      @note This also lets any process with the same effective uid bind the port and receive a share
+      of its connections. Only enable it where that is acceptable.
+  */
+  bool f_force_reuseport = false;
+
+  /** Warn rather than abort the process if the listen socket cannot be opened.
+
+      The default is @c Fatal, which is right for a configured proxy port: silently serving nothing is
+      worse than failing to start. It is wrong for a supplementary listener like the watchdog's
+      loopback companion, where losing the exemption degrades overload behavior but must not take the
+      proxy down.
+  */
+  bool f_non_fatal_listen = false;
+};

@@ -59,8 +59,8 @@ out the set of bytes to be used.
 Cache storage
 -------------
 
-The raw storage for the |TS| cache is configured in :file:`storage.config`. Each
-line in the file defines a :term:`cache span` which is treated as a uniform
+The raw storage for the |TS| cache is configured in :file:`storage.yaml`. Each
+entry in the file defines a :term:`cache span` which is treated as a uniform
 persistent store.
 
 .. figure:: images/cache-spans.png
@@ -68,8 +68,8 @@ persistent store.
 
    Two cache spans
 
-This storage organized into a set of administrative units which are called :term:`cache volumes
-<cache volume>`. These are defined in :file:`volume.config`. Cache volumes can be assigned
+This storage is organized into a set of administrative units which are called :term:`cache volumes
+<cache volume>`. These are defined in :file:`storage.yaml`. Cache volumes can be assigned
 different properties in :file:`hosting.config`.
 
 Cache volumes can be defined by a percentage of the total storage or as an absolute amount of
@@ -99,7 +99,7 @@ cache volumes. It's also possible to control which cache spans (and hence,
 which cache stripes) are contained in a specific cache volume.
 
 The layout and structure of the cache spans, the cache volumes, and the cache
-stripes that compose them are derived entirely from :file:`storage.config` and
+stripes that compose them are derived entirely from :file:`storage.yaml` and
 :file:`cache.config` and is recomputed from scratch when the
 :program:`traffic_server` is started. Therefore, any change to those files can
 (and almost always will) invalidate the existing cache in its entirety.
@@ -115,7 +115,14 @@ relationship between a span block and a cache stripe is the same as between a di
 file system. A cache stripe is structured data contained in a span block and always occupies the
 entire span block.
 
-.. figure:: images/span-header.svg
+.. only:: html
+
+   .. figure:: images/span-header.svg
+
+.. only:: latex
+
+   .. figure:: images/span-header.png
+
    :align: center
 
 Stripe Structure
@@ -126,7 +133,7 @@ span of bytes. Internally each stripe is treated almost entirely independently.
 The data structures described in this section are duplicated for each stripe.
 
 Internally the term *volume* is used for these stripes and implemented primarily
-in :cpp:class:`Vol`. What a user thinks of as a volume (and what this document
+in :cpp:class:`StripeSM`. What a user thinks of as a volume (and what this document
 calls a *cache volume*) is represented by :cpp:class:`CacheVol`.
 
 .. note::
@@ -173,6 +180,10 @@ strongly on the size of the disk cache. Because the directory size does not
 change, neither does this memory requirement, so |TS| does not consume more
 memory as more content is stored in the cache. If there is enough memory to run
 |TS| with an empty cache there is enough to run it with a full cache.
+
+The resident size of the directory for a cache volume is generally <0.2% of the
+volume size.  The exact memory allocated for the directory of a volume can be
+seen if traffic_server is run with the 'cache_init' debug tag enabled.
 
 .. figure:: images/cache-directory-structure.png
    :align: center
@@ -255,7 +266,7 @@ Storage Layout
 The storage layout is the stripe metadata followed by cached content. The
 metadata consists of three parts: the stripe header, the directory, and the
 stripe footer. The metadata is stored twice. The header and the footer are
-instances of :cpp:class:`VolHeaderFooter`. This is a stub structure which can
+instances of :cpp:class:`StripeHeaderFooter`. This is a stub structure which can
 have a trailing variable sized array. This array is used as the segment free
 list roots in the directory. Each contains the segment index of the first
 element of the free list for the segment. The footer is a copy of the header
@@ -276,11 +287,11 @@ start
    The offset for the start of the content, after the stripe metadata.
 
 length
-   Total number of bytes in the stripe. :cpp:member:`Vol::len`.
+   Total number of bytes in the stripe. :cpp:member:`Stripe::len`.
 
 data length
    Total number of blocks in the stripe available for content storage.
-   :cpp:member:`Vol::data_blocks`.
+   :cpp:member:`Stripe::data_blocks`.
 
 .. note::
 
@@ -288,14 +299,21 @@ data length
    there are at least three different metrics (bytes, cache blocks, store
    blocks) used in various places.
 
-The header for a stripe is a variably sized instance of :class:`VolHeaderFooter`.
+The header for a stripe is a variably sized instance of :class:`StripeHeaderFooter`.
 The variable trailing section contains the head indices of the directory entry
 free lists for the segments.
 
-.. figure:: images/stripe-header.svg
+.. only:: html
+
+   .. figure:: images/stripe-header.svg
+
+.. only:: latex
+
+   .. figure:: images/stripe-header.png
+
    :align: center
 
-The trailing :member:`VolHeaderFooter::freelist` array overlays the disk storage with
+The trailing :member:`StripeHeaderFooter::freelist` array overlays the disk storage with
 an entry for every segment, even though the array is declared to have length `1`.
 Each free list entry is a 16 bit value that is the index of the first directory entry
 in the free list for that segment. E.g. :code:`freelist[4]` is the index of the
@@ -386,7 +404,7 @@ if needed to store the object.
    ``Doc`` layout 3.2.0
 
 This had the problem that with only one fragment table it could not be reliable
-for objects with more than one alternate[#multiple-alternates]_. Therefore, the
+for objects with more than one alternate [#multiple-alternates]_. Therefore, the
 fragment data was moved from being a separate variable length section of the
 metadata to being directly incorporated in to the :cpp:class:`CacheHTTPInfoVector`,
 yielding a layout of the following form.
@@ -465,6 +483,53 @@ default). Objects which are in use when the write cursor is near use the same
 underlying evacuation mechanism but are handled automatically and not via the
 explicit ``pinned`` bit in :cpp:class:`Dir`.
 
+Object Versioning
+-----------------
+
+Every ``Doc`` records the cache format version that wrote it, in its ``v_major``
+and ``v_minor`` fields, taken from ``CACHE_DB_MAJOR_VERSION`` and
+``CACHE_DB_MINOR_VERSION`` in ``iocore/cache/CacheVersion.h``.
+
+Bumping the minor version does not clear the cache. Stripe validation looks only
+at the major version, and the current reader still reads every object written at
+an older minor version. What the bump buys is protection in the other direction:
+a reader rejects any object newer than itself and refetches it, rather than
+misreading a shape it does not understand.
+
+Reading an older object sometimes needs work that reading a current one does
+not. Compare against **the fixed version at which that part of the format
+changed**, never against ``CACHE_DB_VERSION``. The latter silently changes
+meaning at the next bump, and sends every object the previous release wrote down
+the wrong path. ``CACHE_DB_FRAG_OFFSET_TABLE_VERSION`` is such a fixed point.
+
+Well-Known Strings
+------------------
+
+A marshalled header stores indexes into the well-known string table
+(``proxy/hdrs/HdrToken.cc``) beside the strings those indexes stand for: the
+index of every MIME field name, of the request method, and of the request URL
+scheme, plus the presence bits and slot accelerators derived from them. Change
+the table and every stored index denotes a different string.
+
+The strings are in the object too, so the indexes are only a cache over them.
+Starting with cache version 24.3, each marshalled alternate has a distinct
+``CacheAltMagic`` tag and an eight-byte WKS identity trailer. The identity hashes
+the ordered strings, MIME slot IDs, and presence masks using a canonical byte
+encoding. A matching identity lets ``HTTPInfo::unmarshal()`` trust the indexes
+without walking the fields. Older alternates have no identity and always need
+repair; an identity mismatch also rebuilds through
+``HTTPHdrImpl::recompute_wks_indices()`` after both heaps have been swizzled.
+Already-unmarshalled buffers are left alone because they may be shared.
+
+This permits changes to the table's indexes and cardinality without invalidating
+existing objects. It does not reconstruct ``m_cooked_stuff``: changes to the set
+of recognized Cache-Control directives or their cooked masks need a separate
+compatibility decision. The WKS identity is not an integrity checksum.
+
+A |TS| predating the rebuild must never read an object written against a
+different table; cache version 24.3 provides that protection because older
+versions reject objects newer than themselves.
+
 Additional Notes
 ----------------
 
@@ -501,7 +566,7 @@ Disk Failure
 
 The cache is designed to be relatively resistant to disk failures. Because each
 :term:`storage unit` in each :term:`cache volume` is mostly independent, the
-loss of a disk simply means that the corresponding :cpp:class:`Vol` instances
+loss of a disk simply means that the corresponding :cpp:class:`StripeSM` instances
 (one per cache volume that uses the storage unit) becomes unusable. The primary
 issue is updating the volume assignment table to both preserve assignments for
 objects on still operational volumes while distributing the assignments from the
@@ -594,7 +659,7 @@ a single unit of the multiplier.
 
 .. _target-fragment-size:
 
-The target fragment size can set with the :file:`records.config` value
+The target fragment size can set with the :file:`records.yaml` value
 :ts:cv:`proxy.config.cache.target_fragment_size`.
 
 This value should be chosen so that it is a multiple of a
@@ -711,12 +776,12 @@ as appropriate in the sections on the relevant operations.
 The set of things which can affect cacheability are:
 
 * Built in constraints.
-* Settings in :file:`records.config`.
+* Settings in :file:`records.yaml`.
 * Settings in :file:`cache.config`.
 * Plugin operations.
 
-The initial internal checks, along with their :file:`records.config`
-overrides[#cacheability-overrides]_, are done in ``HttpTransact::is_request_cache_lookupable``.
+The initial internal checks, along with their :file:`records.yaml`
+overrides [#cacheability-overrides]_, are done in ``HttpTransact::is_request_cache_lookupable``.
 
 The checks that are done are:
 
@@ -742,7 +807,7 @@ The checks that are done are:
 
    Range Request
       Cache valid only if :ts:cv:`proxy.config.http.cache.range.lookup` in
-      :file:`records.config` is non-zero. This does not mean the range request
+      :file:`records.yaml` is non-zero. This does not mean the range request
       can be cached, only that it might be satisfiable from the cache. In
       addition, :ts:cv:`proxy.config.http.cache.range.write`
       can be set to try to force a write on a range request. This
@@ -751,7 +816,7 @@ The checks that are done are:
       for the response to be cached. It is disabled by default, for
       best performance.
 
-A plugin can call :c:func:`TSHttpTxnReqCacheableSet()` to force the request to
+A plugin can call :func:`TSHttpTxnReqCacheableSet()` to force the request to
 be viewed as cache valid.
 
 .. _cache-lookup:
@@ -774,8 +839,8 @@ The basic steps to a cache lookup are:
 
 #. The cache stripe is determined (based on the cache key).
 
-   The :term:`cache key` is used as a hash key in to an array of :cpp:class:`Vol` instances by
-   :func:`Cache::key_to_vol`. The construction and arrangement of this array is the essence of how
+   The :term:`cache key` is used as a hash key in to an array of :cpp:class:`StripeSM` instances by
+   :func:`Cache::key_to_stripe`. The construction and arrangement of this array is the essence of how
    volumes are assigned.
 
 #. The cache stripe directory :ref:`is probed <cache-directory-probe>` using the
@@ -810,7 +875,7 @@ information. This will always contain the HTTP headers for all
    serving an object from cache in one transaction while it is being written in
    another. Several settings are needed for it to be used. See
    :ref:`admin-configuration-reducing-origin-requests`. It must
-   specifically enabled in :file:`records.config` and if not, a cache read will
+   specifically enabled in :file:`records.yaml` and if not, a cache read will
    fail if the object is currently be written or updated.
 
 At this point an alternate for the object is selected. This is done by comparing
@@ -837,7 +902,7 @@ After these checks the object age is calculated by ``HttpTransactHeaders::calcul
 and then any configured fuzzing is applied. The limits to this age based on
 available data is calculated by ``HttpTransact::calculate_document_freshness_limit``.
 
-How this age is used is determined by the :file:`records.config` setting for
+How this age is used is determined by the :file:`records.yaml` setting for
 :ts:cv:`proxy.config.http.cache.when_to_revalidate`. If this is ``0`` then the
 built calculations are used which compare the freshness limits with document
 age, modified by any of the client supplied cache control values (``max-age``,
@@ -935,7 +1000,7 @@ Aggregation Buffer
 ------------------
 
 Disk writes to cache are handled through an *aggregation buffer*. There is one
-for each :cpp:class:`Vol` instance. To minimize the number of system calls data
+for each :cpp:class:`StripeSM` instance. To minimize the number of system calls data
 is written to disk in units of roughly :ref:`target fragment size <target-fragment-size>`
 bytes. The algorithm used is simple: data is piled up in the aggregation buffer
 until no more will fit without going over the target fragment size, at which
@@ -970,11 +1035,11 @@ In some cases this is not acceptable and the object is *evacuated* by reading
 it from the cache and then writing it back to cache which moves the physical
 storage of the object from in front of the write cursor to behind the write
 cursor. Objects that are evacuated are handled in this way based on data in
-stripe data structures (attached to the :cpp:class:`Vol` instance).
+stripe data structures (attached to the :cpp:class:`StripeSM` instance).
 
 Evacuation data structures are defined by dividing up the volume content into
 a disjoint and contiguous set of regions of ``EVACUATION_BUCKET_SIZE`` bytes.
-The :cpp:member:`Vol::evacuate` member is an array with an element for each
+The :cpp:member:`PreservationTable::evacuate` member is an array with an element for each
 evacuation region. Each element is a doubly linked list of :cpp:class:`EvacuationBlock`
 instances. Each instance contains a :cpp:class:`Dir` that specifies the fragment
 to evacuate. It is assumed that an evacuation block is placed in the evacuation
@@ -1000,14 +1065,14 @@ if the count goes to zero. If the ``EvacuationBlock`` already exists with a
 count of zero, the count is not modified and the number of readers is not
 tracked, so the evacuation is valid as long as the object exists.
 
-Evacuation is driven by cache writes, essentially in :cpp:member:`Vol::aggWrite`.
+Evacuation is driven by cache writes, essentially in :cpp:member:`StripeSM::aggWrite`.
 This method processes the pending cache virtual connections that are trying to
 write to the stripe. Some of these may be evacuation virtual connections. If so
 then the completion callback for that virtual connection is called as the data
 is put in to the aggregation buffer.
 
 When no more cache virtual connections can be processed (due to an empty queue
-or the aggregation buffer filling) then :cpp:member:`Vol::evac_range` is called
+or the aggregation buffer filling) then :cpp:member:`StripeSM::evac_range` is called
 to clear the range to be overwritten plus an additional :c:macro:`EVACUATION_SIZE`
 range. The buckets covering that range are checked. If there are any items in
 the buckets a new cache virtual connection (a *doc evacuator*) is created and
@@ -1017,7 +1082,7 @@ the read completes it is checked for validity and if valid, the cache virtual
 connection for it is placed at the front of the write queue for the stripe and
 the write aggregation resumed.
 
-Before doing a write, the method :cpp:member:`Vol::evac_range()` is called to
+Before doing a write, the method :cpp:member:`StripeSM::evac_range()` is called to
 start an evacuation. If any fragments are found in the buckets in the range the
 earliest such fragment (smallest offset, closest to the write cursor) is
 selected and read from disk and the aggregation buffer write is suspended. The
@@ -1086,7 +1151,7 @@ appropriate evacuation bucket.
 
 .. [#cache-mult-value]
 
-   The comment in earlier versions of the :file:`records.config` documentation
+   The comment in earlier versions of the :file:`records.yaml` documentation
    which indicated that this value must be a power of two were, unfortunately,
    mistaken and have been corrected.
 

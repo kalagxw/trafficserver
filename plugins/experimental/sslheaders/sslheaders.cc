@@ -23,20 +23,25 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
+namespace sslheaders_ns
+{
+DbgCtl dbg_ctl{PLUGIN_NAME};
+}
+
 static void SslHdrExpand(SSL *, const SslHdrInstance::expansion_list &, TSMBuffer, TSMLoc);
 
 static int
 SslHdrExpandRequestHook(TSCont cont, TSEvent event, void *edata)
 {
   const SslHdrInstance *hdr;
-  TSHttpTxn txn;
-  TSMBuffer mbuf;
-  TSMLoc mhdr;
+  TSHttpTxn             txn;
+  TSMBuffer             mbuf;
+  TSMLoc                mhdr;
 
-  txn                 = static_cast<TSHttpTxn>(edata);
-  hdr                 = static_cast<const SslHdrInstance *>(TSContDataGet(cont));
-  TSVConn vconn       = TSHttpSsnClientVConnGet(TSHttpTxnSsnGet(txn));
-  TSSslConnection ssl = TSVConnSslConnectionGet(vconn);
+  txn                   = static_cast<TSHttpTxn>(edata);
+  hdr                   = static_cast<const SslHdrInstance *>(TSContDataGet(cont));
+  TSVConn         vconn = TSHttpSsnClientVConnGet(TSHttpTxnSsnGet(txn));
+  TSSslConnection ssl   = TSVConnSslConnectionGet(vconn);
 
   switch (event) {
   case TS_EVENT_HTTP_READ_REQUEST_HDR:
@@ -87,8 +92,8 @@ static void
 SslHdrSetHeader(TSMBuffer mbuf, TSMLoc mhdr, const std::string &name, BIO *value)
 {
   TSMLoc field;
-  long vlen;
-  char *vptr;
+  long   vlen;
+  char  *vptr;
 
   vlen = BIO_get_mem_data(value, &vptr);
 
@@ -141,7 +146,7 @@ public:
   }
 
 private:
-  SSL *_ssl;
+  SSL  *_ssl;
   X509 *_x509;
 
   // The address of this object can not be a valid X509 structure address.
@@ -154,7 +159,11 @@ private:
   void
   _set()
   {
+#ifdef OPENSSL_IS_AT_LEAST_OPENSSL3
+    _x509 = (IsClient ? SSL_get1_peer_certificate : SSL_get_certificate)(_ssl);
+#else
     _x509 = (IsClient ? SSL_get_peer_certificate : SSL_get_certificate)(_ssl);
+#endif
   }
 };
 } // end anonymous namespace
@@ -170,9 +179,9 @@ SslHdrExpand(SSL *ssl, const SslHdrInstance::expansion_list &expansions, TSMBuff
       SslHdrRemoveHeader(mbuf, mhdr, expansion.name);
     }
   } else {
-    WrapX509<true> clientX509(ssl);
+    WrapX509<true>  clientX509(ssl);
     WrapX509<false> serverX509(ssl);
-    X509 *x509;
+    X509           *x509;
 
     BIO *exp = BIO_new(BIO_s_mem());
 
@@ -212,10 +221,10 @@ SslHdrParseOptions(int argc, const char **argv)
 {
   static const struct option longopt[] = {
     {const_cast<char *>("attach"), required_argument, nullptr, 'a'},
-    {nullptr, 0, nullptr, 0},
+    {nullptr,                      0,                 nullptr, 0  },
   };
 
-  ats_scoped_obj<SslHdrInstance> hdr(new SslHdrInstance());
+  std::unique_ptr<SslHdrInstance> hdr(new SslHdrInstance());
 
   for (;;) {
     int opt;
@@ -258,7 +267,7 @@ void
 TSPluginInit(int argc, const char *argv[])
 {
   TSPluginRegistrationInfo info;
-  SslHdrInstance *hdr;
+  SslHdrInstance          *hdr;
 
   info.plugin_name   = (char *)"sslheaders";
   info.vendor_name   = (char *)"Apache Software Foundation";
@@ -293,6 +302,12 @@ TSReturnCode
 TSRemapNewInstance(int argc, char *argv[], void **instance, char * /* err */, int /* errsz */)
 {
   SslHdrInstance *hdr;
+
+  // The first two arguments are the "from" and "to" URL string. We need to
+  // skip them, but we also require that there be an option to masquerade as
+  // argv[0], so we increment the argument indexes by 1 rather than by 2.
+  --argc;
+  ++argv;
 
   hdr = SslHdrParseOptions(argc, (const char **)argv);
   if (hdr) {

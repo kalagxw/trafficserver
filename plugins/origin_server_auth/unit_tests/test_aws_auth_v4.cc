@@ -1,0 +1,1328 @@
+/*
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+*/
+
+/**
+ * @file aws_auth_v4_test.cc
+ * @brief Unit tests for functions implementing S3 auth version 4
+ */
+
+#include <cstring>
+#include <openssl/hmac.h>               /* EVP_MAX_MD_SIZE */
+#include <catch2/catch_test_macros.hpp> /* catch unit-test framework */
+#include "../aws_auth_v4.h"             /* S3 auth v4 utility */
+
+/* uriEncode() ***************************************************************************************************************** */
+
+TEST_CASE("uriEncode(): encode empty input", "[AWS][auth][utility]")
+{
+  String in("");
+  String encoded = uriEncode(in, /* isObjectName */ false);
+  CHECK(0 == encoded.length()); /* 0 encoded because of the invalid input */
+}
+
+TEST_CASE("uriEncode(): encode unreserved chars", "[origin_server_auth]")
+{
+  const String in      = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                         "abcdefghijklmnopqrstuvwxyz"
+                         "0123456789"
+                         "-._~";
+  String       encoded = uriEncode(in, /* isObjectName */ false);
+
+  CHECK(in.length() == encoded.length());
+  CHECK_FALSE(encoded.compare("ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                              "abcdefghijklmnopqrstuvwxyz"
+                              "0123456789"
+                              "-._~"));
+}
+
+TEST_CASE("uriEncode(): encode reserved chars in a name which is not object name", "[AWS][auth][utility]")
+{
+  const String in      = " /!\"#$%&'()*+,:;<=>?@[\\]^`{|}"; /* some printable but reserved chars */
+  String       encoded = uriEncode(in, /* isObjectName */ false);
+
+  CHECK(3 * in.length() == encoded.length()); /* size of "%NN" = 3 */
+  CHECK_FALSE(encoded.compare("%20%2F%21%22%23%24%25%26%27%28%29%2A%20%2C%3A%3B%3C%3D%3E%3F%40%5B%5C%5D%5E%60%7B%7C%7D"));
+}
+
+TEST_CASE("uriEncode(): encode reserved chars in an object name", "[AWS][auth][utility]")
+{
+  const String in      = " /!\"#$%&'()*+,:;<=>?@[\\]^`{|}"; /* some printable but reserved chars */
+  String       encoded = uriEncode(in, /* isObjectName */ true);
+
+  CHECK(3 * in.length() - 2 == encoded.length()); /* size of "%NN" = 3, '/' is not encoded */
+  CHECK_FALSE(encoded.compare("%20/%21%22%23%24%25%26%27%28%29%2A%20%2C%3A%3B%3C%3D%3E%3F%40%5B%5C%5D%5E%60%7B%7C%7D"));
+}
+
+TEST_CASE("isCanonical(): check an empty input", "[AWS][auth][utility]")
+{
+  // Empty string has no characters that need encoding - it's already canonical
+  CHECK(true == isCanonical(""));
+}
+
+TEST_CASE("isCanonical(): '%' and nothing else", "[AWS][auth][utility]")
+{
+  CHECK(false == isCanonical("%"));
+}
+
+TEST_CASE("isCanonical(): '%' but no hex digits", "[AWS][auth][utility]")
+{
+  CHECK(false == isCanonical("XXX%XXX"));
+}
+
+TEST_CASE("isCanonical(): '%' but only one hex digit", "[AWS][auth][utility]")
+{
+  CHECK(false == isCanonical("XXXXX%1XXXXXX"));
+  CHECK(false == isCanonical("XXX%1")); // test end of string case
+}
+
+TEST_CASE("isCanonical(): '%' and 2 hex digit", "[AWS][auth][utility]")
+{
+  CHECK(true == isCanonical("XXX%12XXX"));
+  CHECK(true == isCanonical("XXX%12")); // test end of string case
+}
+
+TEST_CASE("isCanonical(): space not encoded", "[AWS][auth][utility]")
+{
+  // Having a space always means it was not encoded.
+  CHECK(false == isCanonical("XXXXX XXXXXX"));
+}
+
+TEST_CASE("isCanonical(): '/' in strings which are not object names", "[AWS][auth][utility]")
+{
+  // This is not an object name so if we have '/' => the string was not encoded.
+  CHECK(false == isCanonical("XXXXX/XXXXXX", /* isObjectName */ false));
+
+  // There is no '/' and '%2F' shows that it was encoded.
+  CHECK(true == isCanonical("XXXXX%2FXXXXXX", /* isObjectName */ false));
+
+  // This is not an object name so if we have '/' => the string was not encoded despite '%20' in it.
+  CHECK(false == isCanonical("XXXXX/%20XXXXX", /* isObjectName */ false));
+}
+
+TEST_CASE("isCanonical(): '/' in strings that are object names", "[AWS][auth][utility]")
+{
+  // Object name with only unreserved chars and slashes - already canonical, return true
+  CHECK(true == isCanonical("XXXXX/XXXXXX", /* isObjectName */ true));
+
+  // Encoded slash - properly encoded, return true
+  CHECK(true == isCanonical("XXXXX%2FXXXXXX", /* isObjectName */ true));
+
+  // Mix of slash and encoded space - properly encoded, return true
+  CHECK(true == isCanonical("XXXXX/%20XXXXX", /* isObjectName */ true));
+}
+
+TEST_CASE("isCanonical(): no reserved chars in the input", "[AWS][auth][utility]")
+{
+  // Strings with only unreserved characters are already in canonical form
+  // and don't need encoding - return true to skip unnecessary decode/encode
+  const String unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                            "abcdefghijklmnopqrstuvwxyz"
+                            "0123456789"
+                            "-._~";
+  CHECK(true == isCanonical(unreserved));
+
+  // Simple paths with only unreserved chars should also return true
+  CHECK(true == isCanonical("/something/foo.jpg", /* isObjectName */ true));
+  CHECK(true == isCanonical("/path/to/file-name_v2.txt", /* isObjectName */ true));
+}
+
+TEST_CASE("isCanonical(): reserved chars in the input", "[AWS][auth][utility]")
+{
+  // some printable but reserved chars " /!\"#$%&'()*+,:;<=>?@[\\]^`{|}"
+  const String encoded = "%20%2F%21%22%23%24%25%26%27%28%29%2A%2B%2C%3A%3B%3C%3D%3E%3F%40%5B%5C%5D%5E%60%7B%7C%7D";
+
+  CHECK(true == isCanonical(encoded));
+}
+
+/*
+ * This test verifies the fix for a bug where isCanonical() would return true
+ * if ANY %XX sequence was found, even if other reserved characters were NOT
+ * encoded. That caused canonicalEncode() to skip encoding, resulting in
+ * signature mismatch with S3.
+ *
+ * Historical example (now fixed):
+ *   Client sent: /app/(channel)/%5B%5Bparts%5D%5D/page.js  (mixed encoding)
+ *   Old isCanonical() saw %5B -> returned true (incorrectly assumed fully encoded)
+ *   Old canonicalEncode() returned as-is without normalizing
+ *   Signature was calculated for partially-encoded path
+ *   S3 expected signature for: /app/%28channel%29/%5B%5Bparts%5D%5D/page.js
+ *   Result: 403 signature mismatch
+ *
+ * With the fix, isCanonical() now returns false for mixed-encoding URLs,
+ * triggering decode/re-encode to produce the correct canonical form.
+ */
+TEST_CASE("isCanonical(): mixed encoding with unencoded parentheses and encoded brackets", "[AWS][auth][utility]")
+{
+  // Path with parentheses NOT encoded but brackets ARE encoded
+  // This is the bug case from YTSATS-4835
+  const String mixedEncoding = "/app/(channel)/%5B%5Bparts%5D%5D/page.js";
+
+  // Fixed behavior: returns false because parentheses () are not encoded
+  // Even though %5B is present, the string is only PARTIALLY encoded
+  CHECK(false == isCanonical(mixedEncoding, /* isObjectName */ true));
+}
+
+TEST_CASE("isCanonical(): unencoded parentheses should indicate not fully encoded", "[AWS][auth][utility]")
+{
+  // Parentheses are reserved characters per AWS spec and should be encoded
+  // If we see unencoded parentheses, the string is NOT properly URI-encoded
+  const String withParens = "/app/(channel)/test.js";
+
+  // Returns false (no encoded chars found, string needs encoding)
+  CHECK(false == isCanonical(withParens, /* isObjectName */ true));
+
+  // After encoding, parentheses become %28 and %29
+  String encoded = uriEncode(withParens, /* isObjectName */ true);
+  CHECK(encoded == "/app/%28channel%29/test.js");
+}
+
+TEST_CASE("uriDecode(): decode percent-encoded characters", "[AWS][auth][utility]")
+{
+  // Test basic decoding
+  CHECK(uriDecode("%28") == "(");
+  CHECK(uriDecode("%29") == ")");
+  CHECK(uriDecode("%5B") == "[");
+  CHECK(uriDecode("%5D") == "]");
+  CHECK(uriDecode("%20") == " ");
+
+  // Test mixed content
+  CHECK(uriDecode("/app/%28channel%29/test.js") == "/app/(channel)/test.js");
+  CHECK(uriDecode("/app/%5B%5Bparts%5D%5D/page.js") == "/app/[[parts]]/page.js");
+
+  // Test passthrough of non-encoded content
+  CHECK(uriDecode("/app/test.js") == "/app/test.js");
+  CHECK(uriDecode("hello-world_123.txt") == "hello-world_123.txt");
+
+  // Test mixed encoded and non-encoded (the bug case)
+  CHECK(uriDecode("/app/(channel)/%5B%5Bparts%5D%5D/page.js") == "/app/(channel)/[[parts]]/page.js");
+}
+
+TEST_CASE("canonicalEncode(): mixed encoding produces correct canonical URI", "[AWS][auth][utility]")
+{
+  // Fixed behavior: canonicalEncode() now decodes first, then re-encodes
+  // This ensures consistent canonical output regardless of input encoding
+
+  const String mixedEncoding = "/app/(channel)/%5B%5Bparts%5D%5D/page.js";
+
+  String canonical = canonicalEncode(mixedEncoding, /* isObjectName */ true);
+
+  // Correct behavior: ALL reserved characters are encoded
+  CHECK(canonical == "/app/%28channel%29/%5B%5Bparts%5D%5D/page.js");
+}
+
+TEST_CASE("canonicalEncode(): fully encoded input should pass through unchanged", "[AWS][auth][utility]")
+{
+  // When ALL reserved chars are properly encoded, canonicalEncode should return as-is
+  const String fullyEncoded = "/app/%28channel%29/%5B%5Bparts%5D%5D/page.js";
+
+  String canonical = canonicalEncode(fullyEncoded, /* isObjectName */ true);
+  CHECK(canonical == fullyEncoded);
+}
+
+TEST_CASE("canonicalEncode(): unencoded input should be fully encoded", "[AWS][auth][utility]")
+{
+  // When NO encoding is present, canonicalEncode should encode everything
+  const String unencoded = "/app/(channel)/[[parts]]/page.js";
+
+  String canonical = canonicalEncode(unencoded, /* isObjectName */ true);
+  CHECK(canonical == "/app/%28channel%29/%5B%5Bparts%5D%5D/page.js");
+}
+
+/*
+ * Test all S3 "safe" characters that are NOT SigV4 unreserved.
+ * These characters are safe for S3 key names but MUST be encoded for signature calculation.
+ * See: https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html
+ */
+TEST_CASE("uriEncode(): S3 safe chars that need SigV4 encoding", "[AWS][auth][utility]")
+{
+  // S3 "safe" characters: ! - _ . * ' ( )
+  // SigV4 unreserved:     - _ . ~
+  // Characters that are S3 safe but need SigV4 encoding: ! * ' ( )
+
+  CHECK(uriEncode("!", false) == "%21");
+  CHECK(uriEncode("*", false) == "%2A");
+  CHECK(uriEncode("'", false) == "%27");
+  CHECK(uriEncode("(", false) == "%28");
+  CHECK(uriEncode(")", false) == "%29");
+
+  // Full path test with all these characters
+  const String safeChars = "/bucket/file!name*with'quotes(and)parens.js";
+  String       encoded   = uriEncode(safeChars, /* isObjectName */ true);
+  CHECK(encoded == "/bucket/file%21name%2Awith%27quotes%28and%29parens.js");
+}
+
+TEST_CASE("isCanonical(): mixed encoding with other S3 safe chars", "[AWS][auth][utility]")
+{
+  // Test mixed encoding with exclamation mark (S3 safe, needs SigV4 encoding)
+  CHECK(false == isCanonical("/path/file!name/%20space/", /* isObjectName */ true));
+
+  // Test mixed encoding with asterisk
+  CHECK(false == isCanonical("/path/file*name/%20space/", /* isObjectName */ true));
+
+  // Test mixed encoding with single quote
+  CHECK(false == isCanonical("/path/file'name/%20space/", /* isObjectName */ true));
+
+  // All properly encoded should return true
+  CHECK(true == isCanonical("/path/file%21name/%20space/", /* isObjectName */ true));
+  CHECK(true == isCanonical("/path/file%2Aname/%20space/", /* isObjectName */ true));
+  CHECK(true == isCanonical("/path/file%27name/%20space/", /* isObjectName */ true));
+}
+
+TEST_CASE("canonicalEncode(): handles all S3 safe chars correctly", "[AWS][auth][utility]")
+{
+  // Mixed encoding with exclamation mark
+  String mixed1 = "/path/file!name/%5Btest%5D/";
+  CHECK(canonicalEncode(mixed1, true) == "/path/file%21name/%5Btest%5D/");
+
+  // Mixed encoding with asterisk
+  String mixed2 = "/path/file*name/%5Btest%5D/";
+  CHECK(canonicalEncode(mixed2, true) == "/path/file%2Aname/%5Btest%5D/");
+
+  // Mixed encoding with single quote
+  String mixed3 = "/path/file'name/%5Btest%5D/";
+  CHECK(canonicalEncode(mixed3, true) == "/path/file%27name/%5Btest%5D/");
+
+  // All S3 safe chars unencoded
+  String allSafe = "/bucket/test!file*with'all(chars).js";
+  CHECK(canonicalEncode(allSafe, true) == "/bucket/test%21file%2Awith%27all%28chars%29.js");
+}
+
+/*
+ * BUG FIX TESTS: Copilot review identified these issues
+ *
+ * Issue 1: Lowercase hex digits
+ *   AWS SigV4 requires UPPERCASE hex digits in percent-encoding (e.g., %2F not %2f).
+ *   URLs with lowercase hex should be normalized to uppercase.
+ *
+ * Issue 2: Plus sign (%2B) handling
+ *   The decode-then-reencode approach may convert %2B (encoded +) to %20 (space).
+ *   Need to document/verify this matches AWS SigV4 expectations.
+ */
+
+TEST_CASE("isCanonical(): lowercase hex digits should NOT be considered fully encoded", "[AWS][auth][utility]")
+{
+  // AWS SigV4 requires uppercase hex digits. URLs with lowercase hex need normalization.
+  // Example: %2f should become %2F after canonical encoding
+
+  // Lowercase hex - should return false to trigger normalization
+  CHECK(false == isCanonical("/path/file%2ftest", /* isObjectName */ true)); // lowercase 'f'
+  CHECK(true == isCanonical("/path/file%2Ftest", /* isObjectName */ true));  // uppercase 'F' - this IS properly encoded
+  CHECK(false == isCanonical("/path/%5btest%5d", /* isObjectName */ true));  // lowercase brackets
+  CHECK(true == isCanonical("/path/%5Btest%5D", /* isObjectName */ true));   // uppercase brackets - properly encoded
+
+  // Mixed case - should return false
+  CHECK(false == isCanonical("/path/%5btest%5D", /* isObjectName */ true)); // mixed: lowercase 'b', uppercase 'D'
+  CHECK(false == isCanonical("/path/%5Btest%5d", /* isObjectName */ true)); // mixed: uppercase 'B', lowercase 'd'
+}
+
+TEST_CASE("canonicalEncode(): lowercase hex should be normalized to uppercase", "[AWS][auth][utility]")
+{
+  // AWS SigV4 requires uppercase hex digits
+  // Input with lowercase hex should be normalized to uppercase
+
+  // Lowercase slash encoding - when isObjectName=true, slashes are allowed unencoded
+  // So %2f decodes to / and stays as / (not re-encoded)
+  CHECK(canonicalEncode("/path/file%2ftest/", true) == "/path/file/test/");
+
+  // When isObjectName=false, slashes must be encoded, so %2f becomes %2F
+  CHECK(canonicalEncode("/path/file%2ftest/", false) == "%2Fpath%2Ffile%2Ftest%2F");
+
+  // Lowercase bracket encoding - brackets are always encoded
+  CHECK(canonicalEncode("/path/%5btest%5d/file.js", true) == "/path/%5Btest%5D/file.js");
+
+  // Mixed case should be normalized
+  CHECK(canonicalEncode("/path/%5btest%5D/file.js", true) == "/path/%5Btest%5D/file.js");
+
+  // Already uppercase should pass through
+  CHECK(canonicalEncode("/path/%5Btest%5D/file.js", true) == "/path/%5Btest%5D/file.js");
+}
+
+TEST_CASE("uriDecode(): lowercase hex decoding", "[AWS][auth][utility]")
+{
+  // uriDecode should handle both uppercase and lowercase hex
+  CHECK(uriDecode("%2f") == "/");
+  CHECK(uriDecode("%2F") == "/");
+  CHECK(uriDecode("%5b") == "[");
+  CHECK(uriDecode("%5B") == "[");
+  CHECK(uriDecode("/path/%5btest%5d") == "/path/[test]");
+  CHECK(uriDecode("/path/%5Btest%5D") == "/path/[test]");
+}
+
+TEST_CASE("canonicalEncode(): plus sign handling", "[AWS][auth][utility]")
+{
+  // Per AWS SigV4 spec, plus signs in URLs are treated as spaces and encoded as %20
+  // This test documents and verifies that behavior
+
+  // Literal plus sign should be encoded as %20 (treated as space per AWS spec)
+  CHECK(uriEncode("+", false) == "%20");
+
+  // Already-encoded plus (%2B) should be preserved as-is when the string is fully encoded
+  // The canonicalEncode function treats %2B as already-encoded and doesn't change it
+  String withEncodedPlus = "/path/file%2Bname/test";
+  String canonical       = canonicalEncode(withEncodedPlus, true);
+
+  // %2B is preserved because the string is already properly URI-encoded
+  CHECK(canonical == "/path/file%2Bname/test");
+
+  // However, if we have a literal + in a partially encoded string, it will be encoded as %20
+  String withLiteralPlus = "/path/file+name/%5Btest%5D"; // + is not encoded, brackets are
+  String canonicalMixed  = canonicalEncode(withLiteralPlus, true);
+  // After decode: /path/file+name/[test]
+  // After encode: + becomes %20, brackets become %5B%5D
+  CHECK(canonicalMixed == "/path/file%20name/%5Btest%5D");
+}
+
+TEST_CASE("canonicalEncode(): already canonical input is unchanged", "[AWS][auth][utility]")
+{
+  // Performance optimization: fully canonical input should pass through unchanged
+  // This includes properly uppercase hex-encoded strings
+
+  const String canonical = "/path/%5Btest%5D/%28name%29/file.js";
+  CHECK(canonicalEncode(canonical, true) == canonical);
+
+  // With encoded space
+  const String withSpace = "/path/file%20name/test.js";
+  CHECK(canonicalEncode(withSpace, true) == withSpace);
+}
+
+/* base16Encode() ************************************************************************************************************** */
+
+TEST_CASE("base16Encode(): base16 encode empty string", "[utility]")
+{
+  const char *in      = nullptr;
+  size_t      inLen   = 0;
+  String      encoded = base16Encode(in, inLen);
+
+  CHECK(0 == encoded.length());
+}
+
+TEST_CASE("base16Encode(): base16 encode RFC4648 test vectors", "[utility]")
+{
+  /* use the test vectors from RFC4648: https://tools.ietf.org/html/rfc4648#section-10 (just convert to lower case) */
+  const char *bench[] = {"",       "",     "f",        "66",    "fo",         "666f",   "foo",
+                         "666f6f", "foob", "666f6f62", "fooba", "666f6f6261", "foobar", "666f6f626172"};
+
+  for (size_t i = 0; i < sizeof(bench) / sizeof(char *); i += 2) {
+    const char *in      = bench[i];
+    size_t      inLen   = strlen(in);
+    String      encoded = base16Encode(in, inLen);
+
+    CHECK(inLen * 2 == encoded.length());
+    CHECK_FALSE(encoded.compare(bench[i + 1]));
+  }
+}
+
+/* trimWhiteSpaces() ******************************************************************************************************** */
+
+TEST_CASE("trimWhiteSpacesAndSqueezeInnerSpaces(): trim invalid arguments, check string", "[utility]")
+{
+  const char *in    = nullptr;
+  size_t      inLen = 0;
+
+  const std::string trimmed = trimWhiteSpacesAndSqueezeInnerSpaces(in, inLen);
+
+  CHECK_FALSE(trimmed.compare(""));
+  CHECK(inLen == trimmed.length());
+}
+
+TEST_CASE("trimWhiteSpacesAndSqueezeInnerSpaces(): trim empty input, check string", "[utility]")
+{
+  const char *in    = "";
+  size_t      inLen = 0;
+
+  const std::string trimmed = trimWhiteSpacesAndSqueezeInnerSpaces(in, inLen);
+
+  CHECK_FALSE(trimmed.compare(""));
+  CHECK(inLen == trimmed.length());
+}
+
+TEST_CASE("trimWhiteSpacesAndSqueezeInnerSpaces(): trim nothing to trim, check string", "[utility]")
+{
+  const char in[]  = "Important Message";
+  size_t     inLen = strlen(in);
+
+  const std::string trimmed = trimWhiteSpacesAndSqueezeInnerSpaces(in, inLen);
+
+  CHECK_FALSE(trimmed.compare("Important Message"));
+  CHECK(inLen == trimmed.length());
+}
+
+TEST_CASE("trimWhiteSpacesAndSqueezeInnerSpaces(): trim beginning, check string", "[utility]")
+{
+  const char in[]  = " \t\nImportant Message";
+  size_t     inLen = strlen(in);
+
+  const std::string trimmed = trimWhiteSpacesAndSqueezeInnerSpaces(in, inLen);
+
+  CHECK_FALSE(trimmed.compare("Important Message"));
+  CHECK(inLen - 3 == trimmed.length());
+}
+
+TEST_CASE("trimWhiteSpacesAndSqueezeInnerSpaces(): trim end, check string", "[utility]")
+{
+  const char in[]  = "Important Message \t\n";
+  size_t     inLen = strlen(in);
+
+  const std::string trimmed = trimWhiteSpacesAndSqueezeInnerSpaces(in, inLen);
+
+  CHECK_FALSE(trimmed.compare("Important Message"));
+  CHECK(inLen - 3 == trimmed.length());
+}
+
+TEST_CASE("trimWhiteSpacesAndSqueezeInnerSpaces(): trim both ends, check string", "[utility]")
+{
+  const char in[]  = "\v\t\n Important Message \t\n";
+  size_t     inLen = strlen(in);
+
+  const std::string trimmed = trimWhiteSpacesAndSqueezeInnerSpaces(in, inLen);
+
+  CHECK_FALSE(trimmed.compare("Important Message"));
+  CHECK(inLen - 7 == trimmed.length());
+}
+
+TEST_CASE("trimWhiteSpacesAndSqueezeInnerSpaces(): trim both ends and squeeze middle spaces, check string", "[utility]")
+{
+  const char in[]  = "\v\t\n Important     Message \t\n";
+  size_t     inLen = strlen(in);
+
+  const std::string trimmed = trimWhiteSpacesAndSqueezeInnerSpaces(in, inLen);
+
+  CHECK_FALSE(trimmed.compare("Important Message"));
+  CHECK(inLen - 11 == trimmed.length());
+}
+
+TEST_CASE("trimWhiteSpacesAndSqueezeInnerSpaces(): squeeze middle spaces multiple groups, check string", "[utility]")
+{
+  const char in[]  = "Very   Important     Message";
+  size_t     inLen = strlen(in);
+
+  const std::string trimmed = trimWhiteSpacesAndSqueezeInnerSpaces(in, inLen);
+
+  CHECK_FALSE(trimmed.compare("Very Important Message"));
+  CHECK(inLen - 6 == trimmed.length());
+}
+
+TEST_CASE("trimWhiteSpacesAndSqueezeInnerSpaces(): squeeze middle whitespaces, check string", "[utility]")
+{
+  const char in[]  = "Very \t\nImportant \v\f\rMessage";
+  size_t     inLen = strlen(in);
+
+  const std::string trimmed = trimWhiteSpacesAndSqueezeInnerSpaces(in, inLen);
+
+  CHECK_FALSE(trimmed.compare("Very Important Message"));
+  CHECK(inLen - 5 == trimmed.length());
+}
+
+TEST_CASE("trimWhiteSpaces(): trim both, check string", "[utility]")
+{
+  String in      = "\v\t\n Important Message \t\n";
+  String trimmed = trimWhiteSpaces(in);
+
+  CHECK_FALSE(trimmed.compare("Important Message"));
+  CHECK(in.length() - 7 == trimmed.length());
+}
+
+TEST_CASE("trimWhiteSpaces(): trim right, check string", "[utility]")
+{
+  String in      = "Important Message \t\n";
+  String trimmed = trimWhiteSpaces(in);
+
+  CHECK_FALSE(trimmed.compare("Important Message"));
+  CHECK(in.length() - 3 == trimmed.length());
+}
+
+TEST_CASE("trimWhiteSpaces(): trim left, check string", "[utility]")
+{
+  String in      = "\v\t\n Important Message";
+  String trimmed = trimWhiteSpaces(in);
+
+  CHECK_FALSE(trimmed.compare("Important Message"));
+  CHECK(in.length() - 4 == trimmed.length());
+}
+
+TEST_CASE("trimWhiteSpaces(): trim empty, check string", "[utility]")
+{
+  String in      = "\v\t\n  \t\n";
+  String trimmed = trimWhiteSpaces(in);
+
+  CHECK(trimmed.empty());
+  CHECK(0 == trimmed.length());
+}
+
+/* AWS Regions ***************************************************************************************************** */
+
+TEST_CASE("AWSRegions: get region empty input", "[AWS][auth][utility]")
+{
+  const char *host = "";
+  String      s    = getRegion(defaultDefaultRegionMap, host, strlen(host));
+  CHECK_FALSE(s.compare("us-east-1"));
+}
+
+TEST_CASE("AWSRegions: get region by providing no bucket name", "[AWS][auth][utility]")
+{
+  const char *host = "s3.eu-west-2.amazonaws.com";
+  String      s    = getRegion(defaultDefaultRegionMap, host, strlen(host));
+  CHECK_FALSE(s.compare("eu-west-2"));
+}
+
+TEST_CASE("AWSRegions: get region by providing bucket name having single label", "[AWS][auth][utility]")
+{
+  const char *host = "label1.label2.s3.eu-west-2.amazonaws.com";
+  String      s    = getRegion(defaultDefaultRegionMap, host, strlen(host));
+  CHECK_FALSE(s.compare("eu-west-2"));
+}
+
+TEST_CASE("AWSRegions: get region by providing bucket name having multiple labels", "[AWS][auth][utility]")
+{
+  const char *host = "label1.label2.s3.eu-west-2.amazonaws.com";
+  String      s    = getRegion(defaultDefaultRegionMap, host, strlen(host));
+  CHECK_FALSE(s.compare("eu-west-2"));
+}
+
+TEST_CASE("AWSRegions: get region by providing bucket name having single label not matching any entry point",
+          "[AWS][auth][utility]")
+{
+  const char *host = "THIS_NEVER_MATCHES.eu-west-2.amazonaws.com";
+  String      s    = getRegion(defaultDefaultRegionMap, host, strlen(host));
+  CHECK_FALSE(s.compare("us-east-1"));
+}
+
+TEST_CASE("AWSRegions: get region by providing bucket name having multiple labels not matching any entry point",
+          "[AWS][auth][utility]")
+{
+  const char *host = "label1.label2.THIS_NEVER_MATCHES.eu-west-2.amazonaws.com";
+  String      s    = getRegion(defaultDefaultRegionMap, host, strlen(host));
+  CHECK_FALSE(s.compare("us-east-1"));
+}
+
+/* AWS spec tests/example ****************************************************************************************** */
+
+/* Test from docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
+ * User id, secret and time */
+const char *awsSecretAccessKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+const char *awsAccessKeyId     = "AKIAIOSFODNN7EXAMPLE";
+const char *awsService         = "s3";
+
+void
+ValidateBench(TsInterface &api, bool signPayload, time_t *now, const char *bench[], const StringSet &includedHeaders,
+              const StringSet &excludedHeaders)
+{
+  /* Test the main entry point for calculation of the Authorization header content */
+  AwsAuthV4 util(api, now, signPayload, awsAccessKeyId, strlen(awsAccessKeyId), awsSecretAccessKey, strlen(awsSecretAccessKey),
+                 awsService, strlen(awsService), includedHeaders, excludedHeaders, defaultDefaultRegionMap);
+  String    authorizationHeader = util.getAuthorizationHeader();
+  CAPTURE(authorizationHeader);
+  CHECK_FALSE(authorizationHeader.compare(bench[0]));
+
+  /* Test payload hash */
+  String payloadHash = util.getPayloadHash();
+  CAPTURE(payloadHash);
+  CHECK_FALSE(payloadHash.compare(bench[5]));
+
+  /* Test the date time header content */
+  size_t      dateLen = 0;
+  const char *date    = util.getDateTime(&dateLen);
+  CAPTURE(String(date, dateLen));
+  CHECK_FALSE(String(date, dateLen).compare(bench[2]));
+
+  /* Now test particular test points to pinpoint problems easier in case of regression */
+
+  /* test the canonization of the request */
+  String signedHeaders;
+  String canonicalReq = getCanonicalRequestSha256Hash(api, signPayload, includedHeaders, excludedHeaders, signedHeaders);
+  CAPTURE(canonicalReq);
+  CHECK_FALSE(canonicalReq.compare(bench[1]));
+  CAPTURE(signedHeaders);
+  CHECK_FALSE(signedHeaders.compare(bench[6]));
+
+  /* Test the formatting of the date and time */
+  char   dateTime[sizeof("20170428T010203Z")];
+  size_t dateTimeLen = getIso8601Time(now, dateTime, sizeof(dateTime));
+  CAPTURE(String(dateTime, dateTimeLen));
+  CHECK_FALSE(String(dateTime, dateTimeLen).compare(bench[2]));
+
+  /* Test the region name */
+  int         hostLen   = 0;
+  const char *host      = api.getHost(&hostLen);
+  String      awsRegion = getRegion(defaultDefaultRegionMap, host, hostLen);
+
+  /* Test string to sign calculation */
+  String stringToSign = getStringToSign(dateTime, dateTimeLen, awsRegion.c_str(), awsRegion.length(), awsService,
+                                        strlen(awsService), canonicalReq.c_str(), canonicalReq.length());
+  CAPTURE(stringToSign);
+  CHECK_FALSE(stringToSign.compare(bench[3]));
+
+  /* Test the signature calculation */
+  char   signature[EVP_MAX_MD_SIZE] = {};
+  size_t signatureLen =
+    getSignature(awsSecretAccessKey, strlen(awsSecretAccessKey), awsRegion.c_str(), awsRegion.length(), awsService,
+                 strlen(awsService), dateTime, 8, stringToSign.c_str(), stringToSign.length(), signature, EVP_MAX_MD_SIZE);
+  String base16Signature = base16Encode(signature, signatureLen);
+  CAPTURE(base16Signature);
+  CHECK_FALSE(base16Signature.compare(bench[4]));
+}
+
+/**
+ * Test from docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
+ * Example: GET Object
+ */
+TEST_CASE("AWSAuthSpecByExample: GET Object", "[AWS][auth][SpecByExample]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("test.txt");
+  api._query.assign("");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("Range", "bytes=0-9"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+
+  const char *bench[] = {
+    /* Authorization Header */
+    "AWS4-HMAC-SHA256 "
+    "Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,"
+    "SignedHeaders=host;range;x-amz-content-sha256;x-amz-date,"
+    "Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41",
+    /* Canonical Request sha256 */
+    "7344ae5b7ee6c3e7e6b0fe0640412a37625d1fbfff95c48bbb2dc43964946972",
+    /* Date and time*/
+    "20130524T000000Z",
+    /* String to sign */
+    "AWS4-HMAC-SHA256\n"
+    "20130524T000000Z\n"
+    "20130524/us-east-1/s3/aws4_request\n"
+    "7344ae5b7ee6c3e7e6b0fe0640412a37625d1fbfff95c48bbb2dc43964946972",
+    /* Signature */
+    "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41",
+    /* Payload hash */
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    /* Signed Headers */
+    "host;range;x-amz-content-sha256;x-amz-date",
+  };
+
+  ValidateBench(api, /*signePayload */ true, &now, bench, defaultIncludeHeaders, defaultExcludeHeaders);
+}
+
+/**
+ * Test from docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
+ * Example: GET Bucket Lifecycle
+ */
+TEST_CASE("AWSAuthSpecByExample: GET Bucket Lifecycle", "[AWS][auth][SpecByExample]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("");
+  api._query.assign("lifecycle");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+
+  const char *bench[] = {
+    /* Authorization Header */
+    "AWS4-HMAC-SHA256 "
+    "Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,"
+    "SignedHeaders=host;x-amz-content-sha256;x-amz-date,"
+    "Signature=fea454ca298b7da1c68078a5d1bdbfbbe0d65c699e0f91ac7a200a0136783543",
+    /* Canonical Request sha256 */
+    "9766c798316ff2757b517bc739a67f6213b4ab36dd5da2f94eaebf79c77395ca",
+    /* Date and time*/
+    "20130524T000000Z",
+    /* String to sign */
+    "AWS4-HMAC-SHA256\n"
+    "20130524T000000Z\n"
+    "20130524/us-east-1/s3/aws4_request\n"
+    "9766c798316ff2757b517bc739a67f6213b4ab36dd5da2f94eaebf79c77395ca",
+    /* Signature */
+    "fea454ca298b7da1c68078a5d1bdbfbbe0d65c699e0f91ac7a200a0136783543",
+    /* Payload hash */
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    /* Signed Headers */
+    "host;x-amz-content-sha256;x-amz-date",
+  };
+
+  ValidateBench(api, /*signePayload */ true, &now, bench, defaultIncludeHeaders, defaultExcludeHeaders);
+}
+
+/**
+ * Test from docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
+ * Example: Get Bucket (List Objects)
+ */
+TEST_CASE("AWSAuthSpecByExample: Get Bucket List Objects", "[AWS][auth][SpecByExample]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("");
+  api._query.assign("max-keys=2&prefix=J");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+
+  const char *bench[] = {
+    /* Authorization Header */
+    "AWS4-HMAC-SHA256 "
+    "Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,"
+    "SignedHeaders=host;x-amz-content-sha256;x-amz-date,"
+    "Signature=34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7",
+    /* Canonical Request sha256 */
+    "df57d21db20da04d7fa30298dd4488ba3a2b47ca3a489c74750e0f1e7df1b9b7",
+    /* Date and time*/
+    "20130524T000000Z",
+    /* String to sign */
+    "AWS4-HMAC-SHA256\n"
+    "20130524T000000Z\n"
+    "20130524/us-east-1/s3/aws4_request\n"
+    "df57d21db20da04d7fa30298dd4488ba3a2b47ca3a489c74750e0f1e7df1b9b7",
+    /* Signature */
+    "34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7",
+    /* Payload hash */
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    /* Signed Headers */
+    "host;x-amz-content-sha256;x-amz-date",
+  };
+
+  ValidateBench(api, /*signePayload */ true, &now, bench, defaultIncludeHeaders, defaultExcludeHeaders);
+}
+
+/**
+ * Test based on docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
+ * but this time don't sign the payload to test "UNSIGNED-PAYLOAD" feature.
+ * Example: Get Bucket (List Objects)
+ */
+TEST_CASE("AWSAuthSpecByExample: GET Bucket List Objects, unsigned pay-load", "[AWS][auth][SpecByExample]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("");
+  api._query.assign("max-keys=2&prefix=J");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "UNSIGNED-PAYLOAD"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+
+  const char *bench[] = {
+    /* Authorization Header */
+    "AWS4-HMAC-SHA256 "
+    "Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,"
+    "SignedHeaders=host;x-amz-content-sha256;x-amz-date,"
+    "Signature=b1a076428fa68c2c42202ee5a5718b8207f725e451e2157d6b1c393e01fc2e68",
+    /* Canonical Request sha256 */
+    "528623330c85041d6fb82795b6f8d5771825d3568b9f0bc1faa8a49e1f5f9cfc",
+    /* Date and time*/
+    "20130524T000000Z",
+    /* String to sign */
+    "AWS4-HMAC-SHA256\n"
+    "20130524T000000Z\n"
+    "20130524/us-east-1/s3/aws4_request\n"
+    "528623330c85041d6fb82795b6f8d5771825d3568b9f0bc1faa8a49e1f5f9cfc",
+    /* Signature */
+    "b1a076428fa68c2c42202ee5a5718b8207f725e451e2157d6b1c393e01fc2e68",
+    /* Payload hash */
+    "UNSIGNED-PAYLOAD",
+    /* Signed Headers */
+    "host;x-amz-content-sha256;x-amz-date",
+  };
+
+  ValidateBench(api, /*signePayload */ false, &now, bench, defaultIncludeHeaders, defaultExcludeHeaders);
+}
+
+/**
+ * Test based on docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
+ * but this time don't sign the payload to test "UNSIGNED-PAYLOAD" feature and
+ * have extra headers to be excluded from the signature (internal and changing headers)
+ * Example: Get Bucket (List Objects)
+ */
+TEST_CASE("AWSAuthSpecByExample: GET Bucket List Objects, unsigned pay-load, exclude internal and changing headers", "[AWS][auth]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("");
+  api._query.assign("max-keys=2&prefix=J");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "UNSIGNED-PAYLOAD"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+  api._headers.insert(std::make_pair("@internal", "internal value"));
+  api._headers.insert(std::make_pair("x-forwarded-for", "192.168.7.1"));
+  api._headers.insert(
+    std::make_pair("via", "http/1.1 tcp ipv4 ats_dev[7e67ac60-c204-450d-90be-a426dd3b569f] (ApacheTrafficServer/7.2.0)"));
+
+  const char *bench[] = {
+    /* Authorization Header */
+    "AWS4-HMAC-SHA256 "
+    "Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,"
+    "SignedHeaders=host;x-amz-content-sha256;x-amz-date,"
+    "Signature=b1a076428fa68c2c42202ee5a5718b8207f725e451e2157d6b1c393e01fc2e68",
+    /* Canonical Request sha256 */
+    "528623330c85041d6fb82795b6f8d5771825d3568b9f0bc1faa8a49e1f5f9cfc",
+    /* Date and time*/
+    "20130524T000000Z",
+    /* String to sign */
+    "AWS4-HMAC-SHA256\n"
+    "20130524T000000Z\n"
+    "20130524/us-east-1/s3/aws4_request\n"
+    "528623330c85041d6fb82795b6f8d5771825d3568b9f0bc1faa8a49e1f5f9cfc",
+    /* Signature */
+    "b1a076428fa68c2c42202ee5a5718b8207f725e451e2157d6b1c393e01fc2e68",
+    /* Payload hash */
+    "UNSIGNED-PAYLOAD",
+    /* Signed Headers */
+    "host;x-amz-content-sha256;x-amz-date",
+  };
+
+  ValidateBench(api, /*signePayload */ false, &now, bench, defaultIncludeHeaders, defaultExcludeHeaders);
+}
+
+/**
+ * Test based on docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
+ * but this time query param value is already encoded, it should not URI encode it twice
+ * according to AWS real behavior undocumented in the specification.
+ */
+TEST_CASE("AWSAuthSpecByExample: GET Bucket List Objects, query param value already URI encoded", "[AWS][auth]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("PATH==");
+  api._query.assign("key=TEST==");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "UNSIGNED-PAYLOAD"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+
+  const char *bench[] = {
+    /* Authorization Header */
+    "AWS4-HMAC-SHA256 "
+    "Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,"
+    "SignedHeaders=host;x-amz-content-sha256;x-amz-date,"
+    "Signature=3b195c74eaa89790c596114a9fcb8515d6a3cc78577f8941c46b09ee7f501194",
+    /* Canonical Request sha256 */
+    "7b3c74369013172ce9cb3da99b5d14e358382953e7b560b4c9bf0a46e73933cb",
+    /* Date and time*/
+    "20130524T000000Z",
+    /* String to sign */
+    "AWS4-HMAC-SHA256\n"
+    "20130524T000000Z\n"
+    "20130524/us-east-1/s3/aws4_request\n"
+    "7b3c74369013172ce9cb3da99b5d14e358382953e7b560b4c9bf0a46e73933cb",
+    /* Signature */
+    "3b195c74eaa89790c596114a9fcb8515d6a3cc78577f8941c46b09ee7f501194",
+    /* Payload hash */
+    "UNSIGNED-PAYLOAD",
+    /* Signed Headers */
+    "host;x-amz-content-sha256;x-amz-date",
+  };
+
+  ValidateBench(api, /*signePayload */ false, &now, bench, defaultIncludeHeaders, defaultExcludeHeaders);
+
+  /* Now make query param value encoded beforehand and expect the same result,
+   * it should not URI encode it twice according to AWS real behavior undocumented in the specification.*/
+  api._path.assign("PATH%3D%3D");
+  api._query.assign("key=TEST%3D%3D");
+  ValidateBench(api, /*signePayload */ false, &now, bench, defaultIncludeHeaders, defaultExcludeHeaders);
+}
+
+TEST_CASE("S3AuthV4UtilParams: signing multiple same name fields", "[AWS][auth][utility]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("");
+  api._query.assign("max-keys=2&prefix=J");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("Content-Type", "gzip"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "UNSIGNED-PAYLOAD"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+  api._headers.insert(std::make_pair("HeaderA", "HeaderAValue"));
+  api._headers.insert(std::make_pair("HeaderB", "HeaderBValue1"));
+  api._headers.insert(std::make_pair("HeaderB", "HeaderBValue2"));
+  api._headers.insert(std::make_pair("HeaderC", " HeaderCValue1, HeaderCValue2 ")); // LWS between values
+  api._headers.insert(std::make_pair("HeaderC", "HeaderCValue3,HeaderCValue4"));    // No LWS between values
+
+  const char *bench[] = {
+    /* Authorization Header */
+    "AWS4-HMAC-SHA256 "
+    "Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,"
+    "SignedHeaders=content-type;headera;headerb;headerc;host;x-amz-content-sha256;x-amz-date,"
+    "Signature=c9f57637044ddb0633430a8631f946a35d0ffff0cf7647aeaa2d0e985a69e674",
+
+    /* Canonical Request sha256 */
+    "e3429bb6a99fea0162c703ba6aaf771e16d2bb8f637c9300cd468fcbe1b66a0e",
+    /* Date and time*/
+    "20130524T000000Z",
+    /* String to sign */
+    "AWS4-HMAC-SHA256\n"
+    "20130524T000000Z\n"
+    "20130524/us-east-1/s3/aws4_request\n"
+    "e3429bb6a99fea0162c703ba6aaf771e16d2bb8f637c9300cd468fcbe1b66a0e",
+    /* Signature */
+    "c9f57637044ddb0633430a8631f946a35d0ffff0cf7647aeaa2d0e985a69e674",
+    /* Payload hash */
+    "UNSIGNED-PAYLOAD",
+    /* Signed Headers */
+    "content-type;headera;headerb;headerc;host;x-amz-content-sha256;x-amz-date",
+  };
+
+  ValidateBench(api, /*signePayload */ false, &now, bench, defaultIncludeHeaders, defaultExcludeHeaders);
+}
+
+///* Utility parameters related tests ******************************************************************************** */
+
+void
+ValidateBenchCanonicalRequest(TsInterface &api, bool signPayload, time_t *now, const char *bench[],
+                              const StringSet &includedHeaders, const StringSet &excludedHeaders)
+{
+  /* Test the main entry point for calculation of the Authorization header content */
+  AwsAuthV4 util(api, now, signPayload, awsAccessKeyId, strlen(awsAccessKeyId), awsSecretAccessKey, strlen(awsSecretAccessKey),
+                 awsService, strlen(awsService), includedHeaders, excludedHeaders, defaultDefaultRegionMap);
+
+  /* test the canonization of the request */
+  String signedHeaders;
+  String canonicalReq = getCanonicalRequestSha256Hash(api, signPayload, includedHeaders, excludedHeaders, signedHeaders);
+  CHECK_FALSE(signedHeaders.compare(bench[0]));
+  CHECK_FALSE(canonicalReq.compare(bench[1]));
+}
+
+TEST_CASE("S3AuthV4UtilParams: include all headers by default", "[AWS][auth][utility]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("");
+  api._query.assign("max-keys=2&prefix=J");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("Content-Type", "gzip"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "UNSIGNED-PAYLOAD"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+  api._headers.insert(std::make_pair("HeaderA", "HeaderAValue"));
+  api._headers.insert(std::make_pair("HeaderB", "HeaderBValue"));
+  api._headers.insert(std::make_pair("HeaderC", "HeaderCValue"));
+  api._headers.insert(std::make_pair("HeaderD", "HeaderDValue"));
+  api._headers.insert(std::make_pair("HeaderE", "HeaderEValue"));
+  api._headers.insert(std::make_pair("HeaderF", "HeaderFValue"));
+
+  StringSet include = defaultIncludeHeaders;
+  StringSet exclude = defaultExcludeHeaders;
+
+  const char *bench[] = {
+    /* Signed Headers */
+    "content-type;headera;headerb;headerc;headerd;headere;headerf;host;x-amz-content-sha256;x-amz-date",
+    /* Canonical Request sha256 */
+    "819a275bbd601fd6f6ba39190ee8299d34fcb0f5e0a4c0d8017c35e79a026579",
+  };
+
+  ValidateBenchCanonicalRequest(api, /*signePayload */ false, &now, bench, include, exclude);
+}
+
+TEST_CASE("S3AuthV4UtilParams: include all headers explicit", "[AWS][auth][SpecByExample]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("");
+  api._query.assign("max-keys=2&prefix=J");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("Content-Type", "gzip"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "UNSIGNED-PAYLOAD"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+  api._headers.insert(std::make_pair("HeaderA", "HeaderAValue"));
+  api._headers.insert(std::make_pair("HeaderB", "HeaderBValue"));
+  api._headers.insert(std::make_pair("HeaderC", "HeaderCValue"));
+  api._headers.insert(std::make_pair("HeaderD", "HeaderDValue"));
+  api._headers.insert(std::make_pair("HeaderE", "HeaderEValue"));
+  api._headers.insert(std::make_pair("HeaderF", "HeaderFValue"));
+
+  StringSet include;
+  commaSeparateString<StringSet>(include, "HeaderA,HeaderB,HeaderC,HeaderD,HeaderE,HeaderF");
+  StringSet exclude = defaultExcludeHeaders;
+
+  const char *bench[] = {
+    /* Signed Headers */
+    "content-type;headera;headerb;headerc;headerd;headere;headerf;host;x-amz-content-sha256;x-amz-date",
+    /* Canonical Request sha256 */
+    "819a275bbd601fd6f6ba39190ee8299d34fcb0f5e0a4c0d8017c35e79a026579",
+  };
+
+  ValidateBenchCanonicalRequest(api, /*signePayload */ false, &now, bench, include, exclude);
+}
+
+TEST_CASE("S3AuthV4UtilParams: exclude all headers explicit", "[AWS][auth][utility]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("");
+  api._query.assign("max-keys=2&prefix=J");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("Content-Type", "gzip"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "UNSIGNED-PAYLOAD"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+  api._headers.insert(std::make_pair("HeaderA", "HeaderAValue"));
+  api._headers.insert(std::make_pair("HeaderB", "HeaderBValue"));
+  api._headers.insert(std::make_pair("HeaderC", "HeaderCValue"));
+  api._headers.insert(std::make_pair("HeaderD", "HeaderDValue"));
+  api._headers.insert(std::make_pair("HeaderE", "HeaderEValue"));
+  api._headers.insert(std::make_pair("HeaderF", "HeaderFValue"));
+
+  StringSet include = defaultIncludeHeaders;
+  StringSet exclude;
+  commaSeparateString<StringSet>(exclude, "HeaderA,HeaderB,HeaderC,HeaderD,HeaderE,HeaderF");
+
+  const char *bench[] = {
+    /* Signed Headers */
+    "content-type;host;x-amz-content-sha256;x-amz-date",
+    /* Canonical Request sha256 */
+    "ef3088997c69bc860e0bb36f97a8335f38863339e7fd01f2cd17b5391da575fb",
+  };
+
+  ValidateBenchCanonicalRequest(api, /*signePayload */ false, &now, bench, include, exclude);
+}
+
+TEST_CASE("S3AuthV4UtilParams: include/exclude non overlapping headers", "[AWS][auth][utility]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("");
+  api._query.assign("max-keys=2&prefix=J");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("Content-Type", "gzip"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "UNSIGNED-PAYLOAD"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+  api._headers.insert(std::make_pair("HeaderA", "HeaderAValue"));
+  api._headers.insert(std::make_pair("HeaderB", "HeaderBValue"));
+  api._headers.insert(std::make_pair("HeaderC", "HeaderCValue"));
+  api._headers.insert(std::make_pair("HeaderD", "HeaderEValue"));
+  api._headers.insert(std::make_pair("HeaderF", "HeaderFValue"));
+
+  StringSet include, exclude;
+  commaSeparateString<StringSet>(include, "HeaderA,HeaderB,HeaderC");
+  commaSeparateString<StringSet>(exclude, "HeaderD,HeaderE,HeaderF");
+
+  const char *bench[] = {
+    /* Signed Headers */
+    "content-type;headera;headerb;headerc;host;x-amz-content-sha256;x-amz-date",
+    /* Canonical Request sha256 */
+    "c1c7fb808eefdb712192efeed168fdecef0f8d95e8df5a2569d127068c425209",
+  };
+
+  ValidateBenchCanonicalRequest(api, /*signePayload */ false, &now, bench, include, exclude);
+}
+
+TEST_CASE("S3AuthV4UtilParams: include/exclude overlapping headers", "[AWS][auth][utility]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("");
+  api._query.assign("max-keys=2&prefix=J");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("Content-Type", "gzip"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "UNSIGNED-PAYLOAD"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+  api._headers.insert(std::make_pair("HeaderA", "HeaderAValue"));
+  api._headers.insert(std::make_pair("HeaderB", "HeaderBValue"));
+  api._headers.insert(std::make_pair("HeaderC", "HeaderCValue"));
+  api._headers.insert(std::make_pair("HeaderD", "HeaderDValue"));
+  api._headers.insert(std::make_pair("HeaderE", "HeaderEValue"));
+  api._headers.insert(std::make_pair("HeaderF", "HeaderFValue"));
+
+  StringSet include, exclude;
+  commaSeparateString<StringSet>(include, "HeaderA,HeaderB,HeaderC");
+  commaSeparateString<StringSet>(exclude, "HeaderC,HeaderD,HeaderE,HeaderF");
+
+  const char *bench[] = {
+    /* Signed Headers */
+    "content-type;headera;headerb;host;x-amz-content-sha256;x-amz-date",
+    /* Canonical Request sha256 */
+    "0ac0bd67e304b3c25ec51f01b86c824f7439cdb0a5bc16acdebab73f34e12a57",
+  };
+
+  ValidateBenchCanonicalRequest(api, /*signePayload */ false, &now, bench, include, exclude);
+}
+
+TEST_CASE("S3AuthV4UtilParams: include/exclude overlapping headers missing include", "[AWS][auth][utility]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("");
+  api._query.assign("max-keys=2&prefix=J");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("Content-Type", "gzip"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "UNSIGNED-PAYLOAD"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+  api._headers.insert(std::make_pair("HeaderA", "HeaderAValue"));
+  api._headers.insert(std::make_pair("HeaderB", "HeaderBValue"));
+  api._headers.insert(std::make_pair("HeaderC", "HeaderCValue"));
+  api._headers.insert(std::make_pair("HeaderD", "HeaderDValue"));
+  api._headers.insert(std::make_pair("HeaderE", "HeaderEValue"));
+  api._headers.insert(std::make_pair("HeaderF", "HeaderFValue"));
+
+  StringSet include, exclude;
+  commaSeparateString<StringSet>(include, "HeaderA,HeaderC");
+  commaSeparateString<StringSet>(exclude, "HeaderC,HeaderD,HeaderE,HeaderF");
+
+  const char *bench[] = {
+    /* Signed Headers */
+    "content-type;headera;host;x-amz-content-sha256;x-amz-date",
+    /* Canonical Request sha256 */
+    "5b5bef63c923fed685230feb91d8059fe8d56c80d21ba6922ee335ff3fcc45bf",
+  };
+
+  ValidateBenchCanonicalRequest(api, /*signePayload */ false, &now, bench, include, exclude);
+}
+
+TEST_CASE("S3AuthV4UtilParams: include/exclude overlapping headers missing exclude", "[AWS][auth][utility]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("");
+  api._query.assign("max-keys=2&prefix=J");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("Content-Type", "gzip"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "UNSIGNED-PAYLOAD"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+  api._headers.insert(std::make_pair("HeaderA", "HeaderAValue"));
+  api._headers.insert(std::make_pair("HeaderB", "HeaderBValue"));
+  api._headers.insert(std::make_pair("HeaderC", "HeaderCValue"));
+  api._headers.insert(std::make_pair("HeaderD", "HeaderDValue"));
+  api._headers.insert(std::make_pair("HeaderE", "HeaderEValue"));
+  api._headers.insert(std::make_pair("HeaderF", "HeaderFValue"));
+
+  StringSet include, exclude;
+  commaSeparateString<StringSet>(include, "HeaderA,HeaderB,HeaderC");
+  commaSeparateString<StringSet>(exclude, "HeaderC,HeaderD,HeaderF");
+
+  const char *bench[] = {
+    /* Signed Headers */
+    "content-type;headera;headerb;host;x-amz-content-sha256;x-amz-date",
+    /* Canonical Request sha256 */
+    "0ac0bd67e304b3c25ec51f01b86c824f7439cdb0a5bc16acdebab73f34e12a57",
+  };
+
+  ValidateBenchCanonicalRequest(api, /*signePayload */ false, &now, bench, include, exclude);
+}
+
+/*
+ * Mandatory headers Host, x-amz-* and Content-Type will must be included even if the user asked to exclude them.
+ */
+TEST_CASE("S3AuthV4UtilParams: include content type", "[AWS][auth][utility]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("");
+  api._query.assign("max-keys=2&prefix=J");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("Content-Type", "gzip"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "UNSIGNED-PAYLOAD"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+
+  StringSet include = defaultIncludeHeaders;
+  StringSet exclude;
+  commaSeparateString<StringSet>(exclude, "Content-Type,x-amz-content-sha256,x-amz-date");
+
+  const char *bench[] = {
+    /* Signed Headers */
+    "content-type;host;x-amz-content-sha256;x-amz-date",
+    /* Canonical Request sha256 */
+    "ef3088997c69bc860e0bb36f97a8335f38863339e7fd01f2cd17b5391da575fb",
+  };
+
+  ValidateBenchCanonicalRequest(api, /*signePayload */ false, &now, bench, include, exclude);
+}
+
+/*
+ * Mandatory headers Host, x-amz-* and Content-Type will must be included even if the user asked to exclude them.
+ * Content-type should not be signed if missing from the HTTP request.
+ */
+TEST_CASE("S3AuthV4UtilParams: include missing content type", "[AWS][auth][utility]")
+{
+  time_t now = 1369353600; /* 5/24/2013 00:00:00 GMT */
+
+  /* Define the HTTP request elements */
+  MockTsInterface api;
+  api._method.assign("GET");
+  api._host.assign("examplebucket.s3.amazonaws.com");
+  api._path.assign("");
+  api._query.assign("max-keys=2&prefix=J");
+  api._headers.insert(std::make_pair("Host", "examplebucket.s3.amazonaws.com"));
+  api._headers.insert(std::make_pair("x-amz-content-sha256", "UNSIGNED-PAYLOAD"));
+  api._headers.insert(std::make_pair("x-amz-date", "20130524T000000Z"));
+
+  StringSet include = defaultIncludeHeaders;
+  StringSet exclude;
+  commaSeparateString<StringSet>(exclude, "Content-Type,x-amz-content-sha256,x-amz-date");
+
+  const char *bench[] = {
+    /* Signed Headers */
+    "host;x-amz-content-sha256;x-amz-date",
+    /* Canonical Request sha256 */
+    "528623330c85041d6fb82795b6f8d5771825d3568b9f0bc1faa8a49e1f5f9cfc",
+  };
+
+  ValidateBenchCanonicalRequest(api, /*signePayload */ false, &now, bench, include, exclude);
+}

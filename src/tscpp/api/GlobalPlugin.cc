@@ -33,9 +33,9 @@ using namespace atscppapi;
  * @private
  */
 struct atscppapi::GlobalPluginState : noncopyable {
-  TSCont cont_ = nullptr;
+  TSCont        cont_ = nullptr;
   GlobalPlugin *global_plugin_;
-  bool ignore_internal_transactions_;
+  bool          ignore_internal_transactions_;
 
   GlobalPluginState(GlobalPlugin *global_plugin, bool ignore_internal_transactions)
     : global_plugin_(global_plugin), ignore_internal_transactions_(ignore_internal_transactions)
@@ -72,16 +72,15 @@ handleGlobalPluginEvents(TSCont cont, TSEvent event, void *edata)
 GlobalPlugin::GlobalPlugin(bool ignore_internal_transactions)
 {
   utils::internal::initTransactionManagement();
-  state_        = new GlobalPluginState(this, ignore_internal_transactions);
+  state_        = std::make_unique<GlobalPluginState>(this, ignore_internal_transactions);
   TSMutex mutex = nullptr;
   state_->cont_ = TSContCreate(handleGlobalPluginEvents, mutex);
-  TSContDataSet(state_->cont_, static_cast<void *>(state_));
+  TSContDataSet(state_->cont_, static_cast<void *>(state_.get()));
 }
 
 GlobalPlugin::~GlobalPlugin()
 {
   TSContDestroy(state_->cont_);
-  delete state_;
 }
 
 void

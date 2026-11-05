@@ -21,7 +21,7 @@
   limitations under the License.
  */
 
-#include "catch.hpp"
+#include <catch2/catch_test_macros.hpp>
 
 #include "tscore/List.h"
 
@@ -51,8 +51,8 @@ TEST_CASE("test list", "[libts][List]")
   }
   int tot = 0;
   for (int i = 0; i < 101; i++) {
-    Foo *foo = q.dequeue();
-    tot += foo->x;
+    Foo *foo  = q.dequeue();
+    tot      += foo->x;
     delete foo;
   }
   REQUIRE(tot == 4957);

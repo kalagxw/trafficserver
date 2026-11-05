@@ -2,7 +2,7 @@
 
   Powerful and easy-to-use command line parsing for ATS
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -23,7 +23,7 @@
 
 #include "tscore/ArgParser.h"
 #include "tscore/ink_file.h"
-#include "tscore/I_Version.h"
+#include "tscore/Version.h"
 
 #include <iostream>
 #include <set>
@@ -31,16 +31,36 @@
 #include <utility>
 #include <sysexits.h>
 
+// Parser-wide state, for this translation unit only. At file scope without internal linkage
+// these are exported from libtscore under names generic enough ("description", "global_usage")
+// to collide with any other global of the same name.
+namespace
+{
 std::string global_usage;
+std::string description;
 std::string parser_program_name;
 std::string default_command;
 
 // by default return EX_USAGE(64) when usage is called.
 // if -h or --help is called specifically, return 0
 int usage_return_code = EX_USAGE;
+} // namespace
 
 namespace ts
 {
+bool ArgParser::_test_mode = false;
+
+// protected method for testing
+/*static*/ void
+ArgParser::reset_global_state()
+{
+  global_usage.clear();
+  description.clear();
+  parser_program_name.clear();
+  default_command.clear();
+  usage_return_code = EX_USAGE;
+}
+
 ArgParser::ArgParser() {}
 
 ArgParser::ArgParser(std::string const &name, std::string const &description, std::string const &envvar, unsigned arg_num,
@@ -58,6 +78,23 @@ ArgParser::add_option(std::string const &long_option, std::string const &short_o
                       std::string const &envvar, unsigned arg_num, std::string const &default_value, std::string const &key)
 {
   return _top_level_command.add_option(long_option, short_option, description, envvar, arg_num, default_value, key);
+}
+
+// Create a mutually exclusive group
+ArgParser::Command &
+ArgParser::add_mutex_group(std::string const &group_name, bool required, std::string const &description)
+{
+  return _top_level_command.add_mutex_group(group_name, required, description);
+}
+
+// Add an option to a mutually exclusive group
+ArgParser::Command &
+ArgParser::add_option_to_group(std::string const &group_name, std::string const &long_option, std::string const &short_option,
+                               std::string const &description, std::string const &envvar, unsigned arg_num,
+                               std::string const &default_value, std::string const &key)
+{
+  return _top_level_command.add_option_to_group(group_name, long_option, short_option, description, envvar, arg_num, default_value,
+                                                key);
 }
 
 // add sub-command with only function
@@ -91,6 +128,10 @@ ArgParser::help_message(std::string_view err) const
 void
 ArgParser::Command::help_message(std::string_view err) const
 {
+  if (!description.empty()) {
+    std::cout << description << '\n';
+  }
+
   if (!err.empty()) {
     std::cout << "Error: " << err << std::endl;
   }
@@ -98,6 +139,7 @@ ArgParser::Command::help_message(std::string_view err) const
   if (global_usage.size() > 0) {
     std::cout << "\nUsage: " + global_usage << std::endl;
   }
+
   // output subcommands
   std::cout << "\nCommands ---------------------- Description -----------------------" << std::endl;
   std::string prefix = "";
@@ -107,22 +149,24 @@ ArgParser::Command::help_message(std::string_view err) const
     std::cout << "\nOptions ======================= Default ===== Description =============" << std::endl;
     output_option();
   }
-  // output example usage
-  if (!_example_usage.empty()) {
-    std::cout << "\nExample Usage: " << _example_usage << std::endl;
+  // output example usages
+  if (!_example_usages.empty()) {
+    std::cout << "\nExample Usage:" << std::endl;
+    for (const auto &example : _example_usages) {
+      std::cout << "  " << example << std::endl;
+    }
   }
   // standard return code
-  exit(usage_return_code);
+  ArgParser::do_exit(usage_return_code);
 }
 
 void
 ArgParser::Command::version_message() const
 {
   // unified version message of ATS
-  AppVersionInfo appVersionInfo;
-  appVersionInfo.setup(PACKAGE_NAME, _name.c_str(), PACKAGE_VERSION, __DATE__, __TIME__, BUILD_MACHINE, BUILD_PERSON, "");
-  ink_fputln(stdout, appVersionInfo.FullVersionInfoStr);
-  exit(0);
+  AppVersionInfo::setup_version(_name.c_str());
+  AppVersionInfo::print_version();
+  ArgParser::do_exit(0);
 }
 
 void
@@ -131,12 +175,12 @@ ArgParser::set_default_command(std::string const &cmd)
   if (default_command.empty()) {
     if (_top_level_command._subcommand_list.find(cmd) == _top_level_command._subcommand_list.end()) {
       std::cerr << "Error: Default command " << cmd << "not found" << std::endl;
-      exit(1);
+      ArgParser::do_exit(1);
     }
     default_command = cmd;
   } else if (cmd != default_command) {
     std::cerr << "Error: Default command " << default_command << "already existed" << std::endl;
-    exit(1);
+    ArgParser::do_exit(1);
   }
 }
 
@@ -153,7 +197,7 @@ ArgParser::parse(const char **argv)
   }
   if (size == 0) {
     std::cout << "Error: invalid argv provided" << std::endl;
-    exit(1);
+    ArgParser::do_exit(1);
   }
   // the name of the program only
   _argv[0]                 = _argv[0].substr(_argv[0].find_last_of('/') + 1);
@@ -168,6 +212,9 @@ ArgParser::parse(const char **argv)
     if (!default_command.empty()) {
       args = _argv;
       args.insert(args.begin() + 1, default_command);
+      // The pass that failed may have collected options before it gave up. Those values would
+      // now accumulate on top of the ones the retry collects rather than be replaced.
+      ret = Arguments{};
       _top_level_command.parse(ret, args);
     }
   };
@@ -209,6 +256,11 @@ ArgParser::get_error() const
   return _error_msg;
 }
 
+void
+ArgParser::add_description(std::string const &descr)
+{
+  description = descr;
+}
 //=========================== Command class ================================
 ArgParser::Command::Command() {}
 
@@ -222,41 +274,42 @@ ArgParser::Command::Command(std::string const &name, std::string const &descript
 
 // check if this is a valid option before adding
 void
-ArgParser::Command::check_option(std::string const &long_option, std::string const &short_option, std::string const &key) const
+ArgParser::Command::check_option(std::string const &long_option, std::string const &short_option,
+                                 std::string const & /* key ATS_UNUSED */) const
 {
   if (long_option.size() < 3 || long_option[0] != '-' || long_option[1] != '-') {
     // invalid name
     std::cerr << "Error: invalid long option added: '" + long_option + "'" << std::endl;
-    exit(1);
+    ArgParser::do_exit(1);
   }
   if (short_option.size() > 2 || (short_option.size() > 0 && short_option[0] != '-')) {
     // invalid short option
     std::cerr << "Error: invalid short option added: '" + short_option + "'" << std::endl;
-    exit(1);
+    ArgParser::do_exit(1);
   }
   // find if existing in option list
   if (_option_list.find(long_option) != _option_list.end()) {
     std::cerr << "Error: long option '" + long_option + "' already existed" << std::endl;
-    exit(1);
+    ArgParser::do_exit(1);
   } else if (_option_map.find(short_option) != _option_map.end()) {
     std::cerr << "Error: short option '" + short_option + "' already existed" << std::endl;
-    exit(1);
+    ArgParser::do_exit(1);
   }
 }
 
 // check if this is a valid command before adding
 void
-ArgParser::Command::check_command(std::string const &name, std::string const &key) const
+ArgParser::Command::check_command(std::string const &name, std::string const & /* key ATS_UNUSED */) const
 {
   if (name.empty()) {
     // invalid name
     std::cerr << "Error: empty command cannot be added" << std::endl;
-    exit(1);
+    ArgParser::do_exit(1);
   }
   // find if existing in subcommand list
   if (_subcommand_list.find(name) != _subcommand_list.end()) {
     std::cerr << "Error: command already exists: '" + name + "'" << std::endl;
-    exit(1);
+    ArgParser::do_exit(1);
   }
 }
 
@@ -268,11 +321,56 @@ ArgParser::Command::add_option(std::string const &long_option, std::string const
 {
   std::string lookup_key = key.empty() ? long_option.substr(2) : key;
   check_option(long_option, short_option, lookup_key);
-  _option_list[long_option] = {long_option, short_option == "-" ? "" : short_option, description, envvar, arg_num, default_value,
-                               lookup_key};
+  _option_list[long_option] = {
+    long_option, short_option == "-" ? "" : short_option, description, envvar, arg_num, default_value, std::move(lookup_key)};
   if (short_option != "-" && !short_option.empty()) {
     _option_map[short_option] = long_option;
   }
+  _last_added_option = long_option; // track for with_required() chaining
+  return *this;
+}
+
+// Create a mutually exclusive group
+ArgParser::Command &
+ArgParser::Command::add_mutex_group(std::string const &group_name, bool required, std::string const &description)
+{
+  if (group_name.empty()) {
+    std::cerr << "Error: Mutex group name cannot be empty" << std::endl;
+    ArgParser::do_exit(1);
+  }
+
+  if (_mutex_groups.find(group_name) != _mutex_groups.end()) {
+    std::cerr << "Error: Mutex group '" << group_name << "' already exists" << std::endl;
+    ArgParser::do_exit(1);
+  }
+  _mutex_groups.emplace(group_name, MutexGroup(group_name, required, description));
+  return *this;
+}
+
+// Add an option to a mutually exclusive group
+ArgParser::Command &
+ArgParser::Command::add_option_to_group(std::string const &group_name, std::string const &long_option,
+                                        std::string const &short_option, std::string const &description, std::string const &envvar,
+                                        unsigned arg_num, std::string const &default_value, std::string const &key)
+{
+  if (group_name.empty()) {
+    std::cerr << "Error: Mutex group name cannot be empty" << std::endl;
+    ArgParser::do_exit(1);
+  }
+
+  auto it_mutex_group = _mutex_groups.find(group_name);
+  if (it_mutex_group == _mutex_groups.end()) {
+    std::cerr << "Error: Mutex group '" << group_name << "' not found" << std::endl;
+    ArgParser::do_exit(1);
+  }
+
+  // Add the option normally (this also sets _last_added_option)
+  add_option(long_option, short_option, description, envvar, arg_num, default_value, key);
+
+  // Track this option in the mutex group
+  it_mutex_group->second.options.push_back(long_option);
+  _option_to_group[long_option] = group_name;
+
   return *this;
 }
 
@@ -301,7 +399,7 @@ ArgParser::Command::add_command(std::string const &cmd_name, std::string const &
 ArgParser::Command &
 ArgParser::Command::add_example_usage(std::string const &usage)
 {
-  _example_usage = usage;
+  _example_usages.push_back(usage);
   return *this;
 }
 
@@ -332,24 +430,38 @@ ArgParser::Command::output_command(std::ostream &out, std::string const &prefix)
 void
 ArgParser::Command::output_option() const
 {
+  // Helper method to build argument message
+  auto arg_msg_builder = [](unsigned num) -> std::string {
+    if (num == 1) {
+      return {" <arg>"};
+    } else if (num == MORE_THAN_ZERO_ARG_N) {
+      return {" [<arg> ...]"};
+    } else if (num == MORE_THAN_ONE_ARG_N) {
+      return {" <arg> ..."};
+    } else if (num == AT_MOST_ONE_ARG_N) {
+      return {" [<arg>]"};
+    } else {
+      return " <arg1> ... <arg" + std::to_string(num) + ">";
+    }
+  };
+
+  // First, output regular options (excluding those in mutex groups)
   for (const auto &it : _option_list) {
+    // Skip if this option is in a mutex group (it will be displayed in the mutex group)
+    if (_option_to_group.find(it.first) != _option_to_group.end()) {
+      continue;
+    }
+
     std::string msg;
     if (!it.second.short_option.empty()) {
       msg = it.second.short_option + ", ";
     }
+
     msg += it.first;
-    unsigned num = it.second.arg_num;
-    if (num != 0) {
-      if (num == 1) {
-        msg = msg + " <arg>";
-      } else if (num == MORE_THAN_ZERO_ARG_N) {
-        msg = msg + " [<arg> ...]";
-      } else if (num == MORE_THAN_ONE_ARG_N) {
-        msg = msg + " <arg> ...";
-      } else {
-        msg = msg + " <arg1> ... <arg" + std::to_string(num) + ">";
-      }
+    if (it.second.arg_num != 0) {
+      msg += arg_msg_builder(it.second.arg_num);
     }
+
     if (!it.second.default_value.empty()) {
       if (INDENT_ONE - static_cast<int>(msg.size()) < 0) {
         msg = msg + "\n" + std::string(INDENT_ONE, ' ') + it.second.default_value;
@@ -357,59 +469,367 @@ ArgParser::Command::output_option() const
         msg = msg + std::string(INDENT_ONE - msg.size(), ' ') + it.second.default_value;
       }
     }
-    if (!it.second.description.empty()) {
+    // Build description with dependency info if applicable
+    std::string desc   = it.second.description;
+    auto        dep_it = _option_dependencies.find(it.first);
+    if (dep_it != _option_dependencies.end() && !dep_it->second.empty()) {
+      if (!desc.empty()) {
+        desc += " ";
+      }
+      desc += "(requires";
+      for (size_t i = 0; i < dep_it->second.size(); ++i) {
+        desc += " " + dep_it->second[i];
+        if (i < dep_it->second.size() - 1) {
+          desc += ",";
+        }
+      }
+      desc += ")";
+    }
+
+    if (!desc.empty()) {
       if (INDENT_TWO - static_cast<int>(msg.size()) < 0) {
-        std::cout << msg << "\n" << std::string(INDENT_TWO, ' ') << it.second.description << std::endl;
+        std::cout << msg << "\n" << std::string(INDENT_TWO, ' ') << desc << std::endl;
       } else {
-        std::cout << msg << std::string(INDENT_TWO - msg.size(), ' ') << it.second.description << std::endl;
+        std::cout << msg << std::string(INDENT_TWO - msg.size(), ' ') << desc << std::endl;
+      }
+    }
+  }
+
+  // Then output mutually exclusive groups
+  for (const auto &[group_name, group] : _mutex_groups) {
+    std::cout << "\nGroup (" << group_name;
+    if (group.required) {
+      std::cout << ", required";
+    }
+    std::cout << ")";
+    if (!group.description.empty()) {
+      std::cout << " - " << group.description;
+    }
+    std::cout << std::endl;
+
+    for (const auto &option_name : group.options) {
+      auto const it = _option_list.find(option_name);
+      if (it != _option_list.end()) {
+        std::string msg{"  "}; // Indent group options
+        if (!it->second.short_option.empty()) {
+          msg += it->second.short_option + ", ";
+        }
+
+        msg += it->first;
+        if (it->second.arg_num != 0) {
+          msg += arg_msg_builder(it->second.arg_num);
+        }
+
+        if (!it->second.default_value.empty()) {
+          if (INDENT_ONE - static_cast<int>(msg.size()) < 0) {
+            msg = msg + "\n" + std::string(INDENT_ONE, ' ') + it->second.default_value;
+          } else {
+            msg = msg + std::string(INDENT_ONE - msg.size(), ' ') + it->second.default_value;
+          }
+        }
+
+        if (!it->second.description.empty()) {
+          if (INDENT_TWO - static_cast<int>(msg.size()) < 0) {
+            std::cout << msg << "\n" << std::string(INDENT_TWO, ' ') << it->second.description << std::endl;
+          } else {
+            std::cout << msg << std::string(INDENT_TWO - msg.size(), ' ') << it->second.description << std::endl;
+          }
+        }
       }
     }
   }
 }
 
+bool
+ArgParser::Command::is_registered_option(std::string const &token) const
+{
+  if (_option_list.find(token) != _option_list.end() || _option_map.find(token) != _option_map.end()) {
+    return true;
+  }
+  // The --option=value form.
+  if (token.size() > 2 && token[0] == '-' && token[1] == '-') {
+    if (auto const pos = token.find_first_of('='); pos != std::string::npos) {
+      return _option_list.find(token.substr(0, pos)) != _option_list.end();
+    }
+  }
+  return false;
+}
+
 // helper method to handle the arguments and put them nicely in arguments
 // can be switched to ts::errata
-static std::string
-handle_args(Arguments &ret, AP_StrVec &args, std::string const &name, unsigned arg_num, unsigned &index)
+namespace
 {
-  ArgumentData data;
-  ret.append(name, data);
-  // handle the args
-  if (arg_num == MORE_THAN_ZERO_ARG_N || arg_num == MORE_THAN_ONE_ARG_N) {
-    // infinite arguments
-    if (arg_num == MORE_THAN_ONE_ARG_N && args.size() <= index + 1) {
+  // The usage error a missing value for arg_num has always been, independent of any
+  // environment variable. AT_MOST_ONE_ARG_N never needs this: a missing value is valid input for
+  // it on its own.
+  std::string
+  missing_value_message(unsigned arg_num, std::string const &name)
+  {
+    if (arg_num == MORE_THAN_ONE_ARG_N) {
       return "at least one argument expected by " + name;
     }
-    for (unsigned j = index + 1; j < args.size(); j++) {
-      ret.append_arg(name, args[j]);
+    return std::to_string(arg_num) + " argument(s) expected by " + name;
+  }
+} // namespace
+
+std::string
+ArgParser::Command::handle_args(Arguments &ret, AP_StrVec &args, std::string const &name, unsigned arg_num, unsigned &index,
+                                std::string const &env_value, bool &was_bare) const
+{
+  was_bare = false;
+
+  // A repeated option taking an unbounded number of values accumulates, as the --option=value
+  // form always has, so an entry already written by this pass keeps the values it collected. A
+  // fixed arity option keeps its last-one-wins behaviour, which is a separate concern.
+  bool const accumulates = MORE_THAN_ZERO_ARG_N == arg_num || MORE_THAN_ONE_ARG_N == arg_num;
+
+  if (!accumulates || !ret.has(name)) {
+    ArgumentData data;
+    ret.append(name, data);
+  }
+  // handle the args
+  if (arg_num == AT_MOST_ONE_ARG_N) {
+    // Zero or one value. A value is taken only when the following token does not name
+    // another option of this command, which leaves this command's positional arguments
+    // in place. A "--" token makes whatever follows it a value rather than an option.
+    unsigned j{index + 1};
+    bool     takes_value{false};
+
+    if (j < args.size()) {
+      if (args[j] == "--") {
+        ++j;
+        takes_value = j < args.size();
+      } else {
+        takes_value = !is_registered_option(args[j]);
+      }
     }
-    args.erase(args.begin() + index, args.end());
+    if (takes_value) {
+      ret.append_arg(name, args[j]);
+      ++j;
+    } else if (!env_value.empty()) {
+      // No value on the command line: fill it now. Repetition of this option is refused
+      // outright elsewhere, so there is no later occurrence to wait for.
+      ret.append_arg(name, env_value);
+    }
+    args.erase(args.begin() + index, args.begin() + j);
+    index -= 1;
     return "";
   }
-  // finite number of argument handling
-  for (unsigned j = 0; j < arg_num; j++) {
-    if (args.size() < index + j + 2 || args[index + j + 1].empty()) {
+  if (arg_num == MORE_THAN_ZERO_ARG_N || arg_num == MORE_THAN_ONE_ARG_N) {
+    // Variable number of arguments. Stop collecting at a token that names another option of this
+    // command, so options written afterwards keep their own values. Every other token is taken as
+    // a value, including a positional argument of the command, which is why an option whose value
+    // is optional wants AT_MOST_ONE_ARG_N rather than MORE_THAN_ZERO_ARG_N. A "--" token ends
+    // option recognition, which is how a value that starts with '-' can be passed.
+    unsigned j{index + 1};
+    unsigned collected{0};
+    bool     recognize_options{true};
+
+    for (; j < args.size(); j++) {
+      if (recognize_options) {
+        if (args[j] == "--") {
+          recognize_options = false;
+          continue;
+        }
+        if (is_registered_option(args[j])) {
+          break;
+        }
+      }
+      ret.append_arg(name, args[j]);
+      ++collected;
+    }
+    // Zero values is already valid input for MORE_THAN_ZERO_ARG_N, so there is no usage error
+    // for a variable to replace there; only MORE_THAN_ONE_ARG_N can be bare.
+    if (arg_num == MORE_THAN_ONE_ARG_N && collected == 0) {
+      if (!env_value.empty()) {
+        was_bare = true;
+      } else {
+        return "at least one argument expected by " + name;
+      }
+    }
+    args.erase(args.begin() + index, args.begin() + j);
+    index -= 1;
+    return "";
+  }
+  // Fixed number of arguments. A token naming another option of this command is not a value, so
+  // the missing value is reported rather than the following option being consumed as one. A "--"
+  // token ends option recognition, which is how a value that starts with '-' is passed.
+  unsigned j{index + 1};
+  bool     recognize_options{true};
+  unsigned collected{0};
+
+  while (collected < arg_num) {
+    // An empty token is a value the caller actually typed, not an absent one, so it must not
+    // be treated as bare: doing that would leave it in args (nothing below advances j past
+    // it), and the enclosing command would then read it as a positional argument. This mirrors
+    // the check append_option_data() already makes for AT_MOST_ONE_ARG_N.
+    if (j < args.size() && args[j].empty()) {
       return std::to_string(arg_num) + " argument(s) expected by " + name;
     }
-    ret.append_arg(name, args[index + j + 1]);
+    bool missing_value = j >= args.size();
+    if (!missing_value && recognize_options) {
+      if (args[j] == "--") {
+        recognize_options = false;
+        ++j;
+        continue;
+      }
+      missing_value = is_registered_option(args[j]);
+    }
+    if (missing_value) {
+      // A partial set (some values already collected) is always a usage error: the variable
+      // fills an option only when it has no values at all.
+      if (!env_value.empty() && collected == 0) {
+        was_bare = true;
+        break;
+      }
+      return std::to_string(arg_num) + " argument(s) expected by " + name;
+    }
+    ret.append_arg(name, args[j]);
+    ++collected;
+    ++j;
   }
   // erase the used arguments and append the data to the return structure
-  args.erase(args.begin() + index, args.begin() + index + arg_num + 1);
+  args.erase(args.begin() + index, args.begin() + j);
   index -= 1;
   return "";
+}
+
+// Validate mutually exclusive groups
+void
+ArgParser::Command::validate_mutex_groups(Arguments &ret) const
+{
+  // Check each mutex group
+  for (const auto &[group_name, group] : _mutex_groups) {
+    std::vector<std::string> used_options;
+
+    // Find which options from this group were used
+    for (const auto &option_name : group.options) {
+      auto it = _option_list.find(option_name);
+      if (it != _option_list.end()) {
+        // Check if this option was called
+        if (ret.get(it->second.key)) {
+          used_options.push_back(option_name);
+        }
+      }
+    }
+
+    // Validate: only one option from the group can be used
+    if (used_options.size() > 1) {
+      std::string error_msg = "Error: Options in mutex group '" + group_name + "' are mutually exclusive. Used: ";
+      for (size_t i = 0; i < used_options.size(); ++i) {
+        if (i > 0) {
+          error_msg += ", ";
+        }
+        error_msg += used_options[i];
+      }
+      help_message(error_msg);
+    }
+
+    // Validate: if group is required, at least one option must be used
+    if (group.required && used_options.empty()) {
+      std::string error_msg = "Error: One option from required mutex group '" + group_name + "' must be specified. Options: ";
+      for (size_t i = 0; i < group.options.size(); ++i) {
+        if (i > 0) {
+          error_msg += ", ";
+        }
+        error_msg += group.options[i];
+      }
+      help_message(error_msg);
+    }
+  }
+}
+
+// Specify that the last added option requires another option
+ArgParser::Command &
+ArgParser::Command::with_required(std::string const &required_option)
+{
+  if (_last_added_option.empty()) {
+    std::cerr << "Error: with_required() must be called after add_option()" << std::endl;
+    ArgParser::do_exit(1);
+  }
+
+  // Validate that required option exists
+  if (_option_list.find(required_option) == _option_list.end()) {
+    std::cerr << "Error: Required option '" << required_option << "' not found" << std::endl;
+    ArgParser::do_exit(1);
+  }
+
+  _option_dependencies[_last_added_option].push_back(required_option);
+
+  return *this;
+}
+
+// Validate option dependencies
+void
+ArgParser::Command::validate_dependencies(Arguments &ret) const
+{
+  for (const auto &[dependent, required_list] : _option_dependencies) {
+    // Get the key for the dependent option
+    auto it = _option_list.find(dependent);
+    if (it == _option_list.end()) {
+      continue;
+    }
+
+    const std::string &dep_key = it->second.key;
+
+    // Check if dependent option was used
+    if (ret.get(dep_key)) {
+      // Dependent option was used, check all required options
+      for (const auto &required : required_list) {
+        auto req_it = _option_list.find(required);
+        if (req_it == _option_list.end()) {
+          continue;
+        }
+
+        const std::string &req_key = req_it->second.key;
+
+        if (!ret.get(req_key)) {
+          std::string error_msg = "Option '" + dependent + "' requires '" + required + "' to be specified";
+          help_message(error_msg); // exit with status code 64 (EX_USAGE - command line usage error)
+        }
+      }
+    }
+  }
 }
 
 // Append the args of option to parsed data. Return true if there is any option called
 void
 ArgParser::Command::append_option_data(Arguments &ret, AP_StrVec &args, int index)
 {
+  // Tracks, per option key whose arity can mix a bare occurrence with a valued one (a fixed
+  // arity or MORE_THAN_ONE_ARG_N; AT_MOST_ONE_ARG_N resolves immediately in handle_args and
+  // never reaches this map, since repetition of it is refused outright below), whether an
+  // occurrence already seen had a value and whether one was left bare. Recorded here rather
+  // than in the option's Arguments entry, so that a later occurrence cannot erase what an
+  // earlier one saw. A bare occurrence next to a valued one is reported the moment the second
+  // of the two is parsed, rather than waiting for the whole line to be scanned, so nothing
+  // written afterwards (such as --help) can run first. Only a key left bare by every
+  // occurrence reaches the resolution loop below, so its env_value is always what filling it
+  // needs.
+  struct EnvMixState {
+    bool        any_bare   = false;
+    bool        any_valued = false;
+    std::string env_value;
+    unsigned    arg_num = 0;
+  };
+  std::map<std::string, EnvMixState> env_mix;
+
   std::map<std::string, unsigned> check_map;
   for (unsigned i = index; i < args.size(); i++) {
+    // A "--" escapes the token after it. That token belongs to an option or a command further
+    // down the line, which honours the escape itself in handle_args(); this scan covers the
+    // whole remaining command line, so without this it would still match the escaped token
+    // against this command's options. Leave both tokens in place for the owner: this ++i steps
+    // past the "--" and the loop's own increment past the token it escapes.
+    if (args[i] == "--") {
+      ++i;
+      continue;
+    }
     // find matches of the arg
     if (args[i][0] == '-' && args[i][1] == '-' && args[i].find('=') != std::string::npos) {
       // deal with --args=
       std::string option_name = args[i].substr(0, args[i].find_first_of('='));
-      std::string value       = args[i].substr(args[i].find_last_of('=') + 1);
+      std::string value       = args[i].substr(args[i].find_first_of('=') + 1);
       if (value.empty()) {
         help_message("missing argument for '" + option_name + "'");
       }
@@ -418,7 +838,17 @@ ArgParser::Command::append_option_data(Arguments &ret, AP_StrVec &args, int inde
         ArgParser::Option cur_option = it->second;
         // handle environment variable
         if (!cur_option.envvar.empty()) {
-          ret.set_env(cur_option.key, getenv(cur_option.envvar.c_str()) ? getenv(cur_option.envvar.c_str()) : "");
+          const char *const env = getenv(cur_option.envvar.c_str());
+          ret.set_env(cur_option.key, nullptr != env ? env : "");
+          if (cur_option.arg_num != AT_MOST_ONE_ARG_N) {
+            auto &state = env_mix[cur_option.key];
+            if (state.any_bare) {
+              // An earlier bare occurrence is the usage error it would be without a variable:
+              // this occurrence having a value does not rescue it.
+              help_message(missing_value_message(cur_option.arg_num, cur_option.key));
+            }
+            state.any_valued = true;
+          }
         }
         ret.append_arg(cur_option.key, value);
         check_map[cur_option.long_option] += 1;
@@ -455,30 +885,95 @@ ArgParser::Command::append_option_data(Arguments &ret, AP_StrVec &args, int inde
         } else {
           cur_option = _option_list.at(short_it->second);
         }
-        // handle the arguments
-        std::string err = handle_args(ret, args, cur_option.key, cur_option.arg_num, i);
+        // Counted for the same repetition check as the --option=value form, so that an option
+        // taking at most one value cannot be given more by mixing the two spellings.
+        if (cur_option.arg_num == AT_MOST_ONE_ARG_N) {
+          check_map[cur_option.long_option] += 1;
+          // An empty token is not a value, and the --option=value spelling already refuses one,
+          // so refuse it here rather than silently falling back to the declared default.
+          if (i + 1 < args.size() && args[i + 1].empty()) {
+            help_message("missing argument for '" + args[i] + "'");
+          }
+        }
+        // Resolve the current value of the declared variable before calling handle_args(), so
+        // a missing value is deferred only when the variable is actually set right now, not
+        // merely declared: an unset variable must report the same usage error immediately,
+        // exactly as if no variable had been declared at all, rather than letting a later
+        // token (e.g. --help) run first.
+        std::string env_value;
+        if (!cur_option.envvar.empty()) {
+          const char *const env = getenv(cur_option.envvar.c_str());
+          env_value             = nullptr != env ? env : "";
+        }
+        // handle_args() replaces any prior entry for this key, so set_env() below must run
+        // after it, not before.
+        bool        was_bare = false;
+        std::string err      = handle_args(ret, args, cur_option.key, cur_option.arg_num, i, env_value, was_bare);
         if (!err.empty()) {
           help_message(err);
         }
         // handle environment variable
         if (!cur_option.envvar.empty()) {
-          ret.set_env(cur_option.key, getenv(cur_option.envvar.c_str()) ? getenv(cur_option.envvar.c_str()) : "");
+          ret.set_env(cur_option.key, env_value);
+          if (cur_option.arg_num != AT_MOST_ONE_ARG_N) {
+            auto &state = env_mix[cur_option.key];
+            if (was_bare) {
+              if (state.any_valued) {
+                // An earlier occurrence had a value: this bare one is the usage error it would
+                // be without a variable, not a later chance to be filled.
+                help_message(missing_value_message(cur_option.arg_num, cur_option.key));
+              }
+              state.any_bare  = true;
+              state.env_value = std::move(env_value);
+              state.arg_num   = cur_option.arg_num;
+            } else {
+              if (state.any_bare) {
+                help_message(missing_value_message(cur_option.arg_num, cur_option.key));
+              }
+              state.any_valued = true;
+            }
+          }
         }
       }
     }
   }
   // check for wrong number of arguments for --arg=...
   for (const auto &it : check_map) {
-    unsigned num = _option_list.at(it.first).arg_num;
-    if (num != it.second && num < MORE_THAN_ONE_ARG_N) {
-      help_message(std::to_string(_option_list.at(it.first).arg_num) + " arguments expected by " + it.first);
+    unsigned const num = _option_list.at(it.first).arg_num;
+    if (num == AT_MOST_ONE_ARG_N) {
+      // At most one, so a repeated option is as wrong as a repeated fixed arity one, which
+      // is_variable_arg_num() would otherwise wave through.
+      if (it.second > 1) {
+        help_message("at most one argument expected by " + it.first);
+      }
+    } else if (num != it.second && !is_variable_arg_num(num)) {
+      help_message(std::to_string(num) + " arguments expected by " + it.first);
     }
   }
-  // put in the default value of options
+  // Resolve the variable for every option left bare by every occurrence: a mixed line was
+  // already reported above, at the occurrence that made it mixed, so any_bare here means the
+  // variable was confirmed set at the time of that occurrence and nothing since contradicted
+  // it.
+  for (auto const &[key, state] : env_mix) {
+    if (state.any_bare) {
+      unsigned const fill_count = state.arg_num == MORE_THAN_ONE_ARG_N ? 1 : state.arg_num;
+      for (unsigned n = 0; n < fill_count; ++n) {
+        ret.append_arg(key, state.env_value);
+      }
+    }
+  }
+}
+
+// Apply default values for options not explicitly set by the user.
+// This must be called AFTER validate_dependencies() so that default values
+// (e.g. --timeout "0") don't falsely trigger dependency checks.
+void
+ArgParser::Command::apply_option_defaults(Arguments &ret) const
+{
   for (const auto &it : _option_list) {
     if (!it.second.default_value.empty() && ret.get(it.second.key).empty()) {
       std::istringstream ss(it.second.default_value);
-      std::string token;
+      std::string        token;
       while (std::getline(ss, token, ' ')) {
         ret.append_arg(it.second.key, token);
       }
@@ -491,27 +986,57 @@ bool
 ArgParser::Command::parse(Arguments &ret, AP_StrVec &args)
 {
   bool command_called = false;
-  // iterate through all arguments
-  for (unsigned i = 0; i < args.size(); i++) {
-    if (_name == args[i]) {
-      command_called = true;
-      // handle the option
-      append_option_data(ret, args, i);
-      // handle the action
-      if (_f) {
-        ret._action = _f;
-      }
-      std::string err = handle_args(ret, args, _key, _arg_num, i);
-      if (!err.empty()) {
-        help_message(err);
-      }
-      // set ENV var
-      if (!_envvar.empty()) {
-        ret.set_env(_key, getenv(_envvar.c_str()) ? getenv(_envvar.c_str()) : "");
-      }
-      break;
+  // Only check the first remaining argument for command name to avoid
+  // treating arguments as commands (e.g., "metric match host" where "host" is an arg, not a command)
+  if (!args.empty() && _name == args[0]) {
+    command_called = true;
+    // Note: handle_args modifies its index parameter (designed for loop usage), but we
+    // discard the result. This causes unsigned underflow (0 - 1 = UINT_MAX) which is
+    // harmless since we don't use index afterward.
+    unsigned index{0};
+    // handle the option
+    append_option_data(ret, args, index);
+    // handle the action
+    if (_f) {
+      ret._action = _f;
     }
+    // A command name is matched at most once per parse() call, so there is no other
+    // occurrence of it to wait for or conflict with.
+    std::string env_value;
+    if (!_envvar.empty()) {
+      const char *const env = getenv(_envvar.c_str());
+      env_value             = nullptr != env ? env : "";
+    }
+    // handle_args() replaces any prior entry for this key, so set_env() below must run after
+    // it, not before.
+    bool              was_bare = false;
+    const std::string err      = handle_args(ret, args, _key, _arg_num, index, env_value, was_bare);
+    if (!err.empty()) {
+      help_message(err);
+    }
+    // set ENV var
+    if (!_envvar.empty()) {
+      ret.set_env(_key, env_value);
+      if (was_bare) {
+        unsigned const fill_count = _arg_num == MORE_THAN_ONE_ARG_N ? 1 : _arg_num;
+        for (unsigned n = 0; n < fill_count; ++n) {
+          ret.append_arg(_key, env_value);
+        }
+      }
+    }
+
+    // Validate mutually exclusive groups
+    validate_mutex_groups(ret);
+
+    // Validate option dependencies
+    validate_dependencies(ret);
+
+    // Apply default values after validation so that defaults don't
+    // trigger dependency checks (e.g. --timeout with default "0"
+    // should not require --monitor when not explicitly used).
+    apply_option_defaults(ret);
   }
+
   if (command_called) {
     bool flag = false;
     // recursively call subcommand
@@ -523,7 +1048,13 @@ ArgParser::Command::parse(Arguments &ret, AP_StrVec &args)
     }
     // check for command required
     if (!flag && _command_required) {
-      help_message("No subcommand found for " + _name);
+      std::ostringstream msg;
+      if (!args.empty()) {
+        msg << "No sub-command '" << args[0] << "' found for " << _name;
+      } else {
+        msg << "No sub-command found for " << _name;
+      }
+      help_message(msg.str());
     }
     if (_name == parser_program_name) {
       // if we are at the top level
@@ -560,6 +1091,12 @@ Arguments::get(std::string const &name)
     return _data_map[name];
   }
   return ArgumentData();
+}
+
+bool
+Arguments::has(std::string const &name) const noexcept
+{
+  return _data_map.find(name) != _data_map.end();
 }
 
 void
@@ -665,6 +1202,22 @@ AP_StrVec::const_iterator
 ArgumentData::end() const noexcept
 {
   return _values.end();
+}
+// protected method for testing
+/*static*/ void
+ArgParser::set_test_mode(bool test)
+{
+  _test_mode = test;
+}
+
+// protected method for testing
+/*static*/ void
+ArgParser::do_exit(int code)
+{
+  if (_test_mode) {
+    throw std::runtime_error("Test mode: exit with code " + std::to_string(code));
+  }
+  exit(code);
 }
 
 } // namespace ts

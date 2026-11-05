@@ -2,7 +2,7 @@
 
   Some small general interest definitions
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -27,13 +27,9 @@
 
 #include <stddef.h> // NOLINT(modernize-deprecated-headers)
 
-#ifdef HAVE_STDINT_H
 #include <stdint.h> // NOLINT(modernize-deprecated-headers)
-#endif
 
-#ifdef HAVE_INTTYPES_H
 #include <inttypes.h> // NOLINT(modernize-deprecated-headers)
-#endif
 
 #ifndef INT64_MIN
 #define INT64_MAX (9223372036854775807LL)
@@ -41,9 +37,6 @@
 #define INT32_MAX (2147483647)
 #define INT32_MIN (-2147483647 - 1)
 #endif
-
-#define POSIX_THREAD
-#define POSIX_THREAD_10031c
 
 #ifndef ETIME
 #ifdef ETIMEDOUT
@@ -71,18 +64,14 @@ countof(const T (&)[N])
 #define countof(x) ((unsigned)(sizeof(x) / sizeof((x)[0])))
 #endif
 
-#define SOCKOPT_ON ((char *)&on)
-#define SOCKOPT_OFF ((char *)&off)
-
 #ifndef ABS
 #define ABS(x) (((x) < 0) ? (-(x)) : (x))
 #endif
 
-#define ATS_UNUSED __attribute__((unused))
+#define ATS_UNUSED         __attribute__((unused))
 #define ATS_WARN_IF_UNUSED __attribute__((warn_unused_result))
 #define ATS_UNUSED_RETURN(x) \
-  if (x) {                   \
-  }
+  if (x) {}
 
 #ifndef likely
 #define likely(x) __builtin_expect(!!(x), 1)
@@ -91,10 +80,7 @@ countof(const T (&)[N])
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #endif
 
-/* Variables
- */
-extern int off;
-extern int on;
+#define MAX_ALPN_STRING 30
 
 /* Functions
  */

@@ -26,7 +26,7 @@
  *
  * This plugin demonstrates:
  *
- *  - Using TSMgmtStringCreate() to add custom records into records.config.
+ *  - Using TSMgmtStringCreate() to add custom records into records.yaml.
  *  - Listening on a custom socket with TSPortDescriptorAccept().
  *  - Using TSHttpConnectWithPluginId() and the VConn API to proxy HTTP traffic.
  */
@@ -37,24 +37,29 @@
 
 #define PLUGIN_NAME "passthru"
 
-#define PassthruSessionDebug(sp, fmt, ...)                 \
-  do {                                                     \
-    TSDebug(PLUGIN_NAME, "sp=%p " fmt, sp, ##__VA_ARGS__); \
+namespace
+{
+DbgCtl dbg_ctl{PLUGIN_NAME};
+}
+
+#define PassthruSessionDebug(sp, fmt, ...)         \
+  do {                                             \
+    Dbg(dbg_ctl, "sp=%p " fmt, sp, ##__VA_ARGS__); \
   } while (0)
 
 static int PassthruSessionEvent(TSCont cont, TSEvent event, void *edata);
 
 union EventArgument {
-  void *edata;
+  void   *edata;
   TSVConn vconn;
-  TSVIO vio;
+  TSVIO   vio;
 
   EventArgument(void *_p) : edata(_p) {}
 };
 
 struct PassthruIO {
-  TSVIO vio               = nullptr;
-  TSIOBuffer iobuf        = nullptr;
+  TSVIO            vio    = nullptr;
+  TSIOBuffer       iobuf  = nullptr;
   TSIOBufferReader reader = nullptr;
 
   PassthruIO() {}
@@ -114,21 +119,21 @@ struct PassthruIO {
   }
 
   // noncopyable
-  PassthruIO(const PassthruIO &) = delete;
+  PassthruIO(const PassthruIO &)            = delete;
   PassthruIO &operator=(const PassthruIO &) = delete;
 };
 
 struct PassthruSession {
   // VC session to the client.
   struct {
-    TSVConn vconn;
+    TSVConn    vconn;
     PassthruIO readio;
     PassthruIO writeio;
   } client;
 
   // VC session to Traffic Server via TSHttpConnect.
   struct {
-    TSVConn vconn;
+    TSVConn    vconn;
     PassthruIO readio;
     PassthruIO writeio;
   } server;
@@ -158,7 +163,7 @@ struct PassthruSession {
   }
 
   // noncopyable
-  PassthruSession(const PassthruSession &) = delete;
+  PassthruSession(const PassthruSession &)            = delete;
   PassthruSession &operator=(const PassthruSession &) = delete;
 };
 
@@ -181,7 +186,7 @@ PassthruSessionIsFinished(PassthruSession *sp)
 static int
 PassthruSessionEvent(TSCont cont, TSEvent event, void *edata)
 {
-  EventArgument arg(edata);
+  EventArgument    arg(edata);
   PassthruSession *sp = static_cast<PassthruSession *>(TSContDataGet(cont));
 
   PassthruSessionDebug(sp, "session event on vconn=%p event=%d (%s)", TSVIOVConnGet(arg.vio), event, TSHttpEventNameLookup(event));
@@ -273,7 +278,7 @@ PassthruSessionEvent(TSCont cont, TSEvent event, void *edata)
 static int
 PassthruAccept(TSCont /* cont */, TSEvent event, void *edata)
 {
-  EventArgument arg(edata);
+  EventArgument    arg(edata);
   PassthruSession *sp = new PassthruSession();
 
   PassthruSessionDebug(sp, "accepting connection on vconn=%p event=%d", arg.vconn, event);
@@ -291,27 +296,32 @@ PassthruAccept(TSCont /* cont */, TSEvent event, void *edata)
 static TSReturnCode
 PassthruListen()
 {
-  TSMgmtString ports          = nullptr;
-  TSPortDescriptor descriptor = nullptr;
-  TSCont cont                 = nullptr;
+  TSMgmtString ports = nullptr;
 
   if (TSMgmtStringGet("config.plugin.passthru.server_ports", &ports) == TS_ERROR) {
     TSError("[%s] missing config.plugin.passthru.server_ports configuration", PLUGIN_NAME);
     return TS_ERROR;
   }
 
-  descriptor = TSPortDescriptorParse(ports);
+  TSPortDescriptor descriptor = TSPortDescriptorParse(ports);
+
   if (descriptor == nullptr) {
     TSError("[%s] failed to parse config.plugin.passthru.server_ports", PLUGIN_NAME);
     TSfree(ports);
     return TS_ERROR;
   }
 
-  TSDebug(PLUGIN_NAME, "listening on port '%s'", ports);
+  Dbg(dbg_ctl, "listening on port '%s'", ports);
   TSfree(ports);
 
-  cont = TSContCreate(PassthruAccept, nullptr);
-  return TSPortDescriptorAccept(descriptor, cont);
+  TSCont       cont   = TSContCreate(PassthruAccept, nullptr);
+  TSReturnCode result = TSPortDescriptorAccept(descriptor, cont);
+
+  TSPortDescriptorDestroy(descriptor);
+  if (result != TS_SUCCESS) {
+    TSContDestroy(cont);
+  }
+  return result;
 }
 
 void

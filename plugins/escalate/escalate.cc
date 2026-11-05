@@ -20,19 +20,30 @@
   See the License for the specific language governing permissions and
   limitations under the License.
  */
+#include "ts/apidefs.h"
 #include <ts/ts.h>
 #include <ts/remap.h>
-#include <ts/experimental.h>
+
 #include <cstdlib>
 #include <cstdio>
 #include <getopt.h>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <iterator>
 #include <map>
 
+#include "swoc/IPEndpoint.h"
+#include "swoc/TextView.h"
+#include "tsutil/StringCompare.h"
+
 // Constants and some declarations
-const char PLUGIN_NAME[] = "escalate";
+
+const char PLUGIN_NAME[]     = "escalate";
+const char REDIRECT_HEADER[] = "x-escalate-redirect";
+
+static DbgCtl dbg_ctl{PLUGIN_NAME};
+
 static int EscalateResponse(TSCont, TSEvent, void *);
 
 //////////////////////////////////////////////////////////////////////////////////////////
@@ -45,7 +56,7 @@ struct EscalationState {
   };
 
   struct RetryInfo {
-    RetryType type;
+    RetryType   type;
     std::string target;
   };
 
@@ -54,13 +65,16 @@ struct EscalationState {
   EscalationState()
   {
     cont = TSContCreate(EscalateResponse, nullptr);
+
     TSContDataSet(cont, this);
   }
 
   ~EscalationState() { TSContDestroy(cont); }
-  TSCont cont;
+  TSCont        cont;
   StatusMapType status_map;
-  bool use_pristine = false;
+  bool          use_pristine             = false;
+  bool          escalate_non_get_methods = false;
+  bool          add_redirect_header      = true;
 };
 
 // Little helper function, to update the Host portion of a URL, and stringify the result.
@@ -68,14 +82,46 @@ struct EscalationState {
 char *
 MakeEscalateUrl(TSMBuffer mbuf, TSMLoc url, const char *host, size_t host_len, int &url_len)
 {
-  char *url_str = nullptr;
-
+  swoc::TextView   input_host_view{host, host_len};
+  std::string_view host_view;
+  std::string_view port_view;
+  swoc::IPEndpoint::tokenize(input_host_view, &host_view, &port_view);
   // Update the request URL with the new Host to try.
-  TSUrlHostSet(mbuf, url, host, host_len);
-  url_str = TSUrlStringGet(mbuf, url, &url_len);
-  TSDebug(PLUGIN_NAME, "Setting new URL to %.*s", url_len, url_str);
+  TSUrlHostSet(mbuf, url, host_view.data(), host_view.size());
+  if (port_view.size()) {
+    int const port_int = swoc::svtou(port_view);
+    TSUrlPortSet(mbuf, url, port_int);
+    Dbg(dbg_ctl, "Setting port to %d", port_int);
+  }
+  char *url_str = TSUrlStringGet(mbuf, url, &url_len);
+  Dbg(dbg_ctl, "Setting new URL from configured %.*s to %.*s", (int)host_len, host, url_len, url_str);
 
   return url_str;
+}
+
+/**
+ * Check if the method is GET.
+ *
+ * @param txn The transaction whose method is to be checked.
+ * @return True if @a txn's method is GET, false otherwise.
+ */
+static bool
+MethodIsGet(TSHttpTxn txn)
+{
+  TSMBuffer req_mbuf;
+  TSMLoc    req_hdrp;
+  if (TSHttpTxnClientReqGet(txn, &req_mbuf, &req_hdrp) != TS_SUCCESS) {
+    return false;
+  }
+  int         method_len = 0;
+  char const *method     = TSHttpHdrMethodGet(req_mbuf, req_hdrp, &method_len);
+  if (method == nullptr) {
+    return false;
+  }
+  std::string_view method_view{method, static_cast<size_t>(method_len)};
+  bool const       is_get = (method_view == TS_HTTP_METHOD_GET);
+  TSHandleMLocRelease(req_mbuf, TS_NULL_MLOC, req_hdrp);
+  return is_get;
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////
@@ -84,67 +130,114 @@ MakeEscalateUrl(TSMBuffer mbuf, TSMLoc url, const char *host, size_t host_len, i
 static int
 EscalateResponse(TSCont cont, TSEvent event, void *edata)
 {
-  TSHttpTxn txn       = static_cast<TSHttpTxn>(edata);
-  EscalationState *es = static_cast<EscalationState *>(TSContDataGet(cont));
-  EscalationState::StatusMapType::const_iterator entry;
-  TSMBuffer mbuf;
-  TSMLoc hdrp, url;
-  TSHttpStatus status;
-  char *url_str = nullptr;
-  int url_len, tries;
+  TSHttpTxn        txn = static_cast<TSHttpTxn>(edata);
+  EscalationState *es  = static_cast<EscalationState *>(TSContDataGet(cont));
+  TSMBuffer        mbuf;
+  TSMLoc           hdrp, url;
 
-  TSAssert(event == TS_EVENT_HTTP_READ_RESPONSE_HDR);
+  TSAssert(event == TS_EVENT_HTTP_READ_RESPONSE_HDR || event == TS_EVENT_HTTP_SEND_RESPONSE_HDR);
+  bool const processing_connection_error = (event == TS_EVENT_HTTP_SEND_RESPONSE_HDR);
 
-  // First, we need the server response ...
-  if (TS_SUCCESS != TSHttpTxnServerRespGet(txn, &mbuf, &hdrp)) {
-    goto no_action;
+  if (!es->escalate_non_get_methods && !MethodIsGet(txn)) {
+    Dbg(dbg_ctl, "Skipping escalation for non-GET method");
+    TSHttpTxnReenable(txn, TS_EVENT_HTTP_CONTINUE);
+    return TS_EVENT_NONE;
   }
 
-  tries = TSHttpTxnRedirectRetries(txn);
+  if (processing_connection_error) {
+    TSServerState const state = TSHttpTxnServerStateGet(txn);
+    if (state == TS_SRVSTATE_CONNECTION_ALIVE) {
+      // There is no connection error, so nothing to do.
+      TSHttpTxnReenable(txn, TS_EVENT_HTTP_CONTINUE);
+      return TS_EVENT_NONE;
+    }
+  }
+
+  int const tries = TSHttpTxnRedirectRetries(txn);
   if (0 != tries) { // ToDo: Future support for more than one retry-URL
-    goto no_action;
+    Dbg(dbg_ctl, "Not pursuing failover due previous redirect already, num tries: %d", tries);
+    TSHttpTxnReenable(txn, TS_EVENT_HTTP_CONTINUE);
+    return TS_EVENT_NONE;
   }
-  TSDebug(PLUGIN_NAME, "This is try %d, proceeding", tries);
+
+  int ret = 0;
+  if (processing_connection_error) {
+    ret = TSHttpTxnClientRespGet(txn, &mbuf, &hdrp);
+  } else {
+    ret = TSHttpTxnServerRespGet(txn, &mbuf, &hdrp);
+  }
+  if (TS_SUCCESS != ret) {
+    TSHttpTxnReenable(txn, TS_EVENT_HTTP_CONTINUE);
+    return TS_EVENT_NONE;
+  }
 
   // Next, the response status ...
-  status = TSHttpHdrStatusGet(mbuf, hdrp);
-  TSHandleMLocRelease(mbuf, TS_NULL_MLOC, hdrp); // Don't need this any more
+  TSHttpStatus const status = TSHttpHdrStatusGet(mbuf, hdrp);
+  TSHandleMLocRelease(mbuf, TS_NULL_MLOC, hdrp);
 
-  // See if we have an escalation retry config for this response code
-  entry = es->status_map.find(static_cast<unsigned>(status));
+  // See if we have an escalation retry config for this response code.
+  auto const entry = es->status_map.find(status);
   if (entry == es->status_map.end()) {
-    goto no_action;
+    TSHttpTxnReenable(txn, TS_EVENT_HTTP_CONTINUE);
+    return TS_EVENT_NONE;
   }
+  EscalationState::RetryInfo const &retry_info = entry->second;
 
-  TSDebug(PLUGIN_NAME, "Found an entry for HTTP status %u", static_cast<unsigned>(status));
-  if (EscalationState::RETRY_URL == entry->second.type) {
-    url_str = TSstrdup(entry->second.target.c_str());
-    url_len = entry->second.target.size();
-    TSDebug(PLUGIN_NAME, "Setting new URL to %.*s", url_len, url_str);
-  } else if (EscalationState::RETRY_HOST == entry->second.type) {
+  Dbg(dbg_ctl, "Handling failover redirect for HTTP status %d", status);
+  char const *url_str = nullptr;
+  int         url_len = 0;
+  if (EscalationState::RETRY_URL == retry_info.type) {
+    url_str = TSstrdup(retry_info.target.c_str());
+    url_len = retry_info.target.size();
+    Dbg(dbg_ctl, "Setting new URL to %.*s", url_len, url_str);
+  } else if (EscalationState::RETRY_HOST == retry_info.type) {
     if (es->use_pristine) {
       if (TS_SUCCESS == TSHttpTxnPristineUrlGet(txn, &mbuf, &url)) {
-        url_str = MakeEscalateUrl(mbuf, url, entry->second.target.c_str(), entry->second.target.size(), url_len);
+        url_str = MakeEscalateUrl(mbuf, url, retry_info.target.c_str(), retry_info.target.size(), url_len);
         TSHandleMLocRelease(mbuf, TS_NULL_MLOC, url);
       }
     } else {
       if (TS_SUCCESS == TSHttpTxnClientReqGet(txn, &mbuf, &hdrp)) {
         if (TS_SUCCESS == TSHttpHdrUrlGet(mbuf, hdrp, &url)) {
-          url_str = MakeEscalateUrl(mbuf, url, entry->second.target.c_str(), entry->second.target.size(), url_len);
+          url_str = MakeEscalateUrl(mbuf, url, retry_info.target.c_str(), retry_info.target.size(), url_len);
         }
         // Release the request MLoc
         TSHandleMLocRelease(mbuf, TS_NULL_MLOC, hdrp);
       }
     }
+    Dbg(dbg_ctl, "Setting host URL to %.*s", url_len, url_str);
   }
 
   // Now update the Redirect URL, if set
   if (url_str) {
     TSHttpTxnRedirectUrlSet(txn, url_str, url_len); // Transfers ownership
+
+    // Add our x-escalate-redirect header marker if it doesn't already exist and the option is enabled.
+    if (es->add_redirect_header) {
+      TSMBuffer bufp;
+      TSMLoc    hdr_loc, field_loc;
+
+      if (TS_SUCCESS == TSHttpTxnClientReqGet(txn, &bufp, &hdr_loc)) {
+        field_loc = TSMimeHdrFieldFind(bufp, hdr_loc, REDIRECT_HEADER, sizeof(REDIRECT_HEADER) - 1);
+        if (field_loc == nullptr) {
+          if (TSMimeHdrFieldCreateNamed(bufp, hdr_loc, REDIRECT_HEADER, sizeof(REDIRECT_HEADER) - 1, &field_loc) == TS_SUCCESS) {
+            if (TSMimeHdrFieldValueStringInsert(bufp, hdr_loc, field_loc, -1, "1", 1) == TS_SUCCESS) {
+              TSMimeHdrFieldAppend(bufp, hdr_loc, field_loc);
+            }
+            TSHandleMLocRelease(bufp, hdr_loc, field_loc);
+            Dbg(dbg_ctl, "Added x-escalate-redirect header to the client request.");
+          }
+        } else {
+          Dbg(dbg_ctl, "x-escalate-redirect header already exists, not adding.");
+        }
+        TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
+      } else {
+        TSError("[%s] Failed to get client request header to add x-escalate-redirect header", PLUGIN_NAME);
+      }
+    }
   }
 
-// Set the transaction free ...
-no_action:
+  // Set the transaction free ...
   TSHttpTxnReenable(txn, TS_EVENT_HTTP_CONTINUE);
   return TS_EVENT_NONE;
 }
@@ -166,8 +259,12 @@ TSRemapNewInstance(int argc, char *argv[], void **instance, char *errbuf, int er
     char *sep, *token, *save;
 
     // Ugly, but we set the precedence before with non-command line parsing of args
-    if (0 == strncasecmp(argv[i], "--pristine", 10)) {
+    if (ts::iequals(argv[i], "--pristine")) {
       es->use_pristine = true;
+    } else if (ts::iequals(argv[i], "--no-redirect-header")) {
+      es->add_redirect_header = false;
+    } else if (ts::iequals(argv[i], "--escalate-non-get-methods")) {
+      es->escalate_non_get_methods = true;
     } else {
       // Each token should be a status code then a URL, separated by ':'.
       sep = strchr(argv[i], ':');
@@ -185,10 +282,10 @@ TSRemapNewInstance(int argc, char *argv[], void **instance, char *errbuf, int er
       info.target = sep;
       if (std::string::npos != info.target.find('/')) {
         info.type = EscalationState::RETRY_URL;
-        TSDebug(PLUGIN_NAME, "Creating Redirect rule with URL = %s", sep);
+        Dbg(dbg_ctl, "Creating Redirect rule with URL = %s", sep);
       } else {
         info.type = EscalationState::RETRY_HOST;
-        TSDebug(PLUGIN_NAME, "Creating Redirect rule with Host = %s", sep);
+        Dbg(dbg_ctl, "Creating Redirect rule with Host = %s", sep);
       }
 
       for (token = strtok_r(argv[i], ",", &save); token; token = strtok_r(nullptr, ",", &save)) {
@@ -199,7 +296,7 @@ TSRemapNewInstance(int argc, char *argv[], void **instance, char *errbuf, int er
           goto fail;
         }
 
-        TSDebug(PLUGIN_NAME, "      added status = %d to rule", status);
+        Dbg(dbg_ctl, "      added status = %d to rule", status);
         es->status_map[status] = info;
       }
     }
@@ -225,5 +322,6 @@ TSRemapDoRemap(void *instance, TSHttpTxn txn, TSRemapRequestInfo * /* rri */)
   EscalationState *es = static_cast<EscalationState *>(instance);
 
   TSHttpTxnHookAdd(txn, TS_HTTP_READ_RESPONSE_HDR_HOOK, es->cont);
+  TSHttpTxnHookAdd(txn, TS_HTTP_SEND_RESPONSE_HDR_HOOK, es->cont);
   return TSREMAP_NO_REMAP;
 }

@@ -41,7 +41,7 @@ namespace cache
     }
 
     Key() : key_(TSCacheKeyCreate()) { assert(key_ != nullptr); }
-    Key(const Key &) = delete;
+    Key(const Key &)            = delete;
     Key &operator=(const Key &) = delete;
 
     explicit Key(const std::string &s) : key_(TSCacheKeyCreate())
@@ -60,11 +60,11 @@ namespace cache
   };
 
   template <class T> struct Read {
-    typedef Read<T> Self;
+    using Self = Read<T>;
 
     T t_;
 
-    template <class... A> Read(A &&... a) : t_(std::forward<A>(a)...) {}
+    template <class... A> Read(A &&...a) : t_(std::forward<A>(a)...) {}
     static int
     handle(TSCont c, TSEvent e, void *d)
     {
@@ -91,9 +91,9 @@ namespace cache
 
   template <class T, class... A>
   void
-  fetch(const std::string &k, A &&... a)
+  fetch(const std::string &k, A &&...a)
   {
-    const Key key(k);
+    const Key    key(k);
     const TSCont continuation = TSContCreate(Read<T>::handle, TSMutexCreate());
     assert(continuation != nullptr);
     TSContDataSet(continuation, new Read<T>(std::forward<A>(a)...));
@@ -101,16 +101,11 @@ namespace cache
   }
 
   struct Write {
-    const std::string content_;
-    io::IO *out_;
-    TSVConn vconnection_;
+    const std::string       content_;
+    std::unique_ptr<io::IO> out_;
+    TSVConn                 vconnection_;
 
-    ~Write()
-    {
-      if (out_ != nullptr) {
-        delete out_;
-      }
-    }
+    ~Write() {}
 
     Write(std::string &&s) : content_(std::move(s)), out_(nullptr), vconnection_(nullptr) {}
     static int handle(TSCont, TSEvent, void *);

@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -22,8 +22,9 @@
  */
 
 #include "tscore/ink_platform.h"
-#include "tscore/I_Version.h"
+#include "tscore/Version.h"
 #include "tscore/ink_string.h"
+#include "tscore/ink_file.h"
 
 AppVersionInfo::AppVersionInfo()
 {
@@ -45,23 +46,6 @@ void
 AppVersionInfo::setup(const char *pkg_name, const char *app_name, const char *app_version, const char *build_date,
                       const char *build_time, const char *build_machine, const char *build_person, const char *build_cflags)
 {
-  char month_name[8];
-  int year, month, day, hour, minute, second;
-  bool invalid_datetime;
-
-  static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "???"};
-
-  invalid_datetime = sscanf(build_time, "%d:%d:%d", &hour, &minute, &second) < 3;
-  invalid_datetime |= sscanf(build_date, "%3s %d %d", month_name, &day, &year) < 3;
-
-  // Jan=1, Feb=2 ... Dec=12, ???=13
-  for (month = 0; month < 11; month++) {
-    if (strcasecmp(months[month], month_name) == 0) {
-      break;
-    }
-  }
-  month++;
-
   ///////////////////////////////////////////
   // now construct the version information //
   ///////////////////////////////////////////
@@ -73,10 +57,29 @@ AppVersionInfo::setup(const char *pkg_name, const char *app_name, const char *ap
   // Otherwise take the build timestamp ("??????" if invalid).
   if (0 != strlen(BUILD_NUMBER)) {
     snprintf(BldNumStr, sizeof(BldNumStr), "%s", BUILD_NUMBER);
-  } else if (!invalid_datetime) {
-    snprintf(BldNumStr, sizeof(BldNumStr), "%02d%02d%02d", month, day, hour);
   } else {
-    snprintf(BldNumStr, sizeof(BldNumStr), "??????");
+    // Construct the BldNumStr from the build date and time.
+    char month_name[8];
+    int  year, month, day, hour, minute, second;
+    bool invalid_datetime;
+
+    static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "???"};
+
+    invalid_datetime  = sscanf(build_time, "%d:%d:%d", &hour, &minute, &second) < 3;
+    invalid_datetime |= sscanf(build_date, "%3s %d %d", month_name, &day, &year) < 3;
+
+    // Jan=1, Feb=2 ... Dec=12, ???=13
+    for (month = 0; month < 11; month++) {
+      if (strcasecmp(months[month], month_name) == 0) {
+        break;
+      }
+    }
+    month++;
+    if (invalid_datetime) {
+      snprintf(BldNumStr, sizeof(BldNumStr), "??????");
+    } else {
+      snprintf(BldNumStr, sizeof(BldNumStr), "%02d%02d%02d", month, day, hour);
+    }
   }
 
   snprintf(BldTimeStr, sizeof(BldTimeStr), "%s", build_time);
@@ -123,4 +126,34 @@ AppVersionInfo::setup(const char *pkg_name, const char *app_name, const char *ap
            BldNumStr, BldDateStr, BldTimeStr);
 
   defined = 1;
+}
+
+void
+AppVersionInfo::setup(const char *name)
+{
+  setup(PACKAGE_NAME, name, PACKAGE_VERSION, __DATE__, __TIME__, BUILD_MACHINE, BUILD_PERSON, "");
+}
+
+static AppVersionInfo appVersionInfo;
+
+const AppVersionInfo &
+AppVersionInfo::get_version()
+{
+  if (!appVersionInfo.defined) {
+    appVersionInfo.setup("<unknown>");
+  }
+  return appVersionInfo;
+}
+
+const AppVersionInfo &
+AppVersionInfo::setup_version(const char *name)
+{
+  appVersionInfo.setup(name);
+  return appVersionInfo;
+}
+
+void
+AppVersionInfo::print_version()
+{
+  ink_fputln(stdout, get_version().FullVersionInfoStr);
 }

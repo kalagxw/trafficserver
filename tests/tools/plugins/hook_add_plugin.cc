@@ -21,12 +21,19 @@
   limitations under the License.
  */
 #include <ts/ts.h>
-#include <string.h>
+#include <cstring>
+#include <cstdlib>
 
 #define PLUGIN_TAG "test"
 
-// Number of seconds to reschedule to a task thread and delay
+namespace
+{
+DbgCtl dbg_ctl{PLUGIN_TAG};
+}
+
+// Whether to reschedule the SSN_START reenable to a task thread, and by how many ms.
 int DelayStart = 0;
+int DelayMs    = 500;
 
 int
 transactionHandler(TSCont continuation, TSEvent event, void *d)
@@ -40,11 +47,11 @@ transactionHandler(TSCont continuation, TSEvent event, void *d)
 
   switch (event) {
   case TS_EVENT_HTTP_PRE_REMAP: {
-    TSDebug(PLUGIN_TAG, " -- transactionHandler :: TS_EVENT_HTTP_PRE_REMAP");
+    Dbg(dbg_ctl, " -- transactionHandler :: TS_EVENT_HTTP_PRE_REMAP");
   } break;
 
   case TS_EVENT_HTTP_TXN_CLOSE:
-    TSDebug(PLUGIN_TAG, " -- transactionHandler :: TS_EVENT_HTTP_TXN_CLOSE");
+    Dbg(dbg_ctl, " -- transactionHandler :: TS_EVENT_HTTP_TXN_CLOSE");
     TSContDataSet(continuation, nullptr);
     TSContDestroy(continuation);
     break;
@@ -62,11 +69,11 @@ int
 sessionHandler(TSCont continuation, TSEvent event, void *d)
 {
   TSHttpTxn txnp = static_cast<TSHttpTxn>(d);
-  TSCont txn_contp;
+  TSCont    txn_contp;
 
   switch (event) {
   case TS_EVENT_HTTP_PRE_REMAP: {
-    TSDebug(PLUGIN_TAG, " -- sessionHandler :: TS_EVENT_HTTP_PRE_REMAP");
+    Dbg(dbg_ctl, " -- sessionHandler :: TS_EVENT_HTTP_PRE_REMAP");
     txn_contp = TSContCreate(transactionHandler, nullptr);
 
     /* Registers locally to hook PRE_REMAP_HOOK and TXN_CLOSE */
@@ -75,7 +82,7 @@ sessionHandler(TSCont continuation, TSEvent event, void *d)
   } break;
 
   case TS_EVENT_HTTP_SSN_CLOSE: {
-    TSDebug(PLUGIN_TAG, " -- sessionHandler :: TS_EVENT_HTTP_SSN_CLOSE");
+    Dbg(dbg_ctl, " -- sessionHandler :: TS_EVENT_HTTP_SSN_CLOSE");
     const TSHttpSsn session = static_cast<TSHttpSsn>(d);
 
     TSHttpSsnReenable(session, TS_EVENT_HTTP_CONTINUE);
@@ -84,7 +91,7 @@ sessionHandler(TSCont continuation, TSEvent event, void *d)
   } break;
 
   case TS_EVENT_TIMEOUT: { // The schedule case, reenable the session continuation
-    TSDebug(PLUGIN_TAG, " -- sessionHandler :: TS_EVENT_TIMEOUT");
+    Dbg(dbg_ctl, " -- sessionHandler :: TS_EVENT_TIMEOUT");
     TSHttpSsn session = static_cast<TSHttpSsn>(TSContDataGet(continuation));
     TSHttpSsnReenable(session, TS_EVENT_HTTP_CONTINUE);
     return 0;
@@ -99,23 +106,23 @@ sessionHandler(TSCont continuation, TSEvent event, void *d)
 }
 
 int
-globalHandler(TSCont continuation, TSEvent event, void *data)
+globalHandler(TSCont /* continuation ATS_UNUSED */, TSEvent event, void *data)
 {
   if (event == TS_EVENT_HTTP_SSN_START) {
     TSHttpSsn session = static_cast<TSHttpSsn>(data);
-    TSDebug(PLUGIN_TAG, " -- globalHandler :: TS_EVENT_HTTP_SSN_START");
+    Dbg(dbg_ctl, " -- globalHandler :: TS_EVENT_HTTP_SSN_START");
     TSCont cont = TSContCreate(sessionHandler, TSMutexCreate());
 
     TSHttpSsnHookAdd(session, TS_HTTP_PRE_REMAP_HOOK, cont);
     TSHttpSsnHookAdd(session, TS_HTTP_SSN_CLOSE_HOOK, cont);
 
-    TSDebug(PLUGIN_TAG, "New session, cont is %p", cont);
+    Dbg(dbg_ctl, "New session, cont is %p", cont);
 
     if (DelayStart == 0) {
       TSHttpSsnReenable(session, TS_EVENT_HTTP_CONTINUE);
     } else {
       TSContDataSet(cont, session);
-      TSContScheduleOnPool(cont, 500, TS_THREAD_POOL_TASK);
+      TSContScheduleOnPool(cont, DelayMs, TS_THREAD_POOL_TASK);
     }
   }
 
@@ -136,10 +143,20 @@ TSPluginInit(int argc, const char **argv)
     return;
   }
 
-  if (argc >= 2) {
-    TSDebug(PLUGIN_TAG, "Argument %s", argv[1]);
-    if (strcmp(argv[1], "-delay") == 0) {
+  for (int i = 1; i < argc; ++i) {
+    Dbg(dbg_ctl, "Argument %s", argv[i]);
+    if (strcmp(argv[i], "-delay") == 0) {
       DelayStart = 1;
+    } else if (strncmp(argv[i], "-delay-ms=", 10) == 0) {
+      DelayStart            = 1;
+      const char *delay_arg = argv[i] + 10;
+      char       *end       = nullptr;
+      long        delay_ms  = strtol(delay_arg, &end, 10);
+      if (end == delay_arg || *end != '\0' || delay_ms < 0) {
+        TSError("[" PLUGIN_TAG "] invalid -delay-ms value '%s', keeping default %d", delay_arg, DelayMs);
+      } else {
+        DelayMs = static_cast<int>(delay_ms);
+      }
     }
   }
   TSCont continuation = TSContCreate(globalHandler, TSMutexCreate());

@@ -26,53 +26,20 @@ General
 
    Human-readable version number string for the currently running |TS| instance.
 
-.. ts:stat:: global proxy.node.config.reconfigure_required integer
+.. ts:stat:: global proxy.process.proxy.reconfigure_required integer
    :type: flag
 
-.. ts:stat:: global proxy.node.config.reconfigure_time integer
+.. ts:stat:: global proxy.process.proxy.reconfigure_time integer
 
-.. ts:stat:: global proxy.node.config.restart_required.manager integer
+.. ts:stat:: global proxy.process.proxy.restart_required integer
    :type: flag
 
-.. ts:stat:: global proxy.node.config.restart_required.proxy integer
-   :type: flag
-
-.. ts:stat:: global proxy.node.hostname_FQ string ats-host.example.com
-
-   Fully-qualified domain name for the host on which |TS| is running.
-
-.. ts:stat:: global proxy.node.hostname string ats-host
-
-   The hostname only, without domain, for the host on which |TS| is running.
-
-.. ts:stat:: global proxy.node.proxy_running integer
-   :type: flag
-
-   Indicates whether any form of HTTP proxying is currently enabled in the
-   running instance of |TS|.
-
-.. ts:stat:: global proxy.node.restarts.manager.start_time integer
+.. ts:stat:: global proxy.process.proxy.cache_ready_time integer
    :type: gauge
    :units: seconds
 
-   Unix epoch-time value indicating the time at which the currently-running
-   :program:`traffic_manager` process was started.
-
-.. ts:stat:: global proxy.node.restarts.proxy.cache_ready_time integer
-   :type: gauge
-   :units: seconds
-
-.. ts:stat:: global proxy.node.restarts.proxy.restart_count integer
-.. ts:stat:: global proxy.node.restarts.proxy.start_time integer
-.. ts:stat:: global proxy.node.restarts.proxy.stop_time integer
+.. ts:stat:: global proxy.process.proxy.start_time integer
 .. ts:stat:: global proxy.process.user_agent_total_bytes integer
-.. ts:stat:: global proxy.node.version.manager.build_date string
-.. ts:stat:: global proxy.node.version.manager.build_machine string
-.. ts:stat:: global proxy.node.version.manager.build_number integer
-.. ts:stat:: global proxy.node.version.manager.build_person string
-.. ts:stat:: global proxy.node.version.manager.build_time string
-.. ts:stat:: global proxy.node.version.manager.long string
-.. ts:stat:: global proxy.node.version.manager.short float
 .. ts:stat:: global proxy.process.http.tunnels integer
 .. ts:stat:: global proxy.process.update.fails integer
 .. ts:stat:: global proxy.process.update.no_actions integer
@@ -114,5 +81,12 @@ General
 .. ts:stat:: global proxy.process.traffic_server.memory.rss integer
    :units: bytes
 
-   The resident set size (RSS) of the ``traffic_server`` process. This is
-   basically the amount of memory this process is consuming.
+   The current resident set size (RSS) of the ``traffic_server`` process. This
+   is basically the amount of memory this process is consuming. The value is
+   refreshed every 10 seconds and reflects current (not peak) usage, so it can
+   both rise and fall over the lifetime of the process.
+
+   This gauge is only published when the memory-limit feature is enabled (that
+   is, when :ts:cv:`proxy.config.memory.max_usage` is greater than 0); when the
+   feature is disabled the process does not sample RSS and the metric is not
+   reported.

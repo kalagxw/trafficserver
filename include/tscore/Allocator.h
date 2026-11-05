@@ -2,7 +2,7 @@
 
   Fast-Allocators
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -39,18 +39,17 @@
 
 #pragma once
 
-#include <new>
 #include <cstdlib>
 #include <utility>
 #include "tscore/ink_queue.h"
-#include "tscore/ink_defs.h"
 #include "tscore/ink_resource.h"
+#include "tsutil/Metrics.h"
 #include <execinfo.h>
 
 #define RND16(_x) (((_x) + 15) & ~15)
 
 /** Allocator for fixed size memory blocks. */
-class Allocator
+class FreelistAllocator
 {
 public:
   /**
@@ -87,26 +86,29 @@ public:
     ink_freelist_free_bulk(this->fl, head, tail, num_item);
   }
 
-  Allocator() { fl = nullptr; }
+  FreelistAllocator() { fl = nullptr; }
 
   /**
     Creates a new allocator.
 
-    @param name identification tag used for mem tracking .
+    @param[in] name identification tag used for mem tracking.
+    @param[in] chunk_size Number of units to allocate when the free pool is empty.
     @param element_size size of memory blocks to be allocated.
-    @param chunk_size number of units to be allocated if free pool is empty.
     @param alignment of objects must be a power of 2.
+    @param[in] use_hugepages Whether to allocate the freelist using huge pages.
   */
-  Allocator(const char *name, unsigned int element_size, unsigned int chunk_size = 128, unsigned int alignment = 8)
+  FreelistAllocator(const char *name, unsigned int element_size, unsigned int chunk_size = 128, unsigned int alignment = 8,
+                    bool use_hugepages = false)
   {
-    ink_freelist_init(&fl, name, element_size, chunk_size, alignment);
+    ink_freelist_init(&fl, name, element_size, chunk_size, alignment, use_hugepages);
   }
 
   /** Re-initialize the parameters of the allocator. */
   void
-  re_init(const char *name, unsigned int element_size, unsigned int chunk_size, unsigned int alignment, int advice)
+  re_init(const char *name, unsigned int element_size, unsigned int chunk_size, unsigned int alignment, bool use_hugepages,
+          int advice)
   {
-    ink_freelist_madvise_init(&this->fl, name, element_size, chunk_size, alignment, advice);
+    ink_freelist_madvise_init(&this->fl, name, element_size, chunk_size, alignment, use_hugepages, advice);
   }
 
   // Dummies
@@ -114,7 +116,7 @@ public:
   destroy_if_enabled(void *)
   {
   }
-  Allocator &
+  FreelistAllocator &
   raw()
   {
     return *this;
@@ -124,11 +126,210 @@ protected:
   InkFreeList *fl;
 };
 
+class MallocAllocator
+{
+public:
+  /**
+    Allocate a block of memory (size specified during construction
+    of Allocator.
+  */
+  void *
+  alloc_void()
+  {
+    void *ptr = nullptr;
+    if (alignment) {
+      ptr = aligned_alloc(alignment, element_size);
+    } else {
+      ptr = malloc(element_size);
+    }
+    if (advice) {
+      madvise(ptr, element_size, advice);
+    }
+    return ptr;
+  }
+
+  /**
+    Deallocate a block of memory allocated by the Allocator.
+
+    @param ptr pointer to be freed.
+  */
+  void
+  free_void(void *ptr)
+  {
+    ::free(ptr);
+  }
+
+  /**
+    Deallocate blocks of memory allocated by the Allocator.
+
+    @param head pointer to be freed.
+    @note The unused tail argument is ignored.
+    @param num_item of blocks to be freed.
+  */
+  void
+  free_void_bulk(void *head, void *, size_t num_item)
+  {
+    void *item = head;
+    void *next;
+
+    for (size_t i = 0; i < num_item && item; ++i, item = next) {
+      next = *static_cast<void **>(item); // find next item before freeing current item
+      free_void(item);
+    }
+  }
+
+  MallocAllocator() {}
+
+  /**
+    Creates a new allocator.
+
+    @note The unused name and chunk size arguments are ignored.
+    @param element_size size of memory blocks to be allocated.
+    @param alignment of objects must be a power of 2.
+  */
+  MallocAllocator(const char * /* name ATS_UNUSED */, unsigned int element_size, unsigned int /* chunk_size  ATS_UNUSED */ = 128,
+                  unsigned int alignment = 8, bool /* use_hugepages  ATS_UNUSED */ = false)
+    : element_size(element_size), alignment(alignment), advice(0)
+  {
+  }
+
+  /** Re-initialize the parameters of the allocator. */
+  void
+  re_init(const char * /* name ATS_UNUSED */, unsigned int element_size, unsigned int /* chunk_size ATS_UNUSED */,
+          unsigned int alignment, bool /* use_hugepages ATS_UNUSED */, int advice)
+  {
+    this->element_size = element_size;
+    this->alignment    = alignment;
+    this->advice       = advice;
+  }
+
+  // Dummies
+  void
+  destroy_if_enabled(void *)
+  {
+  }
+  MallocAllocator &
+  raw()
+  {
+    return *this;
+  }
+
+private:
+  unsigned int element_size;
+  unsigned int alignment;
+  int          advice;
+};
+
+#if TS_USE_ALLOCATOR_METRICS
+template <typename WrappedAllocator> class MeteredAllocator : public WrappedAllocator
+{
+public:
+  void *
+  alloc_void()
+  {
+    increment_for_alloc();
+    return WrappedAllocator::alloc_void();
+  }
+
+  void
+  free_void(void *ptr)
+  {
+    increment_for_free();
+    WrappedAllocator::free_void(ptr);
+  }
+
+  void
+  free_void_bulk(void *head, void *tail, size_t num_item)
+  {
+    // this is only currently called from ProxyAllocator to free
+    // back to the watermark, so if this is called, it means
+    // the ProxyAllocator free has been decrementing the free count
+    // for items on its freelist so this function should not update metrics
+    WrappedAllocator::free_void_bulk(head, tail, num_item);
+  }
+
+  // NOTE(cmcfarlen): These metric functions are also called
+  // by ProxyAllocator when items are added/removed from its freelist
+  void
+  increment_for_alloc()
+  {
+    inuse_metric->increment(1);
+    alloc_metric->increment(1);
+  }
+
+  void
+  increment_for_free(int val = 1)
+  {
+    inuse_metric->decrement(val);
+    free_metric->increment(val);
+  }
+
+  MeteredAllocator() {}
+
+  MeteredAllocator(const char *name, unsigned int element_size, unsigned int chunk_size = 128, unsigned int alignment = 8,
+                   bool use_hugepages = false)
+    : WrappedAllocator(name, element_size, chunk_size, alignment, use_hugepages),
+      inuse_metric{ts::Metrics::Gauge::createPtr("proxy.process.allocator.inuse.", name)},
+      alloc_metric{ts::Metrics::Counter::createPtr("proxy.process.allocator.alloc.", name)},
+      free_metric{ts::Metrics::Counter::createPtr("proxy.process.allocator.free.", name)},
+      size_metric{ts::Metrics::Gauge::createPtr("proxy.process.allocator.size.", name)}
+  {
+    size_metric->store(element_size);
+  }
+
+  void
+  re_init(const char *name, unsigned int element_size, unsigned int chunk_size, unsigned int alignment, bool use_hugepages,
+          int advice)
+  {
+    if (inuse_metric == nullptr) {
+      inuse_metric = ts::Metrics::Gauge::createPtr("proxy.process.allocator.inuse.", name);
+      alloc_metric = ts::Metrics::Counter::createPtr("proxy.process.allocator.alloc.", name);
+      free_metric  = ts::Metrics::Counter::createPtr("proxy.process.allocator.free.", name);
+      size_metric  = ts::Metrics::Gauge::createPtr("proxy.process.allocator.size.", name);
+    }
+    size_metric->store(element_size);
+
+    WrappedAllocator::re_init(name, element_size, chunk_size, alignment, use_hugepages, advice);
+  }
+
+  void
+  destroy_if_enabled(void *p)
+  {
+    WrappedAllocator::destroy_if_enabled(p);
+  }
+
+  // for metered allocator we don't want to return superclass or we'll skip metrics (see THREAD_FREE macro)
+  MeteredAllocator<WrappedAllocator> &
+  raw()
+  {
+    return *this;
+  }
+
+private:
+  ts::Metrics::AtomicType *inuse_metric = nullptr;
+  ts::Metrics::AtomicType *alloc_metric = nullptr;
+  ts::Metrics::AtomicType *free_metric  = nullptr;
+  ts::Metrics::AtomicType *size_metric  = nullptr;
+};
+
+#if TS_USE_MALLOC_ALLOCATOR
+using Allocator = MeteredAllocator<MallocAllocator>;
+#else
+using Allocator = MeteredAllocator<FreelistAllocator>;
+#endif
+#else
+#if TS_USE_MALLOC_ALLOCATOR
+using Allocator = MallocAllocator;
+#else
+using Allocator = FreelistAllocator;
+#endif
+#endif // TS_USE_ALLOCATOR_METRICS
+
 /**
   Allocator for Class objects.
 
 */
-template <class C, bool Destruct_on_free_ = false> class ClassAllocator : private Allocator
+template <class C, bool Destruct_on_free_ = true, typename BaseAllocator = Allocator> class ClassAllocator : public BaseAllocator
 {
 public:
   using Value_type                   = C;
@@ -137,12 +338,12 @@ public:
   /** Allocates objects of the templated type.  Arguments are forwarded to the constructor for the object. */
   template <typename... Args>
   C *
-  alloc(Args &&... args)
+  alloc(Args &&...args)
   {
-    void *ptr = ink_freelist_new(this->fl);
+    void *ptr = this->alloc_void();
 
     ::new (ptr) C(std::forward<Args>(args)...);
-    return (C *)ptr;
+    return reinterpret_cast<C *>(ptr);
   }
 
   /**
@@ -155,22 +356,22 @@ public:
   {
     destroy_if_enabled(ptr);
 
-    ink_freelist_free(this->fl, ptr);
+    this->free_void(ptr);
   }
 
   /**
     Create a new class specific ClassAllocator.
 
     @param name some identifying name, used for mem tracking purposes.
-    @param chunk_size number of units to be allocated if free pool is empty.
+    @param[in] chunk_size Number of units to allocate when the free pool is empty.
     @param alignment of objects must be a power of 2.
   */
   ClassAllocator(const char *name, unsigned int chunk_size = 128, unsigned int alignment = 16)
+    : BaseAllocator(name, static_cast<unsigned int>(RND16(sizeof(C))), chunk_size, static_cast<unsigned int>(RND16(alignment)))
   {
-    ink_freelist_init(&this->fl, name, RND16(sizeof(C)), chunk_size, RND16(alignment));
   }
 
-  Allocator &
+  BaseAllocator &
   raw()
   {
     return *this;
@@ -179,8 +380,8 @@ public:
   void
   destroy_if_enabled(C *ptr)
   {
-    if (Destruct_on_free) {
-      ptr->~C();
+    if constexpr (Destruct_on_free) {
+      std::destroy_at(ptr);
     }
   }
 
@@ -189,7 +390,7 @@ public:
   static_assert(sizeof(C) >= sizeof(void *), "Can not allocate instances of this class using ClassAllocator");
 };
 
-template <class C, bool Destruct_on_free = false> class TrackerClassAllocator : public ClassAllocator<C, Destruct_on_free>
+template <class C, bool Destruct_on_free = true> class TrackerClassAllocator : public ClassAllocator<C, Destruct_on_free>
 {
 public:
   TrackerClassAllocator(const char *name, unsigned int chunk_size = 128, unsigned int alignment = 16)
@@ -201,8 +402,8 @@ public:
   alloc()
   {
     void *callstack[3];
-    int frames = backtrace(callstack, 3);
-    C *ptr     = ClassAllocator<C, Destruct_on_free>::alloc();
+    int   frames = backtrace(callstack, 3);
+    C    *ptr    = ClassAllocator<C, Destruct_on_free>::alloc();
 
     const void *symbol = nullptr;
     if (frames == 3 && callstack[2] != nullptr) {
@@ -224,7 +425,7 @@ public:
     ink_mutex_acquire(&trackerLock);
     std::map<void *, const void *>::iterator it = reverse_lookup.find(ptr);
     if (it != reverse_lookup.end()) {
-      tracker.increment((const void *)it->second, (int64_t)sizeof(C) * -1, nullptr);
+      tracker.increment(static_cast<const void *>(it->second), (int64_t)sizeof(C) * -1, nullptr);
       reverse_lookup.erase(it);
     }
     ink_mutex_release(&trackerLock);
@@ -232,8 +433,8 @@ public:
   }
 
 private:
-  ResourceTracker tracker;
+  ResourceTracker                tracker;
   std::map<void *, const void *> reverse_lookup;
-  uint64_t allocations;
-  ink_mutex trackerLock;
+  uint64_t                       allocations;
+  ink_mutex                      trackerLock;
 };

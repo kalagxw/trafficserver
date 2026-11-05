@@ -24,7 +24,7 @@
 #include "cookiejar.h"
 #include <ts/ts.h>
 
-#include <pcre.h>
+#include "tsutil/Regex.h"
 #include <ts/remap.h>
 #include <yaml-cpp/yaml.h>
 
@@ -41,7 +41,10 @@ using namespace std;
 
 #define MY_NAME "cookie_remap"
 
-const int OVECCOUNT = 30; // We support $1 - $9 only, and this needs to be 3x that
+namespace
+{
+DbgCtl dbg_ctl{MY_NAME};
+}
 
 class UrlComponents
 {
@@ -57,10 +60,6 @@ public:
       // we will just
       // append them to the path
       _d[pre_remap].path_str = _get_url_comp(urlh, TSUrlPathGet);
-      auto matrix            = _get_url_comp(urlh, TSUrlHttpParamsGet);
-      if (!matrix.empty()) {
-        _d[pre_remap].path_str.append(";", 1).append(matrix);
-      }
     }
     return _d[pre_remap].path_str;
   }
@@ -89,7 +88,7 @@ public:
   {
     if (_d[pre_remap].url.empty()) {
       auto urlh = _get_url(pre_remap);
-      int length;
+      int  length;
       auto data         = TSUrlStringGet(urlh.bufp, urlh.urlp, &length);
       _d[pre_remap].url = std::string_view(data, length);
     }
@@ -98,7 +97,7 @@ public:
 
   // No copying/moving.
   //
-  UrlComponents(UrlComponents const &) = delete;
+  UrlComponents(UrlComponents const &)            = delete;
   UrlComponents &operator=(UrlComponents const &) = delete;
 
   ~UrlComponents()
@@ -115,18 +114,18 @@ public:
 
 private:
   TSRemapRequestInfo *_rri;
-  TSHttpTxn _txn;
+  TSHttpTxn           _txn;
 
   struct _UrlHandle {
     TSMBuffer bufp = nullptr;
-    TSMLoc urlp;
+    TSMLoc    urlp = nullptr; // Doesn't really need initialization, this is only to shut up Coverity.
   };
 
   // Buffer any data that's likely to be used more than once.
 
   struct _Data {
-    _UrlHandle urlh;
-    std::string path_str;
+    _UrlHandle       urlh;
+    std::string      path_str;
     std::string_view url;
     std::string_view query;
   };
@@ -161,7 +160,7 @@ private:
   static std::string_view
   _get_url_comp(_UrlHandle urlh, char const *(*comp_func)(TSMBuffer, TSMLoc, int *))
   {
-    int length;
+    int  length;
     auto data = comp_func(urlh.bufp, urlh.urlp, &length);
     return std::string_view(data, length);
   }
@@ -254,18 +253,14 @@ public:
       bucket("")
 
   {
-    TSDebug(MY_NAME, "subop constructor called");
+    Dbg(dbg_ctl, "subop constructor called");
   }
 
   ~subop()
   {
-    TSDebug(MY_NAME, "subop destructor called");
+    Dbg(dbg_ctl, "subop destructor called");
     if (regex) {
-      pcre_free(regex);
-    }
-
-    if (regex_extra) {
-      pcre_free(regex_extra);
+      delete regex;
     }
   }
 
@@ -378,23 +373,22 @@ public:
   bool
   setRegexMatch(const std::string &s)
   {
-    const char *error_comp  = nullptr;
-    const char *error_study = nullptr;
-    int erroffset;
+    std::string error;
+    int         erroffset;
 
     op_type      = REGEXP;
     regex_string = s;
-    regex        = pcre_compile(regex_string.c_str(), 0, &error_comp, &erroffset, nullptr);
-
-    if (regex == nullptr) {
-      return false;
-    }
-    regex_extra = pcre_study(regex, 0, &error_study);
-    if ((regex_extra == nullptr) && (error_study != nullptr)) {
+    regex        = new Regex();
+    if (!regex->compile(regex_string.c_str(), error, erroffset, 0)) {
+      delete regex;
+      regex = nullptr;
       return false;
     }
 
-    if (pcre_fullinfo(regex, regex_extra, PCRE_INFO_CAPTURECOUNT, &regex_ccount) != 0) {
+    regex_ccount = regex->get_capture_count();
+    if (regex_ccount < 0) {
+      delete regex;
+      regex = nullptr;
       return false;
     }
 
@@ -414,75 +408,64 @@ public:
   }
 
   int
-  regexMatch(const char *str, int len, int ovector[]) const
+  regexMatch(const char *str, int len, RegexMatches &matches) const
   {
-    return pcre_exec(regex,       // the compiled pattern
-                     regex_extra, // Extra data from study (maybe)
-                     str,         // the subject std::string
-                     len,         // the length of the subject
-                     0,           // start at offset 0 in the subject
-                     0,           // default options
-                     ovector,     // output vector for substring information
-                     OVECCOUNT);  // number of elements in the output vector
+    if (regex) {
+      return regex->exec(std::string_view(str, len), matches);
+    }
+    return -1;
   };
 
   void
   printSubOp() const
   {
-    TSDebug(MY_NAME, "\t+++subop+++");
-    TSDebug(MY_NAME, "\t\tcookie: %s", cookie.c_str());
-    TSDebug(MY_NAME, "\t\toperation: %s", operation.c_str());
+    Dbg(dbg_ctl, "\t+++subop+++");
+    Dbg(dbg_ctl, "\t\tcookie: %s", cookie.c_str());
+    Dbg(dbg_ctl, "\t\toperation: %s", operation.c_str());
     if (str_match.size() > 0) {
-      TSDebug(MY_NAME, "\t\tmatching: %s", str_match.c_str());
+      Dbg(dbg_ctl, "\t\tmatching: %s", str_match.c_str());
     }
     if (regex) {
-      TSDebug(MY_NAME, "\t\tregex: %s", regex_string.c_str());
+      Dbg(dbg_ctl, "\t\tregex: %s", regex_string.c_str());
     }
     if (bucket.size() > 0) {
-      TSDebug(MY_NAME, "\t\tbucket: %s", bucket.c_str());
-      TSDebug(MY_NAME, "\t\ttaking: %d", how_many);
-      TSDebug(MY_NAME, "\t\tout of: %d", out_of);
+      Dbg(dbg_ctl, "\t\tbucket: %s", bucket.c_str());
+      Dbg(dbg_ctl, "\t\ttaking: %d", how_many);
+      Dbg(dbg_ctl, "\t\tout of: %d", out_of);
     }
   }
 
 private:
-  std::string cookie;
-  std::string operation;
+  std::string         cookie;
+  std::string         operation;
   enum operation_type op_type = UNKNOWN;
-  enum target_type target     = UNKNOWN_TARGET;
+  enum target_type    target  = UNKNOWN_TARGET;
 
   std::string str_match;
 
-  pcre *regex             = nullptr;
-  pcre_extra *regex_extra = nullptr;
+  Regex      *regex = nullptr;
   std::string regex_string;
-  int regex_ccount = 0;
+  int32_t     regex_ccount = 0;
 
-  std::string bucket;
+  std::string  bucket;
   unsigned int how_many = 0;
   unsigned int out_of   = 0;
 };
 
-using SubOpQueue = std::vector<const subop *>;
+using SubOpQueue = std::vector<std::unique_ptr<subop>>;
 
 //----------------------------------------------------------------------------
 class op
 {
 public:
-  op() { TSDebug(MY_NAME, "op constructor called"); }
+  op() { Dbg(dbg_ctl, "op constructor called"); }
 
-  ~op()
-  {
-    TSDebug(MY_NAME, "op destructor called");
-    for (auto &subop : subops) {
-      delete subop;
-    }
-  }
+  ~op() { Dbg(dbg_ctl, "op destructor called"); }
 
   void
-  addSubOp(const subop *s)
+  addSubOp(std::unique_ptr<subop> s)
   {
-    subops.push_back(s);
+    subops.push_back(std::move(s));
   }
 
   void
@@ -520,63 +503,79 @@ public:
   }
 
   void
+  setDisablePristineHostHdr(bool val)
+  {
+    disable_pristine_host_hdr = val;
+  }
+
+  bool
+  getDisablePristineHostHdr() const
+  {
+    return disable_pristine_host_hdr;
+  }
+
+  void
   printOp() const
   {
-    TSDebug(MY_NAME, "++++operation++++");
-    TSDebug(MY_NAME, "sending to: %s", sendto.c_str());
-    TSDebug(MY_NAME, "if these operations match: ");
+    Dbg(dbg_ctl, "++++operation++++");
+    Dbg(dbg_ctl, "sending to: %s", sendto.c_str());
+    Dbg(dbg_ctl, "if these operations match: ");
 
-    for (auto subop : subops) {
+    for (auto &subop : subops) {
       subop->printSubOp();
     }
     if (else_sendto.size() > 0) {
-      TSDebug(MY_NAME, "else: %s", else_sendto.c_str());
+      Dbg(dbg_ctl, "else: %s", else_sendto.c_str());
+    }
+    if (disable_pristine_host_hdr) {
+      Dbg(dbg_ctl, "disable_pristine_host_hdr: true");
     }
   }
 
   bool
-  process(CookieJar &jar, std::string &dest, TSHttpStatus &retstat, TSRemapRequestInfo *rri, UrlComponents &req_url) const
+  process(CookieJar &jar, std::string &dest, TSHttpStatus &retstat, TSRemapRequestInfo *rri, UrlComponents &req_url,
+          bool &used_sendto) const
   {
     if (sendto == "") {
       return false; // guessing every operation must have a
                     // sendto url???
     }
 
-    int retval        = 1;
-    bool cookie_found = false;
+    int         retval       = 1;
+    bool        cookie_found = false;
     std::string c;
     std::string cookie_data;
     std::string object_name; // name of the thing being processed,
                              // cookie, or
                              // request url
 
-    TSDebug(MY_NAME, "starting to process a new operation");
+    Dbg(dbg_ctl, "starting to process a new operation");
 
-    for (auto subop : subops) {
+    for (auto &subop : subops) {
       // subop* s = *it;
-      int subop_type     = subop->getOpType();
-      target_type target = subop->getTargetType();
+      int         subop_type = subop->getOpType();
+      target_type target     = subop->getTargetType();
 
       c = subop->getCookieName();
       if (c.length()) {
-        TSDebug(MY_NAME, "processing cookie: %s", c.c_str());
+        Dbg(dbg_ctl, "processing cookie: %s", c.c_str());
 
         size_t period_pos = c.find_first_of('.');
 
         if (period_pos == std::string::npos) { // not a sublevel
                                                // cookie name
-          TSDebug(MY_NAME, "processing non-sublevel cookie");
+          Dbg(dbg_ctl, "processing non-sublevel cookie");
 
           cookie_found = jar.get_full(c, cookie_data);
-          TSDebug(MY_NAME, "full cookie: %s", cookie_data.c_str());
+          Dbg(dbg_ctl, "full cookie: %s", cookie_data.c_str());
           object_name = c;
         } else { // is in the format FOO.BAR
           std::string cookie_main   = c.substr(0, period_pos);
           std::string cookie_subkey = c.substr(period_pos + 1);
 
-          TSDebug(MY_NAME, "processing sublevel cookie");
-          TSDebug(MY_NAME, "c key: %s", cookie_main.c_str());
-          TSDebug(MY_NAME, "c subkey: %s", cookie_subkey.c_str());
+          Dbg(dbg_ctl, "processing sublevel cookie");
+          Dbg(dbg_ctl, "c key: %s", cookie_main.c_str());
+          Dbg(dbg_ctl, "c subkey: %s", cookie_subkey.c_str());
 
           cookie_found = jar.get_part(cookie_main, cookie_subkey, cookie_data);
           object_name  = cookie_main + " . " + cookie_subkey;
@@ -588,16 +587,16 @@ public:
         if (cookie_found == false) { // cookie name or sub-key not found
                                      // inside cookies
           if (subop_type == NOTEXISTS) {
-            TSDebug(MY_NAME,
-                    "cookie %s was not "
-                    "found (and we wanted "
-                    "that)",
-                    object_name.c_str());
+            Dbg(dbg_ctl,
+                "cookie %s was not "
+                "found (and we wanted "
+                "that)",
+                object_name.c_str());
             continue; // we can short
                       // circuit more
                       // testing
           }
-          TSDebug(MY_NAME, "cookie %s was not found", object_name.c_str());
+          Dbg(dbg_ctl, "cookie %s was not found", object_name.c_str());
           retval &= 0;
           break;
         } else {
@@ -605,28 +604,28 @@ public:
           if (subop_type == NOTEXISTS) { // we found the cookie
                                          // but are asking
             // for non existence
-            TSDebug(MY_NAME,
-                    "cookie %s was found, "
-                    "but operation "
-                    "requires "
-                    "non-existence",
-                    object_name.c_str());
+            Dbg(dbg_ctl,
+                "cookie %s was found, "
+                "but operation "
+                "requires "
+                "non-existence",
+                object_name.c_str());
             retval &= 0;
             break;
           }
 
           if (subop_type == EXISTS) {
-            TSDebug(MY_NAME, "cookie %s was found", object_name.c_str()); // got what
-                                                                          // we were
-                                                                          // looking
-                                                                          // for
-            continue;                                                     // we can short
-                                                                          // circuit more
-                                                                          // testing
+            Dbg(dbg_ctl, "cookie %s was found", object_name.c_str()); // got what
+                                                                      // we were
+                                                                      // looking
+                                                                      // for
+            continue;                                                 // we can short
+                                                                      // circuit more
+                                                                      // testing
           }
         } // handled EXISTS / NOTEXISTS subops
 
-        TSDebug(MY_NAME, "processing cookie data: \"%s\"", cookie_data.c_str());
+        Dbg(dbg_ctl, "processing cookie data: \"%s\"", cookie_data.c_str());
       } else if (target != PRE_REMAP_URI) {
         target = URI;
       }
@@ -639,9 +638,9 @@ public:
       if (!rri) { // too dangerous to continue without the
                   // rri; hopefully that
         // never happens
-        TSDebug(MY_NAME, "request info structure is "
-                         "empty; can't continue "
-                         "processing this subop");
+        Dbg(dbg_ctl, "request info structure is "
+                     "empty; can't continue "
+                     "processing this subop");
         retval &= 0;
         break;
       }
@@ -653,11 +652,11 @@ public:
       std::string request_uri; // only set the value if we
                                // need it; we might
       // match the cookie data instead
-      bool use_url = (target == URI) || (target == PRE_REMAP_URI);
+      bool               use_url = (target == URI) || (target == PRE_REMAP_URI);
       const std::string &string_to_match(use_url ? request_uri : cookie_data);
       if (use_url) {
         request_uri = req_url.path(target == PRE_REMAP_URI);
-        TSDebug(MY_NAME, "process req_url.path = %s", request_uri.c_str());
+        Dbg(dbg_ctl, "process req_url.path = %s", request_uri.c_str());
         if (request_uri.length() && request_uri[0] != '/') {
           request_uri.insert(0, 1, '/');
         }
@@ -676,10 +675,10 @@ public:
       // OPERATION::string matching
       if (subop_type == STRING) {
         if (string_to_match == subop->getStringMatch()) {
-          TSDebug(MY_NAME, "string match succeeded");
+          Dbg(dbg_ctl, "string match succeeded");
           continue;
         } else {
-          TSDebug(MY_NAME, "string match failed");
+          Dbg(dbg_ctl, "string match failed");
           retval &= 0;
           break;
         }
@@ -687,8 +686,8 @@ public:
 
       // OPERATION::regex matching
       if (subop_type == REGEXP) {
-        int ovector[OVECCOUNT];
-        int ret = subop->regexMatch(string_to_match.c_str(), string_to_match.length(), ovector);
+        RegexMatches matches;
+        int          ret = subop->regexMatch(string_to_match.c_str(), string_to_match.length(), matches);
 
         if (ret >= 0) {
           std::string::size_type pos  = sendto.find('$');
@@ -703,12 +702,12 @@ public:
           // sucks we can't precalculate this
           // like regex_remap.
 
-          TSDebug(MY_NAME, "found %d matches", ret);
-          TSDebug(MY_NAME,
-                  "successful regex "
-                  "match of: %s with %s "
-                  "rewriting string: %s",
-                  string_to_match.c_str(), subop->getRegexString().c_str(), sendto.c_str());
+          Dbg(dbg_ctl, "found %d matches", ret);
+          Dbg(dbg_ctl,
+              "successful regex "
+              "match of: %s with %s "
+              "rewriting string: %s",
+              string_to_match.c_str(), subop->getRegexString().c_str(), sendto.c_str());
 
           // replace the $(1-9) in the sendto url
           // as necessary
@@ -719,17 +718,18 @@ public:
               int ix = sendto[pos + 1] - '0';
 
               if (ix <= subop->getRegexCcount()) { // Just skip an illegal regex group
-                dest += sendto.substr(ppos, pos - ppos);
-                dest += string_to_match.substr(ovector[ix * 2], ovector[ix * 2 + 1] - ovector[ix * 2]);
+                dest             += sendto.substr(ppos, pos - ppos);
+                auto regex_match  = matches[ix];
+                dest.append(regex_match.data(), regex_match.size());
                 ppos = pos + 2;
               } else {
-                TSDebug(MY_NAME,
-                        "bad "
-                        "rewriting "
-                        "string, "
-                        "for group "
-                        "%d: %s",
-                        ix, sendto.c_str());
+                Dbg(dbg_ctl,
+                    "bad "
+                    "rewriting "
+                    "string, "
+                    "for group "
+                    "%d: %s",
+                    ix, sendto.c_str());
               }
             }
             pos = sendto.find('$', pos + 1);
@@ -737,11 +737,11 @@ public:
           dest += sendto.substr(ppos);
           continue; // next subop, please
         } else {
-          TSDebug(MY_NAME,
-                  "could not match "
-                  "regular expression "
-                  "%s to %s",
-                  subop->getRegexString().c_str(), string_to_match.c_str());
+          Dbg(dbg_ctl,
+              "could not match "
+              "regular expression "
+              "%s to %s",
+              subop->getRegexString().c_str(), string_to_match.c_str());
           retval &= 0;
           break;
         }
@@ -755,27 +755,27 @@ public:
         uint32_t hash;
 
         if (taking == 0 || out_of == 0) {
-          TSDebug(MY_NAME,
-                  "taking %d out of %d "
-                  "makes no sense?!",
-                  taking, out_of);
+          Dbg(dbg_ctl,
+              "taking %d out of %d "
+              "makes no sense?!",
+              taking, out_of);
           retval &= 0;
           break;
         }
 
         hash = hash_fnv32_buckets(cookie_data.c_str(), cookie_data.size(), out_of);
-        TSDebug(MY_NAME,
-                "we hashed this to bucket: %u "
-                "taking: %u out of: %u",
-                hash, taking, out_of);
+        Dbg(dbg_ctl,
+            "we hashed this to bucket: %u "
+            "taking: %u out of: %u",
+            hash, taking, out_of);
 
         if (hash < taking) {
-          TSDebug(MY_NAME, "we hashed in the range, yay!");
+          Dbg(dbg_ctl, "we hashed in the range, yay!");
           continue; // we hashed in the range
         } else {
-          TSDebug(MY_NAME, "we didn't hash in the "
-                           "range requested, so "
-                           "sad");
+          Dbg(dbg_ctl, "we didn't hash in the "
+                       "range requested, so "
+                       "sad");
           retval &= 0;
           break;
         }
@@ -790,12 +790,14 @@ public:
       if (status > 0) {
         retstat = status;
       }
+      used_sendto = true; // We took the sendto path
       return true;
     } else if (else_sendto.size() > 0 && retval == 0) {
       dest = else_sendto;
       if (else_status > 0) {
         retstat = else_status;
       }
+      used_sendto = false; // We took the else path
       return true;
     } else {
       dest = "";
@@ -804,11 +806,12 @@ public:
   }
 
 private:
-  SubOpQueue subops{};
-  std::string sendto{""};
-  std::string else_sendto{""};
-  TSHttpStatus status      = TS_HTTP_STATUS_NONE;
-  TSHttpStatus else_status = TS_HTTP_STATUS_NONE;
+  SubOpQueue   subops{};
+  std::string  sendto{""};
+  std::string  else_sendto{""};
+  TSHttpStatus status                    = TS_HTTP_STATUS_NONE;
+  TSHttpStatus else_status               = TS_HTTP_STATUS_NONE;
+  bool         disable_pristine_host_hdr = false;
 };
 
 using StringPair = std::pair<std::string, std::string>;
@@ -818,18 +821,18 @@ using OpMap      = std::vector<StringPair>;
 static bool
 build_op(op &o, OpMap const &q)
 {
-  subop *sub = new subop();
+  auto sub = std::make_unique<subop>();
 
   // loop through the array of key->value pairs
   for (auto const &pr : q) {
     std::string const &key = pr.first;
     std::string const &val = pr.second;
 
-    TSDebug(MY_NAME, "build_op: key=%s val=%s", key.c_str(), val.c_str());
+    Dbg(dbg_ctl, "build_op: key=%s val=%s", key.c_str(), val.c_str());
 
     if (key == "cookie") {
       if (!sub->empty()) {
-        TSDebug(MY_NAME, "ERROR: you need to define a connector");
+        Dbg(dbg_ctl, "ERROR: you need to define a connector");
         goto error;
       }
       sub->setCookieName(val);
@@ -845,6 +848,10 @@ build_op(op &o, OpMap const &q)
 
     if (key == "status") {
       o.setStatus(val);
+    }
+
+    if (key == "disable_pristine_host_hdr") {
+      o.setDisablePristineHostHdr(val == "true" || val == "1" || val == "yes");
     }
 
     if (key == "operation") {
@@ -872,16 +879,16 @@ build_op(op &o, OpMap const &q)
     }
 
     if (key == "connector") {
-      o.addSubOp(sub);
-      sub = new subop();
+      o.addSubOp(std::move(sub));
+      sub = std::make_unique<subop>();
     }
   }
 
-  o.addSubOp(sub);
+  o.addSubOp(std::move(sub));
   return true;
 
 error:
-  TSDebug(MY_NAME, "error building operation");
+  Dbg(dbg_ctl, "error building operation");
   return false;
 }
 
@@ -890,7 +897,7 @@ using OpsQueue = std::vector<const op *>;
 //----------------------------------------------------------------------------
 // init
 TSReturnCode
-TSRemapInit(TSRemapInterface *api_info, char *errbuf, int errbuf_size)
+TSRemapInit(TSRemapInterface * /* api_info ATS_UNUSED */, char * /* errbuf ATS_UNUSED */, int /* errbuf_size ATS_UNUSED */)
 {
   return TS_SUCCESS;
 }
@@ -898,11 +905,11 @@ TSRemapInit(TSRemapInterface *api_info, char *errbuf, int errbuf_size)
 //----------------------------------------------------------------------------
 // initialization of structures from config parameters
 TSReturnCode
-TSRemapNewInstance(int argc, char *argv[], void **ih, char *errbuf, int errbuf_size)
+TSRemapNewInstance(int argc, char *argv[], void **ih, char * /* errbuf ATS_UNUSED */, int /* errbuf_size ATS_UNUSED */)
 {
   if (argc != 3) {
     TSError("arguments not equal to 3: %d", argc);
-    TSDebug(MY_NAME, "arguments not equal to 3: %d", argc);
+    Dbg(dbg_ctl, "arguments not equal to 3: %d", argc);
     return TS_ERROR;
   }
 
@@ -911,10 +918,10 @@ TSRemapNewInstance(int argc, char *argv[], void **ih, char *errbuf, int errbuf_s
     YAML::Node config = YAML::LoadFile(filename);
 
     std::unique_ptr<OpsQueue> ops(new OpsQueue);
-    OpMap op_data;
+    OpMap                     op_data;
 
     for (YAML::const_iterator it = config.begin(); it != config.end(); ++it) {
-      const string &name         = it->first.as<std::string>();
+      const string         &name = it->first.as<std::string>();
       YAML::NodeType::value type = it->second.Type();
 
       if (name != "op" || type != YAML::NodeType::Map) {
@@ -953,7 +960,7 @@ TSRemapNewInstance(int argc, char *argv[], void **ih, char *errbuf, int errbuf_s
       }
     }
 
-    TSDebug(MY_NAME, "# of ops: %d", static_cast<int>(ops->size()));
+    Dbg(dbg_ctl, "# of ops: %d", static_cast<int>(ops->size()));
     *ih = static_cast<void *>(ops.release());
   } catch (const YAML::Exception &e) {
     TSError("YAML::Exception %s when parsing YAML config file %s for cookie_remap", e.what(), filename.c_str());
@@ -968,15 +975,15 @@ namespace
 std::string
 unmatched_path(UrlComponents &req_url, bool pre_remap)
 {
-  std::string path           = req_url.path(pre_remap);
+  std::string      path      = req_url.path(pre_remap);
   std::string_view from_path = req_url.from_path();
 
   std::size_t pos = path.find(from_path);
   if (pos != std::string::npos) {
     path.erase(pos, from_path.size());
   }
-  TSDebug(MY_NAME, "from_path: %*s", FMT_SV(from_path));
-  TSDebug(MY_NAME, "%s: %s", pre_remap ? "unmatched_ppath" : "unmatched_path", path.c_str());
+  Dbg(dbg_ctl, "from_path: %*s", FMT_SV(from_path));
+  Dbg(dbg_ctl, "%s: %s", pre_remap ? "unmatched_ppath" : "unmatched_path", path.c_str());
 
   return path;
 }
@@ -991,46 +998,46 @@ int const sub_url_encode_id      = -6;
 
 struct CompNext {
   std::string_view const comp;
-  int const *const next;
+  int const *const       next;
 
   CompNext(std::string_view p, int const *n) : comp(p), next(n) {}
 };
 
 struct SubUnmatched {
   SubUnmatched() = default; // Work-around for Intel compiler problem.
-  int count      = 2;
+  int      count = 2;
   CompNext o1{"ath", &sub_unmatched_path_id};
   CompNext o2{"path", &sub_unmatched_ppath_id};
 };
 SubUnmatched const sub_unmatched;
 
 struct SubP {
-  SubP()    = default; // Work-around for Intel compiler problem.
-  int count = 2;
+  SubP()         = default; // Work-around for Intel compiler problem.
+  int      count = 2;
   CompNext o1{"ath", &sub_path_id};
   CompNext o2{"path", &sub_ppath_id};
 };
 SubP const sub_p;
 
 struct SubCrReq {
-  SubCrReq() = default; // Work-around for Intel compiler problem.
-  int count  = 2;
+  SubCrReq()     = default; // Work-around for Intel compiler problem.
+  int      count = 2;
   CompNext o1{"url", &sub_req_url_id};
   CompNext o2{"purl", &sub_req_purl_id};
 };
 SubCrReq const sub_cr_req;
 
 struct SubCr {
-  SubCr()   = default; // Work-around for Intel compiler problem.
-  int count = 2;
+  SubCr()        = default; // Work-around for Intel compiler problem.
+  int      count = 2;
   CompNext o1{"req_", &sub_cr_req.count};
   CompNext o2{"urlencode(", &sub_url_encode_id};
 };
 SubCr const sub_cr;
 
 struct Sub {
-  Sub()     = default; // Work-around for Intel compiler problem.
-  int count = 3;
+  Sub()          = default; // Work-around for Intel compiler problem.
+  int      count = 3;
   CompNext o1{"cr_", &sub_cr.count};
   CompNext o2{"p", &sub_p.count};
   CompNext o3{"unmatched_p", &sub_unmatched.count};
@@ -1040,8 +1047,8 @@ Sub const sub;
 int
 sub_lookup(char const *targ, int targ_len)
 {
-  int count = sub.count;
-  auto opt  = &sub.o1;
+  int  count = sub.count;
+  auto opt   = &sub.o1;
   for (;;) {
     while ((targ_len < static_cast<int>(opt->comp.size())) || (std::string_view(targ, opt->comp.size()) != opt->comp)) {
       if (!--count) {
@@ -1053,9 +1060,9 @@ sub_lookup(char const *targ, int targ_len)
     if (count <= 0) {
       break;
     }
-    targ += opt->comp.size();
+    targ     += opt->comp.size();
     targ_len -= opt->comp.size();
-    opt = reinterpret_cast<CompNext const *>(reinterpret_cast<char const *>(opt->next) + offsetof(decltype(sub), o1));
+    opt       = reinterpret_cast<CompNext const *>(reinterpret_cast<char const *>(opt->next) + offsetof(decltype(sub), o1));
   }
   return count;
 }
@@ -1071,12 +1078,12 @@ cr_substitutions(std::string &obj, UrlComponents &req_url)
 {
   {
     auto path = req_url.path(false);
-    TSDebug(MY_NAME, "x req_url.path: %*s %d", FMT_SV(path), static_cast<int>(path.size()));
+    Dbg(dbg_ctl, "x req_url.path: %*s %d", FMT_SV(path), static_cast<int>(path.size()));
     auto url = req_url.url(false);
-    TSDebug(MY_NAME, "x req_url.url: %*s %d", FMT_SV(url), static_cast<int>(url.size()));
+    Dbg(dbg_ctl, "x req_url.url: %*s %d", FMT_SV(url), static_cast<int>(url.size()));
   }
 
-  auto npos = std::string::npos;
+  auto        npos = std::string::npos;
   std::string tmp;
   std::size_t pos = 0;
   for (;;) {
@@ -1142,7 +1149,7 @@ cr_substitutions(std::string &obj, UrlComponents &req_url)
 
     } // end switch
 
-    TSDebug(MY_NAME, "%*s => %*s", FMT_SV(variable), FMT_SV(value));
+    Dbg(dbg_ctl, "%*s => %*s", FMT_SV(variable), FMT_SV(value));
 
     obj.replace(pos, variable.size(), value);
 
@@ -1157,7 +1164,7 @@ cr_substitutions(std::string &obj, UrlComponents &req_url)
 TSRemapStatus
 TSRemapDoRemap(void *ih, TSHttpTxn txnp, TSRemapRequestInfo *rri)
 {
-  OpsQueue *ops       = static_cast<OpsQueue *>(ih);
+  OpsQueue    *ops    = static_cast<OpsQueue *>(ih);
   TSHttpStatus status = TS_HTTP_STATUS_NONE;
 
   UrlComponents req_url{rri, txnp};
@@ -1165,41 +1172,42 @@ TSRemapDoRemap(void *ih, TSHttpTxn txnp, TSRemapRequestInfo *rri)
   if (ops == (OpsQueue *)nullptr) {
     TSError("serious error with encountered while attempting to "
             "cookie_remap");
-    TSDebug(MY_NAME, "serious error with encountered while attempting to remap");
+    Dbg(dbg_ctl, "serious error with encountered while attempting to remap");
     return TSREMAP_NO_REMAP;
   }
 
   // get any query params..we will append that to the answer (possibly)
   std::string client_req_query_params;
-  auto query = req_url.query(false);
+  auto        query = req_url.query(false);
   if (!query.empty()) {
-    client_req_query_params = "?";
+    client_req_query_params  = "?";
     client_req_query_params += query;
   }
-  TSDebug(MY_NAME, "Query Parameters: %s", client_req_query_params.c_str());
+  Dbg(dbg_ctl, "Query Parameters: %s", client_req_query_params.c_str());
 
   std::string rewrite_to;
-  char cookie_str[] = "Cookie";
-  TSMLoc field      = TSMimeHdrFieldFind(rri->requestBufp, rri->requestHdrp, cookie_str, sizeof(cookie_str) - 1);
+  char        cookie_str[] = "Cookie";
+  TSMLoc      field        = TSMimeHdrFieldFind(rri->requestBufp, rri->requestHdrp, cookie_str, sizeof(cookie_str) - 1);
 
   // cookie header doesn't exist
   if (field == nullptr) {
-    TSDebug(MY_NAME, "no cookie header");
+    Dbg(dbg_ctl, "no cookie header");
     // return TSREMAP_NO_REMAP;
   }
 
-  const char *cookie = nullptr;
-  int cookie_len     = 0;
+  const char *cookie     = nullptr;
+  int         cookie_len = 0;
   if (field != nullptr) {
     cookie = TSMimeHdrFieldValueStringGet(rri->requestBufp, rri->requestHdrp, field, -1, &cookie_len);
   }
   std::string temp_cookie(cookie, cookie_len);
-  CookieJar jar;
+  CookieJar   jar;
   jar.create(temp_cookie);
 
   for (auto &op : *ops) {
-    TSDebug(MY_NAME, ">>> processing new operation");
-    if (op->process(jar, rewrite_to, status, rri, req_url)) {
+    Dbg(dbg_ctl, ">>> processing new operation");
+    bool used_sendto = false;
+    if (op->process(jar, rewrite_to, status, rri, req_url, used_sendto)) {
       cr_substitutions(rewrite_to, req_url);
 
       size_t pos = 7;                             // 7 because we want to ignore the // in
@@ -1217,23 +1225,23 @@ TSRemapDoRemap(void *ih, TSHttpTxn txnp, TSRemapRequestInfo *rri)
         rewrite_to.append(client_req_query_params);
       }
 
-      TSDebug(MY_NAME, "rewriting to: %s", rewrite_to.c_str());
+      Dbg(dbg_ctl, "rewriting to: %s", rewrite_to.c_str());
 
       // Maybe set the return status
       if (status > TS_HTTP_STATUS_NONE) {
-        TSDebug(MY_NAME, "Setting return status to %d", status);
-        TSHttpTxnStatusSet(txnp, status);
+        Dbg(dbg_ctl, "Setting return status to %d", status);
+        TSHttpTxnStatusSet(txnp, status, MY_NAME);
         if ((status == TS_HTTP_STATUS_MOVED_PERMANENTLY) || (status == TS_HTTP_STATUS_MOVED_TEMPORARILY)) {
           if (rewrite_to.size() > 8192) {
             TSError("Redirect in target "
                     "URL too long");
-            TSHttpTxnStatusSet(txnp, TS_HTTP_STATUS_REQUEST_URI_TOO_LONG);
+            TSHttpTxnStatusSet(txnp, TS_HTTP_STATUS_REQUEST_URI_TOO_LONG, MY_NAME);
           } else {
-            const char *start = rewrite_to.c_str();
-            int dest_len      = rewrite_to.size();
+            const char *start    = rewrite_to.c_str();
+            int         dest_len = rewrite_to.size();
 
             if (TS_PARSE_ERROR == TSUrlParse(rri->requestBufp, rri->requestUrl, &start, start + dest_len)) {
-              TSHttpTxnStatusSet(txnp, TS_HTTP_STATUS_INTERNAL_SERVER_ERROR);
+              TSHttpTxnStatusSet(txnp, TS_HTTP_STATUS_INTERNAL_SERVER_ERROR, MY_NAME);
               TSError("can't parse "
                       "substituted "
                       "URL string");
@@ -1256,10 +1264,20 @@ TSRemapDoRemap(void *ih, TSHttpTxn txnp, TSRemapRequestInfo *rri)
 
       // set the new url
       if (TSUrlParse(rri->requestBufp, rri->requestUrl, &start, start + rewrite_to.length()) == TS_PARSE_ERROR) {
-        TSHttpTxnStatusSet(txnp, TS_HTTP_STATUS_INTERNAL_SERVER_ERROR);
+        TSHttpTxnStatusSet(txnp, TS_HTTP_STATUS_INTERNAL_SERVER_ERROR, MY_NAME);
         TSError("can't parse substituted URL string");
         goto error;
       } else {
+        // Disable pristine host header if configured to do so and we took the
+        // sendto path. This allows the Host header to be updated to match the
+        // remapped destination. The else path (i.e., the non-sendto one)
+        // always preserves the pristine host header configuration, whether
+        // enabled or disabled.
+        if (op->getDisablePristineHostHdr() && used_sendto) {
+          Dbg(dbg_ctl, "Disabling pristine_host_hdr for this transaction (sendto path)");
+          TSHttpTxnConfigIntSet(txnp, TS_CONFIG_URL_REMAP_PRISTINE_HOST_HDR, 0);
+        }
+
         if (field != nullptr) {
           TSHandleMLocRelease(rri->requestBufp, rri->requestHdrp, field);
         }
@@ -1275,8 +1293,8 @@ TSRemapDoRemap(void *ih, TSHttpTxn txnp, TSRemapRequestInfo *rri)
     }
   }
 
-  TSDebug(MY_NAME, "could not execute ANY of the cookie remap operations... "
-                   "falling back to default in remap.config");
+  Dbg(dbg_ctl, "could not execute ANY of the cookie remap operations... "
+               "falling back to default in remap.config");
 
   if (field != nullptr) {
     TSHandleMLocRelease(rri->requestBufp, rri->requestHdrp, field);
@@ -1291,7 +1309,7 @@ TSRemapDeleteInstance(void *ih)
 {
   OpsQueue *ops = static_cast<OpsQueue *>(ih);
 
-  TSDebug(MY_NAME, "deleting loaded operations");
+  Dbg(dbg_ctl, "deleting loaded operations");
   for (auto &op : *ops) {
     delete op;
   }

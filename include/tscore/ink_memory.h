@@ -2,7 +2,7 @@
 
   Memory allocation routines for libts.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -27,33 +27,36 @@
 #include <strings.h>
 #include <cinttypes>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 
+#include "tscore/ink_assert.h"
 #include "tscore/ink_config.h"
 
-#if HAVE_UNISTD_H
 #include <unistd.h>
-#endif
 
-#if HAVE_SYS_TYPES_H
 #include <sys/types.h>
-#endif
 
-#if HAVE_SYS_UIO_H
 #include <sys/uio.h>
-#endif
 
-#if HAVE_SYS_MMAN_H
 #include <sys/mman.h>
-#endif
 
 #if TS_HAS_JEMALLOC
+#if __has_include(<jemalloc/jemalloc.h>)
 #include <jemalloc/jemalloc.h>
+#else
+#include <jemalloc.h>
+#endif
 #elif TS_HAS_MIMALLOC
 #include <mimalloc.h>
-#elif HAVE_MALLOC_H
+#elif __has_include(<malloc/malloc.h>)
+#include <malloc/malloc.h>
+#elif __has_include(<malloc.h>)
 #include <malloc.h>
+#if __has_include(<malloc_np.h>)
+#include <malloc_np.h>
+#endif
 #endif // ! TS_HAS_JEMALLOC
 
 #ifndef MADV_NORMAL
@@ -76,10 +79,6 @@
 #define MADV_DONTNEED 4
 #endif
 
-#ifdef __cplusplus
-extern "C" {
-#endif /* __cplusplus */
-
 struct IOVec : public iovec {
   IOVec()
   {
@@ -97,7 +96,7 @@ void *ats_malloc(size_t size);
 void *ats_calloc(size_t nelem, size_t elsize);
 void *ats_realloc(void *ptr, size_t size);
 void *ats_memalign(size_t alignment, size_t size);
-void ats_free(void *ptr);
+void  ats_free(void *ptr);
 void *ats_free_null(void *ptr);
 
 int ats_msync(caddr_t addr, size_t len, caddr_t end, int flags);
@@ -106,22 +105,24 @@ int ats_mlock(caddr_t addr, size_t len);
 
 void *ats_track_malloc(size_t size, uint64_t *stat);
 void *ats_track_realloc(void *ptr, size_t size, uint64_t *alloc_stat, uint64_t *free_stat);
-void ats_track_free(void *ptr, uint64_t *stat);
+void  ats_track_free(void *ptr, uint64_t *stat);
 
-static inline size_t __attribute__((const)) ats_pagesize()
+static inline size_t __attribute__((const))
+ats_pagesize()
 {
   static size_t page_size;
 
-  if (page_size)
+  if (page_size) {
     return page_size;
+  }
 
 #if defined(HAVE_SYSCONF) && defined(_SC_PAGESIZE)
   long ret  = sysconf(_SC_PAGESIZE);
-  page_size = (size_t)((ret > -1) ? ret : 8192);
+  page_size = static_cast<size_t>((ret > -1) ? ret : 8192);
 #elif defined(HAVE_GETPAGESIZE)
-  page_size = (size_t)getpagesize()
+  page_size = (size_t)getpagesize();
 #else
-  page_size = (size_t)8192;
+  page_size = static_cast<size_t>(8192);
 #endif
 
   return page_size;
@@ -133,12 +134,6 @@ char *_xstrdup(const char *str, int length, const char *path);
 #define ats_strdup(p) _xstrdup((p), -1, nullptr)
 
 #define ats_strndup(p, n) _xstrdup((p), n, nullptr)
-
-#ifdef __cplusplus
-}
-#endif
-
-#ifdef __cplusplus
 
 #include <memory>
 
@@ -157,6 +152,18 @@ ats_stringdup(std::string_view const &p)
   return p.empty() ? nullptr : _xstrdup(p.data(), p.size(), nullptr);
 }
 
+inline char *
+ats_stringdup(std::optional<std::string> const &p)
+{
+  return p ? _xstrdup(p.value().data(), p.value().size(), nullptr) : nullptr;
+}
+
+inline const char *
+ats_as_c_str(std::optional<std::string> const &p)
+{
+  return p ? p.value().c_str() : nullptr;
+}
+
 template <typename PtrType, typename SizeType>
 static inline IOVec
 make_iovec(PtrType ptr, SizeType sz)
@@ -165,7 +172,9 @@ make_iovec(PtrType ptr, SizeType sz)
   return iov;
 }
 
-template <typename PtrType, unsigned N> static inline IOVec make_iovec(PtrType (&array)[N])
+template <typename PtrType, unsigned N>
+static inline IOVec
+make_iovec(PtrType (&array)[N])
 {
   IOVec iov = {&array[0], static_cast<size_t>(sizeof(array))};
   return iov;
@@ -236,7 +245,6 @@ can_safely_shift_left(T value, int num_places)
 
     @see ats_scoped_fd
     @see ats_scoped_mem
-    @see ats_scoped_obj
 
     For example, if you open a file descriptor and have to do other checks which result in having to call
     @c close in each @c if clause.
@@ -289,9 +297,9 @@ template <typename TRAITS ///< Traits object.
 class ats_scoped_resource
 {
 public:
-  typedef TRAITS Traits;                          ///< Make template arg available.
-  typedef typename TRAITS::value_type value_type; ///< Import value type.
-  typedef ats_scoped_resource self;               ///< Self reference type.
+  using Traits     = TRAITS;                      ///< Make template arg available.
+  using value_type = typename TRAITS::value_type; ///< Import value type.
+  using self       = ats_scoped_resource;         ///< Self reference type.
 
 public:
   /// Default constructor - an empty container.
@@ -383,7 +391,7 @@ protected:
   value_type _r; ///< Resource.
 private:
   ats_scoped_resource(self const &) = delete; ///< Copy constructor not permitted.
-  self &operator=(self const &) = delete;     ///< Self assignment not permitted.
+  self &operator=(self const &)     = delete; ///< Self assignment not permitted.
 };
 
 namespace detail
@@ -391,7 +399,7 @@ namespace detail
 /** Traits for @c ats_scoped_resource for file descriptors.
  */
 struct SCOPED_FD_TRAITS {
-  typedef int value_type;
+  using value_type = int;
   static int
   initValue()
   {
@@ -414,8 +422,8 @@ struct SCOPED_FD_TRAITS {
 class ats_scoped_fd : public ats_scoped_resource<detail::SCOPED_FD_TRAITS>
 {
 public:
-  typedef ats_scoped_resource<detail::SCOPED_FD_TRAITS> super_type; ///< Super type.
-  typedef ats_scoped_fd self_type;                                  ///< Self reference type.
+  using super_type = ats_scoped_resource<detail::SCOPED_FD_TRAITS>; ///< Super type.
+  using self_type  = ats_scoped_fd;                                 ///< Self reference type.
 
   /// Default constructor - an empty container.
   ats_scoped_fd() : super_type() {}
@@ -452,7 +460,7 @@ namespace detail
 template <typename T ///< Underlying type (not the pointer type).
           >
 struct SCOPED_MALLOC_TRAITS {
-  typedef T *value_type;
+  using value_type = T *;
   static T *
   initValue()
   {
@@ -474,7 +482,7 @@ struct SCOPED_MALLOC_TRAITS {
 template <typename T ///< Underlying type - not the pointer type.
           >
 struct SCOPED_OBJECT_TRAITS {
-  typedef T *value_type;
+  using value_type = T *;
   static T *
   initValue()
   {
@@ -574,8 +582,8 @@ template <typename T ///< Underlying (not pointer) type.
 class ats_scoped_mem : public ats_scoped_resource<detail::SCOPED_MALLOC_TRAITS<T>>
 {
 public:
-  typedef ats_scoped_resource<detail::SCOPED_MALLOC_TRAITS<T>> super; ///< Super type.
-  typedef ats_scoped_mem self;                                        ///< Self reference.
+  using super = ats_scoped_resource<detail::SCOPED_MALLOC_TRAITS<T>>; ///< Super type.
+  using self  = ats_scoped_mem;                                       ///< Self reference.
 
   self &
   operator=(T *ptr)
@@ -585,52 +593,24 @@ public:
   }
 };
 
-/** Specialization of @c ats_scoped_resource for objects.
-    This handles a pointer to an object created by @c new and destroyed by @c delete.
-*/
-
-template <typename T /// Underlying (not pointer) type.
-          >
-class ats_scoped_obj : public ats_scoped_resource<detail::SCOPED_OBJECT_TRAITS<T>>
-{
-public:
-  typedef ats_scoped_resource<detail::SCOPED_OBJECT_TRAITS<T>> super; ///< Super type.
-  typedef ats_scoped_obj self;                                        ///< Self reference.
-
-  /// Default constructor - an empty container.
-  ats_scoped_obj() : super() {}
-  /// Construct with contained resource.
-  explicit ats_scoped_obj(T *obj) : super(obj) {}
-  self &
-  operator=(T *obj)
-  {
-    super::operator=(obj);
-    return *this;
-  }
-
-  T *
-  operator->() const
-  {
-    return *this;
-  }
-};
-
 /** Combine two strings as file paths.
      Trailing and leading separators for @a lhs and @a rhs respectively
      are handled to yield exactly one separator.
-     @return A newly @x ats_malloc string of the combined paths.
+     @return A newly @c ats_malloc string of the combined paths.
 */
 inline char *
 path_join(ats_scoped_str const &lhs, ats_scoped_str const &rhs)
 {
-  size_t ln        = strlen(lhs);
-  size_t rn        = strlen(rhs);
+  size_t      ln   = strlen(lhs);
+  size_t      rn   = strlen(rhs);
   const char *rptr = rhs; // May need to be modified.
 
-  if (ln && lhs[ln - 1] == '/')
+  if (ln && lhs[ln - 1] == '/') {
     --ln; // drop trailing separator.
-  if (rn && *rptr == '/')
+  }
+  if (rn && *rptr == '/') {
     --rn, ++rptr; // drop leading separator.
+  }
 
   ats_scoped_str x(ln + rn + 2);
 
@@ -652,4 +632,54 @@ struct ats_unique_buf_deleter {
 using ats_unique_buf = std::unique_ptr<uint8_t[], ats_unique_buf_deleter>;
 ats_unique_buf ats_unique_malloc(size_t size);
 
-#endif /* __cplusplus */
+/** Similar to `string_view`, but guarantees that the data ends with
+    a null character '\0'.
+
+    This class is intended for temporary use during the transition
+    from legacy code that uses `char*` to modern code that uses `std::string_view`.
+    It will be removed once it is no longer needed.
+
+    The `wks` code should be modernized to use more idiomatic C++,
+    after which this class can be eliminated.
+ */
+class c_str_view
+{
+public:
+  using size_type = std::string_view::size_type;
+
+  c_str_view() : c_str_view(nullptr, 0) {}
+  explicit c_str_view(const char *data, size_type length)
+    : c_str_view{
+        std::string_view{data, length}
+  }
+  {
+  }
+  explicit c_str_view(std::string_view sv) : sv_{sv}
+  {
+    ink_assert(sv_.data() == nullptr ? sv_.length() == 0 : sv_.data()[sv_.length()] == '\0');
+  }
+  explicit c_str_view(const c_str_view &)   = default;
+  explicit c_str_view(c_str_view &&)        = default;
+  ~c_str_view()                             = default;
+  c_str_view &operator=(const c_str_view &) = default;
+  c_str_view &operator=(c_str_view &&)      = default;
+
+  const char *
+  c_str() const noexcept
+  {
+    return sv_.data();
+  }
+  size_type
+  length() const noexcept
+  {
+    return sv_.length();
+  }
+  explicit
+  operator std::string_view() const noexcept
+  {
+    return sv_;
+  }
+
+private:
+  std::string_view sv_;
+};

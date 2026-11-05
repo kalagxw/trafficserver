@@ -33,7 +33,7 @@ x509_expand_none(X509 *, BIO *)
 static void
 x509_expand_certificate(X509 *x509, BIO *bio)
 {
-  long remain;
+  long  remain;
   char *ptr;
 
   PEM_write_bio_X509(bio, x509);
@@ -41,7 +41,7 @@ x509_expand_certificate(X509 *x509, BIO *bio)
   // The PEM format has newlines in it. mod_ssl replaces those with spaces.
   remain = BIO_get_mem_data(bio, &ptr);
   for (char *nl; (nl = static_cast<char *>(memchr(ptr, '\n', remain))); ptr = nl) {
-    *nl = ' ';
+    *nl     = ' ';
     remain -= nl - ptr;
   }
 }
@@ -49,14 +49,14 @@ x509_expand_certificate(X509 *x509, BIO *bio)
 static void
 x509_expand_subject(X509 *x509, BIO *bio)
 {
-  X509_NAME *name = X509_get_subject_name(x509);
+  const X509_NAME *name = X509_get_subject_name(x509);
   X509_NAME_print_ex(bio, name, 0 /* indent */, XN_FLAG_ONELINE);
 }
 
 static void
 x509_expand_issuer(X509 *x509, BIO *bio)
 {
-  X509_NAME *name = X509_get_issuer_name(x509);
+  const X509_NAME *name = X509_get_issuer_name(x509);
   X509_NAME_print_ex(bio, name, 0 /* indent */, XN_FLAG_ONELINE);
 }
 
@@ -71,15 +71,9 @@ static void
 x509_expand_signature(X509 *x509, BIO *bio)
 {
   const ASN1_BIT_STRING *sig;
-#if OPENSSL_VERSION_NUMBER >= 0x010100000
   X509_get0_signature(&sig, nullptr, x509);
-#elif OPENSSL_VERSION_NUMBER >= 0x010002000
-  X509_get0_signature(const_cast<ASN1_BIT_STRING **>(&sig), nullptr, x509);
-#else
-  sig = x509->signature;
-#endif
-  const char *ptr = reinterpret_cast<const char *>(sig->data);
-  const char *end = ptr + sig->length;
+  const char *ptr = reinterpret_cast<const char *>(ASN1_STRING_get0_data(sig));
+  const char *end = ptr + ASN1_STRING_length(sig);
 
   // The canonical OpenSSL way to format the signature seems to be
   // X509_signature_dump(). However that separates each byte with a ':', which is
@@ -105,7 +99,7 @@ x509_expand_notafter(X509 *x509, BIO *bio)
   ASN1_TIME_print(bio, time);
 }
 
-static const std::array<x509_expansion, SSL_HEADERS_FIELD_MAX> expansions = {{
+static const std::array<x509_expansion, SSL_HEADERS_FIELD_MAX> expansions = {
   x509_expand_none,        // SSL_HEADERS_FIELD_NONE
   x509_expand_certificate, // SSL_HEADERS_FIELD_CERTIFICATE
   x509_expand_subject,     // SSL_HEADERS_FIELD_SUBJECT
@@ -114,7 +108,7 @@ static const std::array<x509_expansion, SSL_HEADERS_FIELD_MAX> expansions = {{
   x509_expand_signature,   // SSL_HEADERS_FIELD_SIGNATURE
   x509_expand_notbefore,   // SSL_HEADERS_FIELD_NOTBEFORE
   x509_expand_notafter,    // SSL_HEADERS_FIELD_NOTAFTER
-}};
+};
 
 bool
 SslHdrExpandX509Field(BIO *bio, X509 *x509, ExpansionField field)

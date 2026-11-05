@@ -2,7 +2,7 @@
 
     Main file for the traffic_top application.
 
-    @section license License
+    @par License
 
     Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
@@ -21,6 +21,8 @@
     limitations under the License.
 */
 
+#include <cstdio>
+
 #include "tscore/ink_config.h"
 #include <map>
 #include <list>
@@ -34,7 +36,7 @@
 
 // At least on solaris, the default ncurses defines macros such as
 // clear() that break stdlibc++.
-#define NOMACROS 1
+#define NOMACROS         1
 #define NCURSES_NOMACROS 1
 
 #if defined HAVE_NCURSESW_CURSES_H
@@ -53,17 +55,14 @@
 
 #include "stats.h"
 
-#include "tscore/I_Layout.h"
+#include "tscore/Layout.h"
 #include "tscore/ink_args.h"
-#include "records/I_RecProcess.h"
-#include "RecordsConfig.h"
+#include "tscore/Version.h"
 #include "tscore/runroot.h"
+#include "tscore/Demangle.h"
 
 using namespace std;
 
-#if HAS_CURL
-char curl_error[CURL_ERROR_SIZE];
-#endif
 string response;
 
 namespace colorPair
@@ -82,10 +81,10 @@ const short border = 8;
 static void
 prettyPrint(const int x, const int y, const double number, const int type)
 {
-  char buffer[32];
-  char exp         = ' ';
+  char   buffer[32];
+  char   exp       = ' ';
   double my_number = number;
-  short color;
+  short  color;
   if (number > 1000000000000LL) {
     my_number = number / 1000000000000LL;
     exp       = 'T';
@@ -140,7 +139,7 @@ makeTable(const int x, const int y, const list<string> &items, Stats &stats)
   for (const auto &item : items) {
     string prettyName;
     double value = 0;
-    int type;
+    int    type;
 
     stats.getStat(item, value, prettyName, type);
     mvprintw(my_y, x, "%s", prettyName.c_str());
@@ -228,9 +227,9 @@ help(const string &host, const string &version)
 
   while (true) {
     clear();
-    time_t now = time(nullptr);
+    time_t    now = time(nullptr);
     struct tm nowtm;
-    char timeBuf[32];
+    char      timeBuf[32];
     localtime_r(&now, &nowtm);
     strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &nowtm);
 
@@ -342,13 +341,6 @@ main_stats_page(Stats &stats)
   response2.push_back("304");
   response2.push_back("404");
   response2.push_back("502");
-  response2.push_back("s_100");
-  response2.push_back("s_1k");
-  response2.push_back("s_3k");
-  response2.push_back("s_5k");
-  response2.push_back("s_10k");
-  response2.push_back("s_1m");
-  response2.push_back("s_>1m");
   makeTable(62, 1, response2, stats);
 
   list<string> client1;
@@ -383,22 +375,35 @@ main_stats_page(Stats &stats)
   makeTable(62, 17, server2, stats);
 }
 
+enum class TopHostStatus { UP, DOWN };
+char reconnecting_animation[4] = {'|', '/', '-', '\\'};
+
 //----------------------------------------------------------------------------
-int
-main(int argc, const char **argv)
+namespace
 {
-#if HAS_CURL
-  static const char USAGE[] = "Usage: traffic_top [-s seconds] [URL|hostname|hostname:port]";
-#else
+/// Whether initscr() has run, so an exception handler knows if the terminal
+/// needs putting back. X/Open Curses does not define endwin() before a
+/// successful initscr(); ncurses returns ERR, but do not rely on that.
+bool curses_started = false;
+
+void
+restore_terminal()
+{
+  if (curses_started) {
+    endwin();
+    curses_started = false;
+  }
+}
+} // namespace
+
+int
+main([[maybe_unused]] int argc, const char **argv)
+try {
   static const char USAGE[] = "Usage: traffic_top [-s seconds]";
-#endif
 
-  int sleep_time = 6; // In seconds
-  bool absolute  = false;
-  string url;
-
-  AppVersionInfo version;
-  version.setup(PACKAGE_NAME, "traffic_top", PACKAGE_VERSION, __DATE__, __TIME__, BUILD_MACHINE, BUILD_PERSON, "");
+  int   sleep_time = 6; // In seconds
+  bool  absolute   = false;
+  auto &version    = AppVersionInfo::setup_version("traffic_top");
 
   const ArgumentDescription argument_descriptions[] = {
     {"sleep", 's', "Sets the delay between updates (in seconds)", "I", &sleep_time, nullptr, nullptr},
@@ -411,38 +416,23 @@ main(int argc, const char **argv)
 
   runroot_handler(argv);
   Layout::create();
-  RecProcessInit(RECM_STAND_ALONE, nullptr /* diags */);
-  LibRecordsConfigInit();
 
-  switch (n_file_arguments) {
-  case 0: {
-    ats_scoped_str rundir(RecConfigReadRuntimeDir());
-
-    TSMgmtError err = TSInit(rundir, static_cast<TSInitOptionT>(TS_MGMT_OPT_NO_EVENTS | TS_MGMT_OPT_NO_SOCK_TESTS));
-    if (err != TS_ERR_OKAY) {
-      fprintf(stderr, "Error: connecting to local manager: %s\n", TSGetErrorMessage(err));
-      exit(1);
-    }
-    break;
-  }
-
-  case 1:
-#if HAS_CURL
-    url = file_arguments[0];
-#else
+  if (n_file_arguments == 1) {
     usage(argument_descriptions, countof(argument_descriptions), USAGE);
-#endif
-    break;
-
-  default:
+  } else if (n_file_arguments > 1) {
     usage(argument_descriptions, countof(argument_descriptions), USAGE);
   }
 
-  Stats stats(url);
-  stats.getStats();
+  TopHostStatus host_status{TopHostStatus::DOWN};
+  Stats         stats;
+  if (stats.getStats()) {
+    host_status = TopHostStatus::UP;
+  }
+
   const string &host = stats.getHost();
 
   initscr();
+  curses_started = true;
   curs_set(0);
 
   start_color(); /* Start color functionality	*/
@@ -460,22 +450,32 @@ main(int argc, const char **argv)
     MAIN_PAGE,
     RESPONSE_PAGE,
   };
-  Page page       = MAIN_PAGE;
+  Page   page     = MAIN_PAGE;
   string page_alt = "(r)esponse";
 
+  int animation_index{0};
   while (true) {
     attron(COLOR_PAIR(colorPair::border));
     attron(A_BOLD);
 
-    string version;
-    time_t now = time(nullptr);
+    string    version;
+    time_t    now = time(nullptr);
     struct tm nowtm;
-    char timeBuf[32];
+    char      timeBuf[32];
     localtime_r(&now, &nowtm);
     strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &nowtm);
     stats.getStat("version", version);
 
-    mvprintw(23, 0, "%-20.20s   %30s (q)uit (h)elp (%c)bsolute  ", host.c_str(), page_alt.c_str(), absolute ? 'A' : 'a');
+    std::string hh;
+    if (host_status == TopHostStatus::DOWN) {
+      hh.append("connecting ");
+      hh.append(1, reconnecting_animation[animation_index % 4]);
+      ++animation_index;
+    } else {
+      hh = host;
+    }
+
+    mvprintw(23, 0, "%-20.20s   %30s (q)uit (h)elp (%c)bsolute  ", hh.c_str(), page_alt.c_str(), absolute ? 'A' : 'a');
     attroff(COLOR_PAIR(colorPair::border));
     attroff(A_BOLD);
 
@@ -507,12 +507,16 @@ main(int argc, const char **argv)
     case 'a':
       absolute = stats.toggleAbsolute();
     }
-    stats.getStats();
+    host_status = !stats.getStats() ? TopHostStatus::DOWN : TopHostStatus::UP;
     clear();
   }
 
 quit:
-  endwin();
+  restore_terminal();
 
   return 0;
+} catch (...) {
+  restore_terminal();
+  fprintf(stderr, "traffic_top: terminating on an unhandled %s\n", ts::describe_current_exception().c_str());
+  return 1;
 }

@@ -22,6 +22,10 @@
  */
 
 #include "tsmemcache.h"
+#include "iocore/net/NetVConnection.h"
+#include "iocore/net/NetProcessor.h"
+#include "tscore/ink_atomic.h"
+#include "tscore/ink_inet.h"
 
 /*
   TODO
@@ -31,19 +35,25 @@
   - cleanup creader dependency in stream_event
  */
 
-#define REALTIME_MAXDELTA 60 * 60 * 24 * 30
+#define REALTIME_MAXDELTA       60 * 60 * 24 * 30
 #define STRCMP_REST(_c, _s, _e) (((_e) - (_s)) < (int)sizeof(_c) || STRCMP(_s, _c) || !isspace((_s)[sizeof(_c) - 1]))
 
-ClassAllocator<MC> theMCAllocator("MC");
+ClassAllocator<MC, false> theMCAllocator("MC");
 
 static time_t base_day_time;
 
 // These should be persistent.
-int32_t MC::verbosity     = 0;
+int32_t    MC::verbosity  = 0;
 ink_hrtime MC::last_flush = 0;
-int64_t MC::next_cas      = 1;
 
-static void
+namespace
+{
+
+DbgCtl dbg_ctl_tsmemcache{"tsmemcache"};
+DbgCtl dbg_ctl_tsmemcache_ascii_response{"tsmemcache_ascii_response"};
+DbgCtl dbg_ctl_tsmemcache_ascii_cmd{"tsmemcache_ascii_cmd"};
+
+void
 tsmemcache_constants()
 {
   struct tm tm;
@@ -57,11 +67,11 @@ tsmemcache_constants()
 }
 
 #ifdef DEBUG
-char debug_string_buffer[TSMEMCACHE_TMP_CMD_BUFFER_SIZE];
-static char *
+char *
 mc_string(const char *s, int len)
 {
-  int l = len;
+  static char debug_string_buffer[TSMEMCACHE_TMP_CMD_BUFFER_SIZE];
+  int         l = len;
   while (l && (s[l - 1] == '\r' || s[l - 1] == '\n')) {
     l--;
   }
@@ -77,28 +87,28 @@ mc_string(const char *s, int len)
 #endif
 
 #ifdef DEBUG
-#define MCDebugBuf(_t, _s, _l) \
-  if (is_debug_tag_set(_t))    \
-  printf(_t ": %s\n", mc_string(_s, _l))
-#define MCDebug Debug
+#define MCDebugBuf(_dc, _s, _l) \
+  if ((_dc).on())               \
+  printf("%s: %s\n", (_dc).tag(), mc_string(_s, _l))
+#define MCDebug Dbg
 #else
-#define MCDebugBuf(_t, _s, _l) \
-  do {                         \
+#define MCDebugBuf(_dc, _s, _l) \
+  do {                          \
   } while (0)
 #define MCDebug \
   if (0)        \
-  Debug
+  Dbg
 #endif
 
-static uint64_t
+uint64_t
 ink_hton64(uint64_t in)
 {
-  int32_t val = 1;
-  uint8_t *c  = reinterpret_cast<uint8_t *>(&val);
+  int32_t  val = 1;
+  uint8_t *c   = reinterpret_cast<uint8_t *>(&val);
   if (*c == 1) {
     union {
       uint64_t rv;
-      uint8_t b[8];
+      uint8_t  b[8];
     } x;
 #define SWP1B(_x, _y) \
   do {                \
@@ -119,12 +129,14 @@ ink_hton64(uint64_t in)
 }
 #define ink_ntoh64 ink_hton64
 
+} // end anonymous namespace
+
 int
 MCAccept::main_event(int event, void *data)
 {
   if (event == NET_EVENT_ACCEPT) {
-    NetVConnection *netvc = (NetVConnection *)data;
-    MC *mc                = theMCAllocator.alloc();
+    NetVConnection *netvc = static_cast<NetVConnection *>(data);
+    MC             *mc    = theMCAllocator.alloc();
     if (!mutex->thread_holding) {
       mc->new_connection(netvc, netvc->thread);
     } else {
@@ -238,7 +250,7 @@ MC::add_binary_header(uint16_t err, uint8_t hdr_len, uint16_t key_len, uint32_t 
 int
 MC::write_binary_error(protocol_binary_response_status err, int swallow)
 {
-  const char *errstr = "Unknown error";
+  const char *errstr{nullptr};
   switch (err) {
   case PROTOCOL_BINARY_RESPONSE_ENOMEM:
     errstr = "Out of memory";
@@ -289,7 +301,7 @@ MC::write_binary_error(protocol_binary_response_status err, int swallow)
 }
 
 int
-MC::swallow_then_read_event(int event, void *data)
+MC::swallow_then_read_event(int /* event ATS_UNUSED */, void * /* data ATS_UNUSED */)
 {
   rvio->nbytes  = INT64_MAX;
   int64_t avail = reader->read_avail();
@@ -305,7 +317,7 @@ MC::swallow_then_read_event(int event, void *data)
 }
 
 int
-MC::swallow_cmd_then_read_from_client_event(int event, void *data)
+MC::swallow_cmd_then_read_from_client_event(int /* event ATS_UNUSED */, void * /* data ATS_UNUSED */)
 {
   int64_t avail = reader->read_avail();
   if (avail) {
@@ -373,10 +385,10 @@ MC::write_binary_response(const void *d, int hlen, int keylen, int dlen)
       binary_header.request.opcode == PROTOCOL_BINARY_CMD_GETKQ) {
     add_binary_header(0, hlen, keylen, dlen);
     if (dlen) {
-      MCDebug("tsmemcache", "response dlen %d\n", dlen);
+      MCDebug(dbg_ctl_tsmemcache, "response dlen %d\n", dlen);
       wbuf->write(d, dlen);
     } else {
-      MCDebug("tsmemcache", "no response\n");
+      MCDebug(dbg_ctl_tsmemcache, "no response\n");
     }
   }
   return writer->read_avail();
@@ -444,7 +456,7 @@ MC::cache_read_event(int event, void *data)
       goto Lfail;
     }
     {
-      ink_hrtime t = Thread::get_hrtime();
+      ink_hrtime t = ink_get_hrtime();
       if ((static_cast<ink_hrtime>(rcache_header->settime)) <= last_flush ||
           t >= (static_cast<ink_hrtime>(rcache_header->settime)) + HRTIME_SECONDS(rcache_header->exptime)) {
         goto Lfail;
@@ -537,7 +549,7 @@ MC::read_binary_from_client_event(int event, void *data)
   if (!(_e))               \
     return protocol_error();
 
-  MCDebug("tsmemcache", "bin cmd %d\n", binary_header.request.opcode);
+  MCDebug(dbg_ctl_tsmemcache, "bin cmd %d\n", binary_header.request.opcode);
   switch (binary_header.request.opcode) {
   case PROTOCOL_BINARY_CMD_VERSION:
     CHECK_PROTOCOL(extlen == 0 && keylen == 0 && bodylen == 0);
@@ -649,7 +661,7 @@ MC::ascii_response(const char *s, int len)
     wbuf->write(s, len);
     wvio->nbytes = INT64_MAX;
     wvio->reenable();
-    MCDebugBuf("tsmemcache_ascii_response", s, len);
+    MCDebugBuf(dbg_ctl_tsmemcache_ascii_response, s, len);
   }
   if (end_of_cmd > 0) {
     reader->consume(end_of_cmd);
@@ -675,7 +687,7 @@ MC::get_ascii_input(int n, int *end)
     goto Lblock;
   }
   char *c = tmp_cmd_buffer;
-  int e   = read_avail;
+  int   e = read_avail;
   if (e > n) {
     e = n;
   }
@@ -685,7 +697,7 @@ MC::get_ascii_input(int n, int *end)
 }
 
 int
-MC::ascii_get_event(int event, void *data)
+MC::ascii_get_event(int event, void * /* data ATS_UNUSED */)
 {
   switch (event) {
   case CACHE_EVENT_OPEN_READ_FAILED:
@@ -696,7 +708,7 @@ MC::ascii_get_event(int event, void *data)
     wbuf->WRITE("VALUE ");
     wbuf->write(key, header.nkey);
     wbuf->WRITE(" ");
-    char t[32], *te = t + 32;
+    char  t[32], *te = t + 32;
     char *flags = xutoa(rcache_header->flags, te);
     wbuf->write(flags, te - flags);
     wbuf->WRITE(" ");
@@ -748,7 +760,7 @@ MC::ascii_set_event(int event, void *data)
       if (header.nkey != wcache_header->nkey || hlen < static_cast<int>(sizeof(MCCacheHeader) + wcache_header->nkey)) {
         goto Lfail;
       }
-      ink_hrtime t = Thread::get_hrtime();
+      ink_hrtime t = ink_get_hrtime();
       if ((static_cast<ink_hrtime>(wcache_header->settime)) <= last_flush ||
           t >= (static_cast<ink_hrtime>(wcache_header->settime)) + HRTIME_SECONDS(wcache_header->exptime)) {
         goto Lstale;
@@ -763,7 +775,7 @@ MC::ascii_set_event(int event, void *data)
       }
     }
     memcpy(tmp_cache_header_key, key, header.nkey);
-    header.settime = Thread::get_hrtime();
+    header.settime = ink_get_hrtime();
     if (exptime) {
       if (exptime > REALTIME_MAXDELTA) {
         if (HRTIME_SECONDS(exptime) <= (static_cast<ink_hrtime>(header.settime))) {
@@ -785,7 +797,7 @@ MC::ascii_set_event(int event, void *data)
         return ASCII_RESPONSE("EXISTS");
       }
     }
-    header.cas = ink_atomic_increment(&next_cas, 1);
+    header.cas = next_cas++;
     if (f.set_append || f.set_prepend) {
       header.nbytes = nbytes + rcache_header->nbytes;
     } else {
@@ -875,7 +887,7 @@ Lfail:
 }
 
 int
-MC::ascii_delete_event(int event, void *data)
+MC::ascii_delete_event(int event, void * /* data ATS_UNUSED */)
 {
   switch (event) {
   case CACHE_EVENT_REMOVE_FAILED:
@@ -908,7 +920,7 @@ MC::ascii_incr_decr_event(int event, void *data)
         if (header.nkey != wcache_header->nkey || hlen < static_cast<int>(sizeof(MCCacheHeader) + wcache_header->nkey)) {
           goto Lfail;
         }
-        ink_hrtime t = Thread::get_hrtime();
+        ink_hrtime t = ink_get_hrtime();
         if ((static_cast<ink_hrtime>(wcache_header->settime)) <= last_flush ||
             t >= (static_cast<ink_hrtime>(wcache_header->settime)) + HRTIME_SECONDS(wcache_header->exptime)) {
           goto Lfail;
@@ -917,7 +929,7 @@ MC::ascii_incr_decr_event(int event, void *data)
         goto Lfail;
       }
       memcpy(tmp_cache_header_key, key, header.nkey);
-      header.settime = Thread::get_hrtime();
+      header.settime = ink_get_hrtime();
       if (exptime) {
         if (exptime > REALTIME_MAXDELTA) {
           if (HRTIME_SECONDS(exptime) <= (static_cast<ink_hrtime>(header.settime))) {
@@ -932,10 +944,10 @@ MC::ascii_incr_decr_event(int event, void *data)
         header.exptime = UINT32_MAX; // 136 years
       }
     }
-    header.cas = ink_atomic_increment(&next_cas, 1);
+    header.cas = next_cas++;
     {
       char *localdata = nullptr;
-      int len         = 0;
+      int   len       = 0;
       // must be huge, why convert to a counter ??
       if (cwvc->get_single_data((void **)&localdata, &len) < 0) {
         goto Lfail;
@@ -961,7 +973,7 @@ MC::ascii_incr_decr_event(int event, void *data)
       } else {
         wvio->reenable();
       }
-      MCDebugBuf("tsmemcache_ascii_response", s, e - s + 2);
+      MCDebugBuf(dbg_ctl_tsmemcache_ascii_response, s, e - s + 2);
       header.nbytes = e - s;
       cwvc->set_header(&header, header.len());
       TS_PUSH_HANDLER(&MC::stream_event);
@@ -1041,8 +1053,8 @@ MC::ascii_get(char *as, char *e)
 int
 MC::ascii_gets()
 {
-  int len = 0;
-  char *c = get_ascii_input(TSMEMCACHE_TMP_CMD_BUFFER_SIZE, &len);
+  int   len = 0;
+  char *c   = get_ascii_input(TSMEMCACHE_TMP_CMD_BUFFER_SIZE, &len);
   return ascii_get(c, c + len);
 }
 
@@ -1129,8 +1141,8 @@ MC::ascii_set(char *s, char *e)
   }
   SKIP_SPACE;
   if (*s == 'n' && !STRCMP_REST("oreply", s + 1, e)) {
-    f.noreply = 1;
-    s += 7;
+    f.noreply  = 1;
+    s         += 7;
     if (s >= e) {
       return ASCII_CLIENT_ERROR("bad command line");
     }
@@ -1162,8 +1174,8 @@ MC::ascii_delete(char *s, char *e)
   header.nkey = s - key;
   SKIP_SPACE;
   if (*s == 'n' && !STRCMP_REST("oreply", s + 1, e)) {
-    f.noreply = 1;
-    s += 7;
+    f.noreply  = 1;
+    s         += 7;
     if (s >= e) {
       return ASCII_CLIENT_ERROR("bad command line");
     }
@@ -1196,8 +1208,8 @@ MC::ascii_incr_decr(char *s, char *e)
   GET_NUM(delta);
   SKIP_SPACE;
   if (*s == 'n' && !STRCMP_REST("oreply", s + 1, e)) {
-    f.noreply = 1;
-    s += 7;
+    f.noreply  = 1;
+    s         += 7;
     if (s >= e) {
       return ASCII_CLIENT_ERROR("bad command line");
     }
@@ -1252,11 +1264,11 @@ is_noreply(char **pt, char *e)
 }
 
 int
-MC::read_ascii_from_client_event(int event, void *data)
+MC::read_ascii_from_client_event(int /* event ATS_UNUSED */, void * /* data ATS_UNUSED */)
 {
-  int len = 0;
+  int   len = 0;
   char *c = get_ascii_input(TSMEMCACHE_TMP_CMD_BUFFER_SIZE, &len), *s = c;
-  MCDebugBuf("tsmemcache_ascii_cmd", c, len);
+  MCDebugBuf(dbg_ctl_tsmemcache_ascii_cmd, c, len);
   char *e = c + len - 5; // at least 6 chars
   while (*s == ' ' && s < e) {
     s++; // skip leading spaces
@@ -1359,11 +1371,11 @@ MC::read_ascii_from_client_event(int event, void *data)
       GET_NUM(time_offset);
     }
     f.noreply                 = is_noreply(&s, e);
-    ink_hrtime new_last_flush = Thread::get_hrtime() + HRTIME_SECONDS(time_offset);
+    ink_hrtime new_last_flush = ink_get_hrtime() + HRTIME_SECONDS(time_offset);
 #if __WORDSIZE == 64
     last_flush = new_last_flush; // this will be atomic for native word size
 #else
-    ink_atomic_swap(&last_flush, new_last_flush);
+    last_flush.exchange(new_last_flush);
 #endif
     if (!is_end_of_cmd(s, e)) {
       break;
@@ -1530,7 +1542,7 @@ MC::stream_event(int event, void *data)
 int
 MC::tunnel_event(int event, void *data)
 {
-  MCDebug("tsmemcache", "tunnel %d %p crvio %p cwvio %p", event, data, crvio, cwvio);
+  MCDebug(dbg_ctl_tsmemcache, "tunnel %d %p crvio %p cwvio %p", event, data, crvio, cwvio);
   if (data == crvio) {
     switch (event) {
     case VC_EVENT_READ_READY:
@@ -1572,13 +1584,17 @@ MC::tunnel_event(int event, void *data)
 }
 
 int
-init_tsmemcache(int port)
+init_tsmemcache(int port, IpAddr const &bind_addr)
 {
   tsmemcache_constants();
   MCAccept *a = new MCAccept;
   a->mutex    = new_ProxyMutex();
   NetProcessor::AcceptOptions options(NetProcessor::DEFAULT_ACCEPT_OPTIONS);
   options.local_port = a->accept_port = port;
+  // Bind the listener to a specific address. Without this the listener binds
+  // the wildcard (0.0.0.0), exposing the unauthenticated memcache cache
+  // control surface to the network. Default is loopback (see TSPluginInit).
+  options.local_ip = bind_addr;
   netProcessor.accept(a, options);
   return 0;
 }
@@ -1593,7 +1609,17 @@ TSPluginInit(int argc, const char *argv[])
   info.vendor_name   = (char *)"ats";
   info.support_email = (char *)"jplevyak@apache.org";
 
-  int port = 11211;
+  int    port = 11211;
+  IpAddr bind_addr;
+  // Default to loopback only. Binding the wildcard address exposes the
+  // unauthenticated memcache cache surface to the network (see the Security
+  // note in doc/admin-guide/plugins/memcache.en.rst). Fail closed if even the
+  // loopback literal cannot be parsed rather than leaving local_ip unset
+  // (which would bind the wildcard address).
+  if (bind_addr.load("127.0.0.1") != 0) {
+    TSError("[tsmemcache] failed to initialize default loopback bind address\n");
+    goto error;
+  }
 
   if (TSPluginRegister(&info) != TS_SUCCESS) {
     TSError("[PluginInit] tsmemcache registration failed.\n");
@@ -1601,17 +1627,37 @@ TSPluginInit(int argc, const char *argv[])
   }
 
   if (argc < 2) {
-    TSError("[tsmemcache] Usage: tsmemcache.so [accept_port]\n");
+    TSError("[tsmemcache] Usage: tsmemcache.so <accept_port> [bind_ip]\n");
     goto error;
-  } else {
-    int port = atoi(argv[1]);
-    if (!port) {
-      TSError("[tsmemcache] bad accept_port '%s'\n", argv[1]);
+  }
+
+  port = atoi(argv[1]);
+  if (port < 1 || port > 65535) {
+    TSError("[tsmemcache] bad accept_port '%s' (must be 1-65535)\n", argv[1]);
+    goto error;
+  }
+
+  // Optional bind address (argv[2]). Default is loopback; specifying an
+  // explicit non-loopback address is the operator's deliberate opt-in to
+  // network exposure. Fail closed on a bad address rather than silently
+  // falling back to a wildcard bind.
+  if (argc >= 3) {
+    if (bind_addr.load(argv[2]) != 0) {
+      TSError("[tsmemcache] bad bind address '%s'\n", argv[2]);
       goto error;
     }
-    MCDebug("tsmemcache", "using accept_port %d", port);
   }
-  init_tsmemcache(port);
+
+  if (!bind_addr.isLoopback()) {
+    char ipbuf[INET6_ADDRSTRLEN];
+    bind_addr.toString(ipbuf, sizeof(ipbuf));
+    Warning("[tsmemcache] listening on non-loopback address %s; this memcache surface has no authentication or IpAllow - restrict "
+            "access by firewall",
+            ipbuf);
+  }
+
+  MCDebug(dbg_ctl_tsmemcache, "using accept_port %d", port);
+  init_tsmemcache(port, bind_addr);
   return;
 
 error:

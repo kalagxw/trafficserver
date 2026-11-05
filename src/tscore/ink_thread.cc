@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -32,11 +32,6 @@
 #include "tscore/ink_thread.h"
 #include "tscore/ink_atomic.h"
 
-// // ignore the compiler warning... so that this can be used
-// // in the face of changes to the Solaris header files (see "man thread")
-//
-// ink_mutex ink_mutex_initializer = INK_MUTEX_INIT;
-//
 // Put a bracketed initializer in ink_thread.h --- 9/19/96, bri
 ink_mutex ink_mutex_initializer = INK_MUTEX_INIT;
 

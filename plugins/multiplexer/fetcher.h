@@ -26,6 +26,7 @@
 #include <arpa/inet.h>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <netinet/in.h>
 
 #include <cinttypes>
@@ -42,10 +43,10 @@
 namespace ats
 {
 struct HttpParser {
-  bool parsed_ = false;
+  bool         parsed_ = false;
   TSHttpParser parser_;
-  TSMBuffer buffer_;
-  TSMLoc location_;
+  TSMBuffer    buffer_;
+  TSMLoc       location_;
 
   void destroyParser();
 
@@ -71,29 +72,21 @@ struct HttpParser {
 };
 
 template <class T> struct HttpTransaction {
-  typedef HttpTransaction<T> Self;
+  using Self = HttpTransaction<T>;
 
-  bool parsingHeaders_;
-  bool abort_;
-  bool timeout_;
-  io::IO *in_;
-  io::IO *out_;
-  TSVConn vconnection_;
-  TSCont continuation_;
-  T t_;
-  HttpParser parser_;
-  ChunkDecoder *chunkDecoder_;
+  bool                          parsingHeaders_;
+  bool                          abort_;
+  bool                          timeout_;
+  std::unique_ptr<io::IO>       in_;
+  std::unique_ptr<io::IO>       out_;
+  TSVConn                       vconnection_;
+  TSCont                        continuation_;
+  T                             t_;
+  HttpParser                    parser_;
+  std::unique_ptr<ChunkDecoder> chunkDecoder_;
 
   ~HttpTransaction()
   {
-    if (in_ != NULL) {
-      delete in_;
-      in_ = NULL;
-    }
-    if (out_ != NULL) {
-      delete out_;
-      out_ = NULL;
-    }
     timeout(0);
     assert(vconnection_ != NULL);
     if (abort_) {
@@ -103,17 +96,14 @@ template <class T> struct HttpTransaction {
     }
     assert(continuation_ != NULL);
     TSContDestroy(continuation_);
-    if (chunkDecoder_ != NULL) {
-      delete chunkDecoder_;
-    }
   }
 
-  HttpTransaction(TSVConn v, TSCont c, io::IO *const i, const uint64_t l, const T &t)
+  HttpTransaction(TSVConn v, TSCont c, std::unique_ptr<io::IO> i, const uint64_t l, const T &t)
     : parsingHeaders_(false),
       abort_(false),
       timeout_(false),
       in_(nullptr),
-      out_(i),
+      out_(std::move(i)),
       vconnection_(v),
       continuation_(c),
       t_(t),
@@ -147,10 +137,12 @@ template <class T> struct HttpTransaction {
   }
 
   static void
-  close(Self *const s)
+  close(TSCont c, Self *const s)
   {
+    assert(c != NULL);
     assert(s != NULL);
     TSVConnShutdown(s->vconnection_, 1, 0);
+    TSContDataSet(c, nullptr);
     delete s;
   }
 
@@ -159,10 +151,10 @@ template <class T> struct HttpTransaction {
   {
     assert(b != nullptr);
     assert(l != nullptr);
-    bool result        = false;
-    const TSMLoc field = TSMimeHdrFieldFind(b, l, TS_MIME_FIELD_TRANSFER_ENCODING, TS_MIME_LEN_TRANSFER_ENCODING);
+    bool         result = false;
+    const TSMLoc field  = TSMimeHdrFieldFind(b, l, TS_MIME_FIELD_TRANSFER_ENCODING, TS_MIME_LEN_TRANSFER_ENCODING);
     if (field != nullptr) {
-      int length;
+      int               length;
       const char *const value = TSMimeHdrFieldValueStringGet(b, l, field, -1, &length);
       if (value != nullptr && length == TS_HTTP_LEN_CHUNKED) {
         result = strncasecmp(value, TS_HTTP_VALUE_CHUNKED, TS_HTTP_LEN_CHUNKED) == 0;
@@ -173,29 +165,30 @@ template <class T> struct HttpTransaction {
   }
 
   static int
-  handle(TSCont c, TSEvent e, void *data)
+  handle(TSCont c, TSEvent e, void * /* data ATS_UNUSED */)
   {
+    using multiplexer_ns::dbg_ctl;
+
     Self *const self = static_cast<Self *const>(TSContDataGet(c));
     assert(self != NULL);
     switch (e) {
     case TS_EVENT_ERROR:
-      TSDebug(PLUGIN_TAG, "HttpTransaction: ERROR");
+      Dbg(dbg_ctl, "HttpTransaction: ERROR");
       self->t_.error();
       self->abort();
-      close(self);
-      TSContDataSet(c, nullptr);
+      close(c, self);
       break;
     case TS_EVENT_VCONN_EOS:
-      TSDebug(PLUGIN_TAG, "HttpTransaction: EOS");
+      Dbg(dbg_ctl, "HttpTransaction: EOS");
       goto here;
 
     case TS_EVENT_VCONN_READ_COMPLETE:
-      TSDebug(PLUGIN_TAG, "HttpTransaction: Read Complete");
+      Dbg(dbg_ctl, "HttpTransaction: Read Complete");
       goto here;
 
     case TS_EVENT_VCONN_READ_READY:
-      TSDebug(PLUGIN_TAG, "HttpTransaction: Read");
-    here : {
+      Dbg(dbg_ctl, "HttpTransaction: Read");
+    here: {
       assert(self->in_ != NULL);
       assert(self->in_->reader != NULL);
       assert(self->in_->vio != NULL);
@@ -206,69 +199,82 @@ template <class T> struct HttpTransaction {
           if (self->parser_.parse(*self->in_)) {
             if (isChunkEncoding(self->parser_.buffer_, self->parser_.location_)) {
               assert(self->chunkDecoder_ == NULL);
-              self->chunkDecoder_ = new ChunkDecoder();
+              self->chunkDecoder_ = std::make_unique<ChunkDecoder>();
             }
             self->t_.header(self->parser_.buffer_, self->parser_.location_);
             self->parsingHeaders_ = false;
           }
+          // Parsing headers will indirectly read from our reader. Update available accordingly.
+          available = TSIOBufferReaderAvail(self->in_->reader);
         }
         if (!self->parsingHeaders_) {
+          bool closed = false;
           if (self->chunkDecoder_ != NULL) {
             available = self->chunkDecoder_->decode(self->in_->reader);
-            if (available == 0) {
+            if (available < 0) {
+              self->t_.error();
+              self->abort();
+              close(c, self);
+              closed = true;
+            } else if (available == 0) {
               self->t_.data(self->in_->reader, available);
             }
-            while (available > 0) {
+            while (!closed && available > 0) {
               self->t_.data(self->in_->reader, available);
               TSIOBufferReaderConsume(self->in_->reader, available);
               available = self->chunkDecoder_->decode(self->in_->reader);
+              if (available < 0) {
+                self->t_.error();
+                self->abort();
+                close(c, self);
+                closed = true;
+              }
             }
           } else {
             self->t_.data(self->in_->reader, available);
             TSIOBufferReaderConsume(self->in_->reader, available);
           }
+          if (closed) {
+            break;
+          }
         }
       }
       if (e == TS_EVENT_VCONN_READ_COMPLETE || e == TS_EVENT_VCONN_EOS) {
         self->t_.done();
-        close(self);
-        TSContDataSet(c, nullptr);
+        close(c, self);
       } else if (self->chunkDecoder_ != NULL && self->chunkDecoder_->isEnd()) {
         assert(self->parsingHeaders_ == false);
         assert(isChunkEncoding(self->parser_.buffer_, self->parser_.location_));
         self->abort();
         self->t_.done();
-        close(self);
-        TSContDataSet(c, nullptr);
+        close(c, self);
       } else {
         TSVIOReenable(self->in_->vio);
       }
     } break;
     case TS_EVENT_VCONN_WRITE_COMPLETE:
-      TSDebug(PLUGIN_TAG, "HttpTransaction: Write Complete");
+      Dbg(dbg_ctl, "HttpTransaction: Write Complete");
       self->parsingHeaders_ = true;
       assert(self->in_ == NULL);
       self->in_ = io::IO::read(self->vconnection_, c);
       assert(self->vconnection_);
       TSVConnShutdown(self->vconnection_, 0, 1);
       assert(self->out_ != NULL);
-      delete self->out_;
-      self->out_ = NULL;
+      self->out_.reset();
       break;
     case TS_EVENT_VCONN_WRITE_READY:
-      TSDebug(PLUGIN_TAG, "HttpTransaction: Write Ready (Done: %" PRId64 " Todo: %" PRId64 ")", TSVIONDoneGet(self->out_->vio),
-              TSVIONTodoGet(self->out_->vio));
+      Dbg(dbg_ctl, "HttpTransaction: Write Ready (Done: %" PRId64 " Todo: %" PRId64 ")", TSVIONDoneGet(self->out_->vio),
+          TSVIONTodoGet(self->out_->vio));
       assert(self->out_ != NULL);
       TSVIOReenable(self->out_->vio);
       break;
     case 106:
     case TS_EVENT_TIMEOUT:
     case TS_EVENT_VCONN_INACTIVITY_TIMEOUT:
-      TSDebug(PLUGIN_TAG, "HttpTransaction: Timeout");
+      Dbg(dbg_ctl, "HttpTransaction: Timeout");
       self->t_.timeout();
       self->abort();
-      close(self);
-      TSContDataSet(c, nullptr);
+      close(c, self);
       break;
 
     default:
@@ -280,24 +286,25 @@ template <class T> struct HttpTransaction {
 
 template <class T>
 bool
-get(const std::string &a, io::IO *const i, const int64_t l, const T &t, const int64_t ti = 0)
+get(const std::string &a, std::unique_ptr<io::IO> i, const int64_t l, const T &t, const int64_t ti = 0)
 {
-  typedef HttpTransaction<T> Transaction;
+  using multiplexer_ns::dbg_ctl;
+  using Transaction = HttpTransaction<T>;
   struct sockaddr_in socket;
   socket.sin_family = AF_INET;
   socket.sin_port   = 80;
   if (!inet_pton(AF_INET, a.c_str(), &socket.sin_addr)) {
-    TSDebug(PLUGIN_TAG, "ats::get Invalid address provided \"%s\".", a.c_str());
+    Dbg(dbg_ctl, "ats::get Invalid address provided \"%s\".", a.c_str());
     return false;
   }
   TSVConn vconn = TSHttpConnect(reinterpret_cast<sockaddr *>(&socket));
   assert(vconn != nullptr);
   TSCont contp = TSContCreate(Transaction::handle, TSMutexCreate());
   assert(contp != nullptr);
-  Transaction *transaction = new Transaction(vconn, contp, i, l, t);
+  Transaction *transaction = new Transaction(vconn, contp, std::move(i), l, t);
   TSContDataSet(contp, transaction);
   if (ti > 0) {
-    TSDebug(PLUGIN_TAG, "ats::get Setting active timeout to: %" PRId64, ti);
+    Dbg(dbg_ctl, "ats::get Setting active timeout to: %" PRId64, ti);
     transaction->timeout(ti);
   }
   return true;
@@ -305,8 +312,8 @@ get(const std::string &a, io::IO *const i, const int64_t l, const T &t, const in
 
 template <class T>
 bool
-get(io::IO *const i, const int64_t l, const T &t, const int64_t ti = 0)
+get(std::unique_ptr<io::IO> i, const int64_t l, const T &t, const int64_t ti = 0)
 {
-  return get("127.0.0.1", i, l, t, ti);
+  return get("127.0.0.1", std::move(i), l, t, ti);
 }
 } // namespace ats

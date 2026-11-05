@@ -1,0 +1,320 @@
+/** @file
+
+  A brief file description
+
+  @par License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+
+#pragma once
+
+#include <atomic>
+#include <bitset>
+#include <cstdint>
+#include <limits>
+
+#include "tscore/ink_assert.h"
+#include "tscore/TimerWheel.h"
+
+#include "iocore/eventsystem/Continuation.h"
+#include "iocore/eventsystem/EThread.h"
+#include "iocore/net/NetEvent.h"
+
+//
+// NetHandler
+//
+// A NetHandler handles the Network IO operations.  It maintains
+// lists of operations at multiples of it's periodicity.
+//
+
+/**
+  NetHandler is the processor of NetEvent for the Net sub-system. The NetHandler
+  is the core component of the Net sub-system. Once started, it is responsible
+  for polling socket fds and perform the I/O tasks in NetEvent.
+
+  The NetHandler is executed periodically to perform read/write tasks for
+  NetVConnection. The NetHandler::mainNetEvent() should be viewed as a part of
+  EThread::execute() loop. This is the reason that Net System is a sub-system.
+
+  By get_NetHandler(this_ethread()), you can get the NetHandler object that
+  runs inside the current EThread and then @c startIO / @c stopIO which
+  assign/release a NetEvent to/from NetHandler. Before you call these functions,
+  holding the mutex of this NetHandler is required.
+
+  The NetVConnection provides a set of do_io functions through which you can
+  specify continuations to be called back by its NetHandler. These function
+  calls do not block. Instead they return an VIO object and schedule the
+  callback to the continuation passed in when there are I/O events occurred.
+
+  Multi-thread scheduler:
+
+  The NetHandler should be viewed as multi-threaded schedulers which process
+  NetEvents from their queues. If vc wants to be managed by NetHandler, the vc
+  should be derived from NetEvent. The vc can be made of NetProcessor
+  (allocate_vc) either by directly adding a NetEvent to the queue
+  (NetHandler::startIO), or more conveniently, calling a method service call
+  (NetProcessor::connect_re) which synthesizes the NetEvent and places it in the
+  queue.
+
+  Callback event codes:
+
+  These event codes for do_io_read and reenable(read VIO) task:
+    VC_EVENT_READ_READY, VC_EVENT_READ_COMPLETE,
+    VC_EVENT_EOS, VC_EVENT_ERROR
+
+  These event codes for do_io_write and reenable(write VIO) task:
+    VC_EVENT_WRITE_READY, VC_EVENT_WRITE_COMPLETE
+    VC_EVENT_ERROR
+
+  There is no event and callback for do_io_shutdown / do_io_close task.
+
+  NetVConnection allocation policy:
+
+  VCs are allocated by the NetProcessor and deallocated by NetHandler.
+  A state machine may access the returned, non-recurring NetEvent / VIO until
+  it is closed by do_io_close. For recurring NetEvent, the NetEvent may be
+  accessed until it is closed. Once the NetEvent is closed, it's the
+  NetHandler's responsibility to deallocate it.
+
+  Before assign to NetHandler or after release from NetHandler, it's the
+  NetEvent's responsibility to deallocate itself.
+
+ */
+class NetHandler : public Continuation, public EThread::LoopTailHandler
+{
+  using self_type = NetHandler; ///< Self reference type.
+public:
+  // @a thread and @a trigger_event are redundant - you can get the former from
+  // the latter. If we don't get rid of @a trigger_event we should remove @a
+  // thread.
+  EThread *thread        = nullptr;
+  Event   *trigger_event = nullptr;
+  QueM(NetEvent, NetState, read, ready_link) read_ready_list;
+  QueM(NetEvent, NetState, write, ready_link) write_ready_list;
+  /// Every NetEvent on this thread. Not walked for timeouts any more - the
+  /// timer wheel does that - but it is the only enumeration of all NetEvents on
+  /// the thread, and it backs startCop's double-registration assert. The wheel
+  /// cannot substitute: a NetEvent with no deadline is not scheduled in it.
+  Que(NetEvent, open_link) open_list;
+  TimerWheel<NetEvent> timer_wheel;
+  ASLLM(NetEvent, NetState, read, enable_link) read_enable_list;
+  ASLLM(NetEvent, NetState, write, enable_link) write_enable_list;
+  /// NetEvents other threads need this thread to act on; see process_handoffs().
+  ASLL(NetEvent, handoff_link) handoff_list;
+  Que(NetEvent, keep_alive_queue_link) keep_alive_queue;
+  uint32_t keep_alive_queue_size = 0;
+  Que(NetEvent, active_queue_link) active_queue;
+  uint32_t active_queue_size = 0;
+
+  /// configuration settings for managing the active and keep-alive queues
+  struct Config {
+    /// Identifies a config value, so an update can name it instead of passing a pointer.
+    /// @note The underlying type is fixed and must not be narrowed. The index arrives as
+    /// an untyped event cookie, and a value that wrapped would look like a valid index.
+    enum class Index : int {
+      MAX_CONNECTIONS_IN,
+      MAX_REQUESTS_IN,
+      DEFAULT_INACTIVITY_TIMEOUT,
+      INACTIVITY_COP_BUDGET,
+      COUNT ///< Number of config values, not a valid index.
+    };
+
+    uint32_t max_connections_in         = 0;
+    uint32_t max_requests_in            = 0;
+    uint32_t default_inactivity_timeout = 0;
+
+    /// Most timeouts one inactivity cop pass may fire before yielding.
+    ///
+    /// Tunable because it is a latency policy, not a correctness setting. A cop
+    /// pass runs on an event thread, so a pass that fires N timeouts delays that
+    /// thread's poll loop for as long as those N closes take. Reaping idle
+    /// connections is low priority work, so trading a longer total reap for
+    /// smaller slices is usually the right call: anything left over is picked up
+    /// a millisecond later rather than waiting for the next tick.
+    uint32_t inactivity_cop_budget = 4096;
+
+    /// The config value identified by @a idx.
+    uint32_t &
+    operator[](Index idx)
+    {
+      switch (idx) {
+      case Index::MAX_CONNECTIONS_IN:
+        return max_connections_in;
+      case Index::MAX_REQUESTS_IN:
+        return max_requests_in;
+      case Index::DEFAULT_INACTIVITY_TIMEOUT:
+        return default_inactivity_timeout;
+      case Index::INACTIVITY_COP_BUDGET:
+        return inactivity_cop_budget;
+      case Index::COUNT:
+        break;
+      }
+      ink_release_assert(!"invalid NetHandler::Config index");
+      return max_connections_in;
+    }
+  };
+
+  /** Static global config, set and updated per process.
+
+      This is updated asynchronously and then events are sent to the NetHandler
+     instances per thread to copy to the per thread config at a convenient time.
+     Because these are updated independently from the command line, the update
+     events just copy a single value from the global to the local. This
+     mechanism relies on members being identical types.
+  */
+  static Config global_config;
+  Config        config; ///< Per thread copy of the @c global_config
+  // Active and keep alive queue values that depend on other configuration
+  // values. These are never updated directly, they are computed from other
+  // config values.
+  uint32_t max_connections_per_thread_in = 0;
+  uint32_t max_requests_per_thread_in    = 0;
+  /// Number of configuration items in @c Config.
+  static constexpr int CONFIG_ITEM_COUNT = static_cast<int>(Config::Index::COUNT);
+  /// Which members of @c Config the per thread values depend on.
+  /// If one of these is updated, the per thread values must also be updated.
+  static const std::bitset<CONFIG_ITEM_COUNT> config_value_affects_per_thread_value;
+  /// Set of thread types in which nethandlers are active.
+  /// This enables signaling the correct instances when the configuration is
+  /// updated. Event type threads that use @c NetHandler must set the
+  /// corresponding bit.
+  static std::bitset<std::numeric_limits<unsigned int>::digits> active_thread_types;
+
+  int        mainNetEvent(int event, Event *data);
+  int        waitForActivity(ink_hrtime timeout) override;
+  void       process_enabled_list();
+  void       process_handoffs();
+  void       process_ready_list();
+  void       manage_keep_alive_queue();
+  bool       manage_active_queue(NetEvent *ne, bool ignore_queue_size);
+  void       add_to_keep_alive_queue(NetEvent *ne);
+  void       remove_from_keep_alive_queue(NetEvent *ne);
+  bool       add_to_active_queue(NetEvent *ne);
+  void       remove_from_active_queue(NetEvent *ne);
+  static int get_additional_accepts();
+  static int get_per_client_max_connections_in();
+
+  /// Per process initialization logic.
+  static void init_for_process();
+  /// Update configuration values that are per thread and depend on other
+  /// configuration values.
+  void configure_per_thread_values();
+
+  /**
+    Start to handle read & write event on a NetEvent.
+    Initial the socket fd of ne for polling system.
+    Only be called when holding the mutex of this NetHandler.
+
+    @param ne NetEvent to be managed by this NetHandler.
+    @return 0 on success, ne->nh set to this NetHandler.
+            -ERRNO on failure.
+   */
+  int startIO(NetEvent *ne);
+  /**
+    Stop to handle read & write event on a NetEvent.
+    Remove the socket fd of ne from polling system.
+    Only be called when holding the mutex of this NetHandler and must call
+    stopCop(ne) first.
+
+    @param ne NetEvent to be released.
+    @post @a ne has its @c nh pointer set to nullptr.
+   */
+  void stopIO(NetEvent *ne);
+
+  /**
+    Start to handle active timeout and inactivity timeout on a NetEvent.
+    Put the ne into open_list and schedule it in the timer wheel. Only be
+    called when holding the mutex of this NetHandler and must call startIO(ne)
+    first.
+
+    @param ne NetEvent to be managed for timeouts.
+   */
+  void startCop(NetEvent *ne);
+  /**
+    Stop to handle active timeout and inactivity on a NetEvent.
+    Remove the ne from open_list and cancel it in the timer wheel.
+    Also remove the ne from keep_alive_queue and active_queue if its context is
+    IN. Only be called when holding the mutex of this NetHandler.
+
+    @param ne NetEvent to be released.
+   */
+  void stopCop(NetEvent *ne);
+
+  /** Re-arm @a ne's slot in the timer wheel from its current deadline fields.
+   *
+   * Must be called after any change that makes @a ne's deadline earlier. Owning
+   * thread only; other threads go through NetEvent::rearm_timer(), which hands
+   * the re-arm over with defer_rearm().
+   */
+  void rearm_timer(NetEvent *ne);
+
+  /** Ask this handler's thread to re-arm @a ne on its next loop.
+   *
+   * Safe from any thread. The deadline is re-read when the owner gets to it, so
+   * any number of changes before then cost one re-arm.
+   */
+  void defer_rearm(NetEvent *ne);
+
+  /** Mark @a ne closed from a thread other than this handler's, and hand it to
+   * this thread to free.
+   *
+   * Only the owning thread may touch the timer wheel, so a foreign close can
+   * neither unschedule nor free @a ne. Without this it would sit at its old
+   * deadline, or forever if it had none. @a ne is claimed before it is marked
+   * closed, so the owner cannot free it while this is still using it; the caller
+   * must not touch @a ne once this returns.
+   *
+   * @param[in] ne The event to close; ownership passes to this handler's thread.
+   * @param[in] closed_value The value to store in NetEvent::closed.
+   */
+  void close_from_foreign_thread(NetEvent *ne, int closed_value);
+
+  /// The single source of truth for @a ne's next deadline: the non-zero minimum
+  /// of its inactivity and activity deadlines, or 0 if neither is set. Also used
+  /// by InactivityCop's wheel fire functor to agree with what armed the element.
+  ink_hrtime _earliest_deadline(NetEvent *ne) const;
+
+  // Signal the epoll_wait to terminate.
+  void signalActivity() override;
+
+  /**
+    Release a ne and free it.
+
+    @param ne NetEvent to be detached.
+   */
+  void free_netevent(NetEvent *ne);
+
+  NetHandler();
+
+  inline static DbgCtl dbg_ctl_socket{"socket"};
+  inline static DbgCtl dbg_ctl_iocore_net{"iocore_net"};
+
+private:
+  // The following settings are used potentially by accept threads. These are
+  // shared across threads via std::atomic rather than being pulled through a
+  // TS_EVENT_MGMT_UPDATE event like with the Config settings above because
+  // accept threads are not always on a standard NET thread with a NetHandler
+  // that has TS_EVENT_MGMT_UPDATE handling logic.
+  static std::atomic<int32_t>  additional_accepts;
+  static std::atomic<uint32_t> per_client_max_connections_in;
+
+  void _close_ne(NetEvent *ne, ink_hrtime now, int &handle_event, int &closed, int &total_idle_time, int &total_idle_count);
+
+  /// Static method used as the callback for runtime configuration updates.
+  static int update_nethandler_config(const char *name, RecDataT, RecData data, void *);
+};

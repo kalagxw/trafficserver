@@ -8,6 +8,7 @@
  */
 
 #pragma once
+#include <algorithm>
 #include <limits>
 #include <functional>
 
@@ -16,42 +17,82 @@
 #include "swoc/RBTree.h"
 #include "swoc/MemArena.h"
 
+
 namespace swoc { inline namespace SWOC_VERSION_NS {
 namespace detail {
 
 /// A set of metafunctions to get extrema from a metric type.
 /// These probe for a static member and falls back to @c std::numeric_limits.
 /// @{
+
+/** Maximum value.
+ *
+ * @tparam M Metric type.
+ * @return Maximum value for @a M.
+ *
+ * Use @c std::numeric_limits.
+ */
 template <typename M>
 constexpr auto
 maximum(meta::CaseTag<0>) -> M {
   return std::numeric_limits<M>::max();
 }
 
+/** Maximum value.
+ *
+ * @tparam M Metric type.
+ * @return Maximum value for @a M.
+ *
+ * Use @c M::MAX
+ */
 template <typename M>
 constexpr auto
 maximum(meta::CaseTag<1>) -> decltype(M::MAX) {
   return M::MAX;
 }
 
+/** Maximum value.
+ *
+ * @tparam M Metric type.
+ * @return Maximum value for @a M.
+ */
 template <typename M>
 constexpr M
 maximum() {
   return maximum<M>(meta::CaseArg);
 }
 
+/** Minimum value.
+ *
+ * @tparam M Metric type.
+ * @return Minimum value for @a M
+ *
+ * Use @c std::numeric_limits
+ */
 template <typename M>
 constexpr auto
 minimum(meta::CaseTag<0>) -> M {
   return std::numeric_limits<M>::min();
 }
 
+/** Minimum value.
+ *
+ * @tparam M Metric type.
+ * @return Minimum value for @a M
+ *
+ * Use @c M::MIN
+ */
 template <typename M>
 constexpr auto
 minimum(meta::CaseTag<1>) -> decltype(M::MIN) {
   return M::MIN;
 }
 
+/** Minimum value.
+ *
+ * @tparam M Metric type.
+ * @return Minimum value for @a M
+ */
 template <typename M>
 constexpr M
 minimum() {
@@ -88,7 +129,7 @@ enum class DiscreteRangeEdgeRelation : uint8_t {
    - have value semantics
    - have minimum and maximum values either
      - members @c MIN and @c MAX that define static instances
-     - support @c std::numeric_limits<T>
+     - @c std::numeric_limits<T> support.
 
    The interval is always an inclusive (closed) contiguous interval,
    defined by the minimum and maximum values contained in the interval.
@@ -108,7 +149,7 @@ public:
   using EdgeRelation = DiscreteRangeEdgeRelation; ///< Import type for convenience.
 
   /** Default constructor.
-      An invalid (empty) range is constructed.
+   * An invalid (empty) range is constructed.
    */
   constexpr DiscreteRange() : _min(detail::maximum<T>()), _max(detail::minimum<T>()) {}
 
@@ -135,109 +176,139 @@ public:
    */
   bool empty() const;
 
+  /** Update the range.
+   *
+   * @param min New minimum value.
+   * @param max New maximum value.
+   * @return @a this.
+   */
   self_type &assign(metric_type const &min, metric_type const &max);
 
-  /// Set the interval to be a singleton.
-  self_type &assign(metric_type const &singleton);
+  /** Update the range.
+   *
+   * @param value The new minimum and maximum value.
+   * @return @a this.
+   *
+   * The range will contain the single value @a value.
+   */
+  self_type &assign(metric_type const &value);
 
+  /** Update the minimum value.
+   *
+   * @param min The new minimum value.
+   * @return @a this.
+   *
+   * @note No checks are done - this can result in an empty range.
+   */
   self_type &assign_min(metric_type const &min);
 
+  /** Update the maximum value.
+   *
+   * @param max The new maximum value.
+   * @return @a this.
+   *
+   * @note No checks are done - this can result in an empty range.
+   */
   self_type &assign_max(metric_type const &max);
 
   /** Decrement the maximum value.
    *
    * @return @a this.
+   *
+   * @note No checks are done, the caller must ensure it is valid to decremented the current maximum.
    */
-  self_type &
-  clip_max() {
-    --_max;
-    return *this;
-  }
+  self_type &clip_max();
 
-  /** Get the minimum value in the interval.
-      @note The return value is unspecified if the interval is empty.
+  /** Minimum value.
+   * @return the minimum value in the range.
+   * @note The return value is unspecified if the interval is empty.
    */
   metric_type const &min() const;
 
-  /** Get the maximum value in the interval.
-      @note The return value is unspecified if the interval is empty.
+  /** Maximum value.
+   * @return The maximum value in the range.
+   * @note The return value is unspecified if the interval is empty.
    */
   metric_type const &max() const;
 
-  /// Test for equality.
-  bool
-  operator==(self_type const &that) const {
-    return _min == that._min && _max == that._max;
-  }
+  /// Equality.
+  bool operator==(self_type const &that) const;
 
-  /// Test for inequality.
-  bool
-  operator!=(self_type const &that) const {
-    return _min != that._min | _max != that._max;
-  }
+  /// Inequality.
+  bool operator!=(self_type const &that) const;
 
   /** Check if a value is in @a this range.
    *
-   * @param m Metric value to check.
-   * @return @c true if @a m is in the range, @c false if not.
+   * @param value Metric value to check.
+   * @return @c true if @a value is in the range, @c false if not.
    */
-  bool
-  contains(metric_type const &m) const {
-    return _min <= m && m <= _max;
-  }
+  bool contains(metric_type const &value) const;
 
-  /** Logical intersection test for two intervals.
-      @return @c true if there is at least one common value in the
-      two intervals, @c false otherwise.
-  */
+  /** Logical intersection.
+   * @return @c true if there is at least one common value in the two intervals, @c false otherwise.
+   */
   bool has_intersection_with(self_type const &that) const;
 
   /** Compute the intersection of two intervals
-      @return The interval consisting of values that are contained by
-      both intervals. This may be the empty interval if the intervals
-      are disjoint.
-      @internal Co-variant
+   *
+   * @return The interval consisting of values that are contained by both intervals. The return range
+   * is empty if the intervals are disjoint.
+   *
+   * @internal Co-variant
    */
   self_type intersection(self_type const &that) const;
 
   /** Test for adjacency.
-      @return @c true if the intervals are adjacent.
-      @note Only disjoint intervals can be adjacent.
+   * @return @c true if the intervals are adjacent.
+   * @note Only disjoint intervals can be adjacent.
    */
   bool is_adjacent_to(self_type const &that) const;
 
-  /** Test for @a this being adjacent on the left of @a that.
+  /** Lower adjacency.
    *
    * @param that Range to check for adjacency.
-   * @return @c true if @a this ends exactly the value before @a that begins.
+   * @return @c true if @a this and @ta that are adjacent and @a this is less than @a that.
    */
   bool is_left_adjacent_to(self_type const &that) const;
 
-  //! Test if the union of two intervals is also an interval.
+  /** Valid union.
+   *
+   * @param that Range to compare.
+   *
+   * @return @a true if the hull of @a this and @a that contains only elements that are also in
+   * @a this or @a that.
+   */
   bool has_union(self_type const &that) const;
 
-  /** Test if an interval is a superset of or equal to another.
-      @return @c true if every value in @c that is also in @c this.
+  /** Superset test.
+   *
+   * @return @c true if every value in @c that is also in @c this.
    */
   bool is_superset_of(self_type const &that) const;
 
-  /** Test if an interval is a subset or equal to another.
-      @return @c true if every value in @c this is also in @c that.
+  /** Subset test.
+   *
+   *  @return @c true if every value in @c this is also in @c that.
    */
   bool is_subset_of(self_type const &that) const;
 
-  /** Test if an interval is a strict superset of another.
-      @return @c true if @c this is strictly a superset of @a rhs.
+  /** Strict superset test.
+   *
+   * @return @c true if @a this contains every value in @a this and @a this has at least one value not
+   * in @a that.
    */
   bool is_strict_superset_of(self_type const &that) const;
 
-  /** Test if an interval is a strict subset of another.
-      @return @c true if @c this is strictly a subset of @a that.
+  /** Strict subset test.
+   *
+   * @return @c true if @a that contains every value in @a this and @a that has at least one value not
+   * in @a this.
    */
   bool is_strict_subset_of(self_type const &that) const;
 
-  /** Determine the relationship between @c this and @a that interval.
-      @return The relationship type.
+  /** Generic relationship.
+   *
+   * @return The relationship between @a this and @a that.
    */
   Relation relationship(self_type const &that) const;
 
@@ -253,18 +324,11 @@ public:
    * - OVLP: @a that left edge is inside @a this.
    * - NONE: @a that left edge is left of @a this.
    */
-  EdgeRelation
-  left_edge_relationship(self_type const &that) const {
-    if (_max < that._max) {
-      return ++metric_type(_max) < that._max ? EdgeRelation::GAP : EdgeRelation::ADJ;
-    }
-    return _min >= that._min ? EdgeRelation::NONE : EdgeRelation::OVLP;
-  }
+  EdgeRelation left_edge_relationship(self_type const &that) const;
 
-  /** Compute the convex hull of this interval and another one.
-      @return The smallest interval that is a superset of @c this
-      and @a that interval.
-      @internal Co-variant
+  /** Convex hull.
+   * @return The smallest interval that is a superset of @c this and @a that.
+   * @internal Co-variant
    */
   self_type hull(self_type const &that) const;
 
@@ -274,36 +338,32 @@ public:
   /** Test for empty, operator form.
       @return @c true if the interval is empty, @c false otherwise.
    */
-  bool
-  operator!() const {
-    return _min > _max;
-  }
+  bool operator!() const;
 
   /** Test for non-empty.
    *
    * @return @c true if there values in the range, @c false if no values in the range.
    */
-  explicit operator bool() const { return _min <= _max; }
+  explicit operator bool() const;
 
-  /// @return @c true if the range is maximal, @c false otherwise.
+  /** Maximality.
+   * @return @c true if this range contains every value.
+   */
   bool is_maximal() const;
 
   /** Clip interval.
-      Remove all element in @c this interval not in @a that interval.
+   *  Remove all element in @c this interval not in @a that interval.
    */
   self_type &operator&=(self_type const &that);
 
   /** Convex hull.
-      Extend interval to cover all elements in @c this and @a that.
+   * Minimally extend @a this to cover all elements in @c this and @a that.
+   * @return @a this.
    */
   self_type &operator|=(self_type const &that);
 
-  self_type &
-  clear() {
-    _min = detail::maximum<T>();
-    _max = detail::minimum<T>();
-    return *this;
-  }
+  /// Make the range empty.
+  self_type &clear();
 
   /** Functor for lexicographic ordering.
       If, for some reason, an interval needs to be put in a container
@@ -320,14 +380,57 @@ public:
       of the overall tuples.
    */
   struct lexicographic_order {
-    using first_argument_type = self_type;
+    using first_argument_type  = self_type;
     using second_argument_type = self_type;
-    using result_type = bool;
+    using result_type          = bool;
 
     //! Functor operator.
     bool operator()(self_type const &lhs, self_type const &rhs) const;
   };
 };
+
+template <typename T>
+bool
+DiscreteRange<T>::operator==(DiscreteRange::self_type const &that) const {
+  return _min == that._min && _max == that._max;
+}
+
+template <typename T>
+bool
+DiscreteRange<T>::operator!=(DiscreteRange::self_type const &that) const {
+  return _min != that._min | _max != that._max;
+}
+
+template <typename T>
+auto
+DiscreteRange<T>::clip_max() -> self_type & {
+  --_max;
+  return *this;
+}
+
+template <typename T>
+bool
+DiscreteRange<T>::operator!() const {
+  return _min > _max;
+}
+
+template <typename T> DiscreteRange<T>::operator bool() const {
+  return _min <= _max;
+}
+
+template <typename T>
+bool
+DiscreteRange<T>::contains(metric_type const &value) const {
+  return _min <= value && value <= _max;
+}
+
+template <typename T>
+auto
+DiscreteRange<T>::clear() -> self_type & {
+  _min = detail::maximum<T>();
+  _max = detail::minimum<T>();
+  return *this;
+}
 
 template <typename T>
 bool
@@ -351,10 +454,19 @@ DiscreteRange<T>::hull(DiscreteRange::self_type const &that) const {
 }
 
 template <typename T>
-typename DiscreteRange<T>::Relation
-DiscreteRange<T>::relationship(self_type const &that) const {
+auto
+DiscreteRange<T>::left_edge_relationship(self_type const &that) const -> EdgeRelation {
+  if (_max < that._max) {
+    return ++metric_type(_max) < that._max ? EdgeRelation::GAP : EdgeRelation::ADJ;
+  }
+  return _min >= that._min ? EdgeRelation::NONE : EdgeRelation::OVLP;
+}
+
+template <typename T>
+auto
+DiscreteRange<T>::relationship(self_type const &that) const -> Relation {
   Relation retval = Relation::NONE;
-  if (this->has_intersection(that)) {
+  if (this->has_intersection_with(that)) {
     if (*this == that)
       retval = Relation::EQUAL;
     else if (this->is_subset_of(that))
@@ -458,7 +570,7 @@ DiscreteRange<T>::max() const {
 template <typename T>
 bool
 DiscreteRange<T>::has_union(DiscreteRange::self_type const &that) const {
-  return this->has_intersection(that) || this->is_adjacent_to(that);
+  return this->has_intersection_with(that) || this->is_adjacent_to(that);
 }
 
 template <typename T>
@@ -495,7 +607,8 @@ DiscreteRange<T>::is_left_adjacent_to(DiscreteRange::self_type const &that) cons
    * T has a modulus and not depend on ++t > t always being true. However, we know that if t1 >
    * t0 then ++t0 > t0.
    */
-  return _max < that._min && ++metric_type(_max) == that._min;
+  metric_type max(_max); // some built in integer types don't support increment on rvalues.
+  return _max < that._min && ++max == that._min;
 }
 
 template <typename T>
@@ -504,10 +617,6 @@ DiscreteRange<T>::intersection(DiscreteRange::self_type const &that) const {
   return {std::max(_min, that._min), std::min(_max, that._max)};
 }
 
-/** Equality.
-    Two intervals are equal if their min and max values are equal.
-    @relates DiscreteRange
- */
 template <typename T>
 bool
 operator==(DiscreteRange<T> const &lhs, DiscreteRange<T> const &rhs) {
@@ -537,7 +646,7 @@ operator!=(DiscreteRange<T> const &lhs, DiscreteRange<T> const &rhs) {
 template <typename T>
 bool
 operator^(DiscreteRange<T> const &lhs, DiscreteRange<T> const &rhs) {
-  return lhs.has_intersection(rhs);
+  return lhs.has_intersection_with(rhs);
 }
 
 /** Containment ordering.
@@ -610,7 +719,7 @@ protected:
     using super_type = detail::RBNode; ///< Parent class.
     friend class DiscreteSpace;
 
-    range_type _range;  ///< Range covered by this node.
+    range_type _range;  ///< Range covered by this node (in the IntrusiveDList).
     range_type _hull;   ///< Range covered by subtree rooted at this node.
     PAYLOAD _payload{}; ///< Default constructor, should zero init if @c PAYLOAD is a pointer.
 
@@ -649,16 +758,22 @@ protected:
     }
 
     self_type &
-    assign_min(METRIC const &m) {
+    assign_min(METRIC const &m, bool update_tree = true) {
       _range.assign_min(m);
-      this->ripple_structure_fixup();
+      if (update_tree)
+      {
+        this->ripple_structure_fixup();
+      }
       return *this;
     }
 
     self_type &
-    assign_max(METRIC const &m) {
+    assign_max(METRIC const &m, bool update_tree = true) {
       _range.assign_max(m);
-      this->ripple_structure_fixup();
+      if (update_tree)
+      {
+        this->ripple_structure_fixup();
+      }
       return *this;
     }
 
@@ -721,15 +836,33 @@ public:
 
   ~DiscreteSpace();
 
+  /** Mark ranges in one operation.
+   *
+   * @param marks Vector of ranges and payloads to mark.
+   * @param is_sorted @c true if input is sorted, @c false if not. Assumes not sorted.
+   * @return @a this
+   */
+   self_type &mark_bulk(std::vector<std::pair<range_type, PAYLOAD>> &marks, bool is_sorted = false);
+
+   /** Mark ranges in one operation.
+    *
+    * @param start Pointer to the first range/payload pair.
+    * @param n Number of pairs.
+    * @param is_sorted @c true if input is sorted, @c false if not. Assumes not sorted.
+    * @return @a this
+    */
+   self_type &mark_bulk(std::pair<range_type, PAYLOAD>* start, size_t n, bool is_sorted = false);
+
   /** Set the @a payload for a @a range
    *
    * @param range Range to mark.
    * @param payload Payload to set.
+   * @param update_tree @c true to update the RBTree structure.
    * @return @a this
    *
    * Values in @a range are set to @a payload regardless of the current state.
    */
-  self_type &mark(range_type const &range, PAYLOAD const &payload);
+  self_type &mark(range_type const &range, PAYLOAD const &payload, bool update_tree = true);
 
   /** Erase a @a range.
    *
@@ -773,71 +906,134 @@ public:
   /** Find the payload at @a metric.
    *
    * @param metric The metric for which to search.
-   * @return The payload for @a metric if found, @c nullptr if not found.
+   * @return An iterator for the item or the @c end iterator if not.
    */
   iterator find(METRIC const &metric);
+
+  /** Find the payload at @a metric.
+   *
+   * @param metric The metric for which to search.
+   * @return An iterator for the item or the @c end iterator if not.
+   */
+  const_iterator find(METRIC const &metric) const;
+
+  /** Lower bound.
+   *
+   * @param m Search value.
+   * @return Rightmost range that starts at or before @a m.
+   */
+  iterator lower_bound(METRIC const &m);
+
+  /** Upper bound.
+   *
+   * @param m search value
+   * @return Leftmost range that starts after @a m.
+   */
+  iterator upper_bound(METRIC const &m);
+
+  /** Intersection of @a range with container.
+   *
+   * @param range Search range.
+   * @return Iterator pair that contains all ranges that intersect with @a range.
+   *
+   * @see lower_bound
+   * @see upper_bound
+   */
+  std::pair<iterator, iterator> intersection(range_type const &range);
 
   /// @return The number of distinct ranges.
   size_t count() const;
 
+  /// @return @c true if there are no ranges in the container, @c false otherwise.
+  bool empty() const;
+
+  /// @return Iterator for the first range.
   iterator
   begin() {
     return _list.begin();
   }
-
+  /// @return Iterator past the last node.
   iterator
   end() {
     return _list.end();
   }
-
-  /// Remove all ranges.
-  void
-  clear() {
-    for (auto &node : _list) {
-      std::destroy_at(&node.payload());
-    }
-    _list.clear();
-    _root = nullptr;
-    _arena.clear();
-    _fa.clear();
+  /// @return Iterator for the first range.
+  const_iterator
+  begin() const {
+    return _list.begin();
+  }
+  /// @return Iterator past the last node.
+  const_iterator
+  end() const {
+    return _list.end();
   }
 
+  /// Remove all ranges.
+  void clear();
+
 protected:
-  /** Find the lower bound range for @a target.
+  /** Find the lower bounding node.
    *
-   * @param target Lower bound value.
+   * @param target Search value.
    * @return The rightmost range that starts at or before @a target, or @c nullptr if all ranges start
    * after @a target.
    */
-  Node *lower_bound(METRIC const &target);
+  Node *lower_node(METRIC const &target);
 
-  /// @return The first node in the tree.
+  /** Find the upper bound node.
+   *
+   * @param target Search value.
+   * @return The leftmoswt range that starts after @a target, or @c nullptr if all ranges start
+   * before @a target.
+   */
+  Node *upper_node(METRIC const &target);
+
+  /// @return First node in the tree.
   Node *head();
+
+  /// @return Last node in the tree.
+  Node *tail();
 
   /** Insert @a node before @a spot.
    *
    * @param spot Target node.
    * @param node Node to insert.
+   * @param update_tree @c true to update the RBTree structure.
    */
-  void insert_before(Node *spot, Node *node);
+  void insert_before(Node *spot, Node *node, bool update_tree = true);
 
   /** Insert @a node after @a spot.
    *
    * @param spot Target node.
    * @param node Node to insert.
+   * @param update_tree @c true to update the RBTree structure.
    */
-  void insert_after(Node *spot, Node *node);
+  void insert_after(Node *spot, Node *node, bool update_tree = true);
 
-  void prepend(Node *node);
+  /** Add @a node to tree as the first element.
+   *
+   * @param node Node to prepend.
+   * @param update_tree @c true to update the RBTree structure.
+   *
+   * Invariant - @a node is first in order.
+   */
+  void prepend(Node *node, bool update_tree = true);
 
-  void append(Node *node);
+  /** Add @a node to tree as the last node.
+   *
+   * @param node Node to append.
+   * @param update_tree @c true to update the RBTree structure.
+   *
+   * Invariant - @a node is last in order.
+   */
+  void append(Node *node, bool update_tree = true);
 
-  void
-  remove(Node *node) {
-    _root = static_cast<Node *>(node->remove());
-    _list.erase(node);
-    _fa.destroy(node);
-  }
+  /** Remove node from container and update container.
+   *
+   * @param node Node to remove.
+   * @param update_tree @c true to update the RBTree structure.
+   */
+  void remove(Node *node, bool update_tree = true);
 };
 
 // ---
@@ -879,6 +1075,8 @@ DiscreteSpace<METRIC, PAYLOAD>::Node::structure_fixup() {
 }
 
 // ---
+// Discrete Space
+// ---
 
 template <typename METRIC, typename PAYLOAD> DiscreteSpace<METRIC, PAYLOAD>::~DiscreteSpace() {
   // Destruct all the payloads - the nodes themselves are in the arena and disappear with it.
@@ -894,9 +1092,21 @@ DiscreteSpace<METRIC, PAYLOAD>::count() const {
 }
 
 template <typename METRIC, typename PAYLOAD>
+bool
+DiscreteSpace<METRIC, PAYLOAD>::empty() const {
+  return _list.empty();
+}
+
+template <typename METRIC, typename PAYLOAD>
 auto
 DiscreteSpace<METRIC, PAYLOAD>::head() -> Node * {
   return static_cast<Node *>(_list.head());
+}
+
+template <typename METRIC, typename PAYLOAD>
+auto
+DiscreteSpace<METRIC, PAYLOAD>::tail() -> Node * {
+  return static_cast<Node *>(_list.tail());
 }
 
 template <typename METRIC, typename PAYLOAD>
@@ -925,7 +1135,13 @@ DiscreteSpace<METRIC, PAYLOAD>::find(METRIC const &metric) -> iterator {
 
 template <typename METRIC, typename PAYLOAD>
 auto
-DiscreteSpace<METRIC, PAYLOAD>::lower_bound(METRIC const &target) -> Node * {
+DiscreteSpace<METRIC, PAYLOAD>::find(METRIC const &metric) const -> const_iterator {
+  return const_cast<self_type *>(this)->find(metric);
+}
+
+template <typename METRIC, typename PAYLOAD>
+auto
+DiscreteSpace<METRIC, PAYLOAD>::lower_node(METRIC const &target) -> Node * {
   Node *n    = _root;   // current node to test.
   Node *zret = nullptr; // best node so far.
 
@@ -950,64 +1166,169 @@ DiscreteSpace<METRIC, PAYLOAD>::lower_bound(METRIC const &target) -> Node * {
 }
 
 template <typename METRIC, typename PAYLOAD>
-void
-DiscreteSpace<METRIC, PAYLOAD>::prepend(DiscreteSpace::Node *node) {
-  if (!_root) {
-    _root = node;
-  } else {
-    _root = static_cast<Node *>(_list.head()->set_child(node, Direction::LEFT)->rebalance_after_insert());
+auto
+DiscreteSpace<METRIC, PAYLOAD>::upper_node(METRIC const &target) -> Node * {
+  Node *n    = _root;   // current node to test.
+  Node *zret = nullptr; // best node so far.
+
+  // Fast check if there is no range past @a target.
+  if (auto ln = _list.tail(); ln == nullptr || ln->min() <= target) {
+    return nullptr;
   }
+
+  while (n) {
+    if (target > n->min()) {
+      n = right(n);
+    } else {
+      zret = n; // this is a better candidate.
+      if (n->min() > target) {
+        n = left(n);
+      } else {
+        break;
+      }
+    }
+  }
+
+  // Must be past any intersecting range due to STL iteration being half open.
+  if (zret && (zret->min() <= target)) {
+    zret = next(zret);
+  }
+
+  return zret;
+}
+
+template <typename METRIC, typename PAYLOAD>
+auto
+DiscreteSpace<METRIC, PAYLOAD>::lower_bound(METRIC const &m) -> iterator {
+  auto n = this->lower_node(m);
+  return n ? iterator(n) : this->end();
+}
+
+template <typename METRIC, typename PAYLOAD>
+auto
+DiscreteSpace<METRIC, PAYLOAD>::upper_bound(METRIC const &m) -> iterator {
+  auto n = this->upper_node(m);
+  return n ? iterator(n) : this->end();
+}
+
+template <typename METRIC, typename PAYLOAD>
+auto
+DiscreteSpace<METRIC, PAYLOAD>::intersection(DiscreteSpace::range_type const &range) -> std::pair<iterator, iterator> {
+  // Quick checks for null intersection
+  if (this->head() == nullptr ||                  // empty
+      this->head()->_range.min() > range.max() || // before first range
+      this->tail()->_range.max() < range.min()    // after last range
+  ) {
+    return {this->end(), this->end()};
+  }
+  // Invariant - the search range intersects the convex hull of the ranges. This doesn't require the search
+  // range to intersect any of the actual ranges.
+
+  auto *lower = this->lower_node(range.min());
+  auto *upper = this->upper_node(range.max());
+
+  if (lower == nullptr) {
+    lower = this->head();
+  } else if (lower->_range.max() < range.min()) {
+    lower = next(lower);                     // lower is before @a range so @c next must be at or past.
+    if (lower->_range.min() > range.max()) { // @a range is in an uncolored gap.
+      return {this->end(), this->end()};
+    }
+  }
+
+  return {_list.iterator_for(lower), upper ? _list.iterator_for(upper) : this->end()};
+}
+
+template <typename METRIC, typename PAYLOAD>
+void
+DiscreteSpace<METRIC, PAYLOAD>::prepend(DiscreteSpace::Node *node, bool update_tree) {
+
+  if (update_tree) {
+    if (!_root) {
+      _root = node;
+    } else {
+      _root = static_cast<Node *>(_list.head()->set_child(node, Direction::LEFT)->rebalance_after_insert());
+    }
+  }
+
   _list.prepend(node);
 }
 
 template <typename METRIC, typename PAYLOAD>
 void
-DiscreteSpace<METRIC, PAYLOAD>::append(DiscreteSpace::Node *node) {
-  if (!_root) {
-    _root = node;
-  } else {
-    // The last node has no right child, or it wouldn't be the last.
-    _root = static_cast<Node *>(_list.tail()->set_child(node, Direction::RIGHT)->rebalance_after_insert());
+DiscreteSpace<METRIC, PAYLOAD>::append(DiscreteSpace::Node *node, bool update_tree) {
+
+  if (update_tree) {
+    if (!_root) {
+      _root = node;
+    } else {
+      // The last node has no right child, or it wouldn't be the last.
+      _root = static_cast<Node *>(_list.tail()->set_child(node, Direction::RIGHT)->rebalance_after_insert());
+    }
   }
+
   _list.append(node);
 }
 
 template <typename METRIC, typename PAYLOAD>
 void
-DiscreteSpace<METRIC, PAYLOAD>::insert_before(DiscreteSpace::Node *spot, DiscreteSpace::Node *node) {
-  if (left(spot) == nullptr) {
-    spot->set_child(node, Direction::LEFT);
-  } else {
-    // If there's a left child, there's a previous node, therefore spot->_prev is valid.
-    // Further, the previous node must be the rightmost descendant node of the left subtree
-    // and therefore has no current right child.
-    spot->_prev->set_child(node, Direction::RIGHT);
+DiscreteSpace<METRIC, PAYLOAD>::remove(DiscreteSpace::Node *node, bool update_tree) {
+  _list.erase(node);
+  _fa.destroy(node);
+  if (!update_tree) {
+    return;
   }
-
-  _list.insert_before(spot, node);
-  _root = static_cast<Node *>(node->rebalance_after_insert());
+  _root = static_cast<Node *>(node->remove());
 }
 
 template <typename METRIC, typename PAYLOAD>
 void
-DiscreteSpace<METRIC, PAYLOAD>::insert_after(DiscreteSpace::Node *spot, DiscreteSpace::Node *node) {
-  if (right(spot) == nullptr) {
-    spot->set_child(node, Direction::RIGHT);
-  } else {
-    // If there's a right child, there's a successor node, and therefore @a _next is valid.
-    // Further, the successor node must be the left most descendant of the right subtree
-    // therefore it doesn't have a left child.
-    spot->_next->set_child(node, Direction::LEFT);
+DiscreteSpace<METRIC, PAYLOAD>::insert_before(DiscreteSpace::Node *spot, DiscreteSpace::Node *node, bool update_tree) {
+
+  if (update_tree) {
+    if (left(spot) == nullptr) {
+      spot->set_child(node, Direction::LEFT);
+    } else {
+      // If there's a left child, there's a previous node, therefore spot->_prev is valid.
+      // Further, the previous node must be the rightmost descendant node of the left subtree
+      // and therefore has no current right child.
+      spot->_prev->set_child(node, Direction::RIGHT);
+    }
+  }
+
+  _list.insert_before(spot, node);
+
+  if (update_tree) {
+    _root = static_cast<Node *>(node->rebalance_after_insert());
+  }
+}
+
+template <typename METRIC, typename PAYLOAD>
+void
+DiscreteSpace<METRIC, PAYLOAD>::insert_after(DiscreteSpace::Node *spot, DiscreteSpace::Node *node, bool update_tree) {
+
+  if (update_tree) {
+    if (right(spot) == nullptr) {
+      spot->set_child(node, Direction::RIGHT);
+    } else {
+      // If there's a right child, there's a successor node, and therefore @a _next is valid.
+      // Further, the successor node must be the left most descendant of the right subtree
+      // therefore it doesn't have a left child.
+      spot->_next->set_child(node, Direction::LEFT);
+    }
   }
 
   _list.insert_after(spot, node);
-  _root = static_cast<Node *>(node->rebalance_after_insert());
+
+  if (update_tree) {
+    _root = static_cast<Node *>(node->rebalance_after_insert());
+  }
 }
 
 template <typename METRIC, typename PAYLOAD>
 DiscreteSpace<METRIC, PAYLOAD> &
 DiscreteSpace<METRIC, PAYLOAD>::erase(DiscreteSpace::range_type const &range) {
-  Node *n = this->lower_bound(range.min()); // current node.
+  Node *n = this->lower_node(range.min()); // current node.
   while (n) {
     auto nn = next(n);            // cache in case @a n disappears.
     if (n->min() > range.max()) { // cleared the target range, done.
@@ -1037,10 +1358,50 @@ DiscreteSpace<METRIC, PAYLOAD>::erase(DiscreteSpace::range_type const &range) {
 
 template <typename METRIC, typename PAYLOAD>
 DiscreteSpace<METRIC, PAYLOAD> &
-DiscreteSpace<METRIC, PAYLOAD>::mark(DiscreteSpace::range_type const &range, PAYLOAD const &payload) {
-  Node *n = this->lower_bound(range.min()); // current node.
-  Node *x = nullptr;                        // New node, gets set if we re-use an existing one.
-  Node *y = nullptr;                        // Temporary for removing and advancing.
+DiscreteSpace<METRIC, PAYLOAD>::mark_bulk(std::vector<std::pair<DiscreteSpace::range_type, PAYLOAD>> &ranges, bool is_sorted) {
+  return this->mark_bulk(ranges.data(), ranges.size(), is_sorted);
+}
+
+template <typename METRIC, typename PAYLOAD>
+DiscreteSpace<METRIC, PAYLOAD> &
+DiscreteSpace<METRIC, PAYLOAD>::mark_bulk(std::pair<range_type, PAYLOAD>* start, size_t n, bool is_sorted)
+{
+  // Sort the input data in-place before processing, if applicable.
+  if (!is_sorted)
+  {
+    // Stable sort allows for duplicate elements.
+    std::stable_sort(start, start + n, [](const auto &lhs, const auto &rhs) {
+      if (lhs.first.min() != rhs.first.min()) {
+        return lhs.first.min() < rhs.first.min();
+      }
+      return lhs.first.max() < rhs.first.max();
+    });
+  }
+
+  // Verify that this is purely an append operation.
+  // If it's not, then we need to rebuild the entire tree each iteration (suboptimal case).
+  bool isAppend = !_list.empty() && _list.tail()->max() < start[0].first.min();
+
+  // Mark the ranges in the input data.
+  for (size_t i = 0; i < n; ++i)
+  {
+    auto const& [range, payload] = start[i];
+    this->mark(range, payload, !isAppend);
+  }
+
+  // Rebuild the entire red-black tree.
+  detail::RBNode* temp_head = _list.head();
+  _root = static_cast<Node *>(detail::RBNode::buildTree(temp_head, _list.count()));
+
+  return *this;
+}
+
+template <typename METRIC, typename PAYLOAD>
+DiscreteSpace<METRIC, PAYLOAD> &
+DiscreteSpace<METRIC, PAYLOAD>::mark(DiscreteSpace::range_type const &range, PAYLOAD const &payload, bool update_tree) {
+  Node *n = this->lower_node(range.min()); // current node.
+  Node *x = nullptr;                       // New node, gets set if we re-use an existing one.
+  Node *y = nullptr;                       // Temporary for removing and advancing.
 
   // Use carefully, only in situations where it is known there is no overflow.
   auto max_plus_1 = ++metric_type{range.max()};
@@ -1059,7 +1420,7 @@ DiscreteSpace<METRIC, PAYLOAD>::mark(DiscreteSpace::range_type const &range, PAY
       if (p && p->payload() == payload && p->max() == min_minus_1) {
         x = p;
         n = x; // need to back up n because frame of reference moved.
-        x->assign_max(range.max());
+        x->assign_max(range.max(), update_tree);
       } else if (n->max() <= range.max()) {
         // Span will be subsumed by request span so it's available for use.
         x = n;
@@ -1069,8 +1430,8 @@ DiscreteSpace<METRIC, PAYLOAD>::mark(DiscreteSpace::range_type const &range, PAY
       } else {
         // request span is covered by existing span.
         x = _fa.make(range, payload); //
-        n->assign_min(max_plus_1);    // clip existing.
-        this->insert_before(n, x);
+        n->assign_min(max_plus_1, update_tree);    // clip existing.
+        this->insert_before(n, x, update_tree);
         return *this;
       }
     } else if (n->payload() == payload && n->max() >= min_minus_1) {
@@ -1080,18 +1441,22 @@ DiscreteSpace<METRIC, PAYLOAD>::mark(DiscreteSpace::range_type const &range, PAY
       if (x->max() >= range.max()) {
         return *this;
       }
-      x->assign_max(range.max());
+      x->assign_max(range.max(), update_tree);
     } else if (n->max() <= range.max()) {
       // Can only have left skew overlap, otherwise disjoint.
       // Clip if overlap.
       if (n->max() >= range.min()) {
-        n->assign_max(min_minus_1);
+        n->assign_max(min_minus_1, update_tree);
       } else if (nullptr != (y = next(n)) && y->max() <= range.max()) {
         // because @a n was selected as the minimum it must be the case that
         // y->min >= min (or y would have been selected). Therefore in this
         // case the request covers the next node therefore it can be reused.
         x = y;
-        x->assign(range).assign(payload).ripple_structure_fixup();
+        x->assign(range).assign(payload);
+        if (update_tree)
+        {
+            x->ripple_structure_fixup();
+        }
         n = x; // this gets bumped again, which is correct.
       }
     } else {
@@ -1101,18 +1466,18 @@ DiscreteSpace<METRIC, PAYLOAD>::mark(DiscreteSpace::range_type const &range, PAY
       Node *r;
       x = _fa.make(range, payload);
       r = _fa.make(range_type{max_plus_1, n->max()}, n->payload());
-      n->assign_max(min_minus_1);
-      this->insert_after(n, x);
-      this->insert_after(x, r);
+      n->assign_max(min_minus_1, update_tree);
+      this->insert_after(n, x, update_tree);
+      this->insert_after(x, r, update_tree);
       return *this; // done.
     }
     n = next(n); // lower bound span handled, move on.
     if (!x) {
       x = _fa.make(range, payload);
       if (n) {
-        this->insert_before(n, x);
+        this->insert_before(n, x, update_tree);
       } else {
-        this->append(x); // note that since n == 0 we'll just return.
+        this->append(x, update_tree); // note that since n == 0 we'll just return.
       }
     }
   } else if (nullptr != (n = this->head()) &&                    // at least one node in tree.
@@ -1122,13 +1487,13 @@ DiscreteSpace<METRIC, PAYLOAD>::mark(DiscreteSpace::range_type const &range, PAY
     // Same payload with overlap, re-use.
     x = n;
     n = next(n);
-    x->assign_min(range.min());
+    x->assign_min(range.min(), update_tree);
     if (x->max() < range.max()) {
-      x->assign_max(range.max());
+      x->assign_max(range.max(), update_tree);
     }
   } else {
     x = _fa.make(range, payload);
-    this->prepend(x);
+    this->prepend(x, update_tree);
   }
 
   // At this point, @a x has the node for this span and all existing spans of
@@ -1137,16 +1502,16 @@ DiscreteSpace<METRIC, PAYLOAD>::mark(DiscreteSpace::range_type const &range, PAY
     if (n->max() <= range.max()) { // completely covered, drop span, continue
       y = n;
       n = next(n);
-      this->remove(y);
+      this->remove(y, update_tree);
     } else if (max_plus_1 < n->min()) { // no overlap, done.
       break;
     } else if (n->payload() == payload) { // skew overlap or adj., same payload
-      x->assign_max(n->max());
+      x->assign_max(n->max(), update_tree);
       y = n;
       n = next(n);
-      this->remove(y);
+      this->remove(y, update_tree);
     } else if (n->min() <= range.max()) { // skew overlap different payload
-      n->assign_min(max_plus_1);
+      n->assign_min(max_plus_1, update_tree);
       break;
     } else { // n->min() > range.max(), different payloads - done.
       break;
@@ -1160,7 +1525,7 @@ template <typename METRIC, typename PAYLOAD>
 DiscreteSpace<METRIC, PAYLOAD> &
 DiscreteSpace<METRIC, PAYLOAD>::fill(DiscreteSpace::range_type const &range, PAYLOAD const &payload) {
   // Rightmost node of interest with n->min() <= min.
-  Node *n = this->lower_bound(range.min());
+  Node *n = this->lower_node(range.min());
   Node *x = nullptr; // New node (if any).
   // Need copies because we will modify these.
   auto min = range.min();
@@ -1288,7 +1653,7 @@ DiscreteSpace<METRIC, PAYLOAD>::blend(DiscreteSpace::range_type const &range, U 
   using unique_node = std::unique_ptr<Node, decltype(node_cleaner)>;
 
   // Rightmost node of interest with n->min() <= range.min().
-  Node *n = this->lower_bound(range.min());
+  Node *n = this->lower_node(range.min());
 
   // This doesn't change, compute outside loop.
   auto range_max_plus_1 = range.max();
@@ -1478,6 +1843,18 @@ DiscreteSpace<METRIC, PAYLOAD>::blend(DiscreteSpace::range_type const &range, U 
   }
 
   return *this;
+}
+
+template <typename METRIC, typename PAYLOAD>
+void
+DiscreteSpace<METRIC, PAYLOAD>::clear() {
+  for (auto &node : _list) {
+    std::destroy_at(&node.payload());
+  }
+  _list.clear();
+  _root = nullptr;
+  _arena.clear();
+  _fa.clear();
 }
 
 }} // namespace swoc::SWOC_VERSION_NS

@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -61,9 +61,9 @@ StrList::dump(FILE *fp)
 Str *
 StrList::_new_cell(const char *s, int len_not_counting_nul)
 {
-  Str *cell;
+  Str  *cell;
   char *p;
-  int l = len_not_counting_nul;
+  int   l = len_not_counting_nul;
 
   // allocate a cell from the array or heap
   if (cells_allocated < STRLIST_BASE_CELLS) {
@@ -162,9 +162,9 @@ StrListOverflow::alloc(int size, StrListOverflow **new_heap_ptr)
     return next->alloc(size, new_heap_ptr);
   }
 
-  char *start = (reinterpret_cast<char *>(this)) + overflow_head_hdr_size;
-  char *rval  = start + heap_used;
-  heap_used += size;
+  char *start  = (reinterpret_cast<char *>(this)) + overflow_head_hdr_size;
+  char *rval   = start + heap_used;
+  heap_used   += size;
   ink_assert(heap_used <= heap_size);
   return (void *)rval;
 }

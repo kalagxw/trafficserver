@@ -33,7 +33,7 @@ int
 remove_header(TSMBuffer bufp, TSMLoc hdr_loc, const char *header, int len)
 {
   TSMLoc field = TSMimeHdrFieldFind(bufp, hdr_loc, header, len);
-  int cnt      = 0;
+  int    cnt   = 0;
 
   while (field) {
     TSMLoc tmp = TSMimeHdrFieldNextDup(bufp, hdr_loc, field);
@@ -58,7 +58,7 @@ set_header(TSMBuffer bufp, TSMLoc hdr_loc, const char *header, int len, const ch
     return false;
   }
 
-  bool ret         = false;
+  bool   ret       = false;
   TSMLoc field_loc = TSMimeHdrFieldFind(bufp, hdr_loc, header, len);
 
   if (!field_loc) {
@@ -71,8 +71,8 @@ set_header(TSMBuffer bufp, TSMLoc hdr_loc, const char *header, int len, const ch
       TSHandleMLocRelease(bufp, hdr_loc, field_loc);
     }
   } else {
-    TSMLoc tmp = nullptr;
-    bool first = true;
+    TSMLoc tmp   = nullptr;
+    bool   first = true;
 
     while (field_loc) {
       tmp = TSMimeHdrFieldNextDup(bufp, hdr_loc, field_loc);
@@ -93,27 +93,23 @@ set_header(TSMBuffer bufp, TSMLoc hdr_loc, const char *header, int len, const ch
 }
 
 ///////////////////////////////////////////////////////////////////////////
-// Dump a header on stderr, useful together with TSDebug().
+// Dump a header on stderr, useful together with Dbg().
 void
-dump_headers(TSMBuffer bufp, TSMLoc hdr_loc)
+dump_headers(TSMLoc hdr_loc)
 {
-  TSIOBuffer output_buffer;
-  TSIOBufferReader reader;
-  TSIOBufferBlock block;
-  int64_t block_avail;
-
-  output_buffer = TSIOBufferCreate();
-  reader        = TSIOBufferReaderAlloc(output_buffer);
+  TSIOBuffer       output_buffer = TSIOBufferCreate();
+  TSIOBufferReader reader        = TSIOBufferReaderAlloc(output_buffer);
+  int64_t          block_avail   = 0;
 
   /* This will print  just MIMEFields and not the http request line */
-  TSMimeHdrPrint(bufp, hdr_loc, output_buffer);
+  TSMimeHdrPrint(hdr_loc, output_buffer);
 
   /* We need to loop over all the buffer blocks, there can be more than 1 */
-  block = TSIOBufferReaderStart(reader);
+  TSIOBufferBlock block = TSIOBufferReaderStart(reader);
   do {
     const char *block_start = TSIOBufferBlockReadStart(block, reader, &block_avail);
     if (block_avail > 0) {
-      TSDebug(PLUGIN_NAME, "Headers are:\n%.*s", static_cast<int>(block_avail), block_start);
+      Dbg(Bg_dbg_ctl, "Headers are:\n%.*s", static_cast<int>(block_avail), block_start);
     }
     TSIOBufferReaderConsume(reader, block_avail);
     block = TSIOBufferReaderStart(reader);

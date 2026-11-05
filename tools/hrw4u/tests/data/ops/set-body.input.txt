@@ -1,0 +1,17 @@
+VARS {
+    bool_0: bool;
+}
+
+REMAP {
+    if inbound.req.X-Foo == "bar" {
+        inbound.resp.body = "This is a response body";
+    } else {
+        bool_0 = true;
+    }
+}
+
+READ_RESPONSE {
+    if bool_0 {
+        set-body-from("https://example.com/body.txt");
+    }
+}

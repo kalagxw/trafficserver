@@ -23,9 +23,11 @@
 
 #pragma once
 
+#include <atomic>
 #include <string>
 
 #include "common.h"
+#include "evaluate.h"
 #include "pattern.h"
 
 /**
@@ -35,8 +37,8 @@ class PrefetchConfig
 {
 public:
   PrefetchConfig()
-    : _apiHeader("X-AppleCDN-Prefetch"),
-      _nextHeader("X-AppleCDN-Prefetch-Next"),
+    : _apiHeader("X-CDN-Prefetch"),
+      _nextHeader("X-CDN-Prefetch-Next"),
       _replaceHost(),
       _namespace("default"),
       _metricsPrefix("prefetch.stats")
@@ -111,10 +113,16 @@ public:
     return _exactMatch;
   }
 
-  void
-  setFetchCount(const char *optarg)
+  bool
+  isCmcdNor() const
   {
-    _fetchCount = getValue(optarg);
+    return _cmcd_nor;
+  }
+
+  void
+  setFetchCount(unsigned count)
+  {
+    _fetchCount = count;
   }
 
   unsigned
@@ -124,15 +132,23 @@ public:
   }
 
   void
-  setFetchMax(const char *optarg)
+  setFetchMax(unsigned max)
   {
-    _fetchMax = getValue(optarg);
+    _fetchMax = max;
   }
 
   unsigned
   getFetchMax() const
   {
     return _fetchMax;
+  }
+
+  bool setFetchOverflow(const char *optarg);
+
+  EvalPolicy
+  getFetchOverflow() const
+  {
+    return _fetchOverflow;
   }
 
   void
@@ -163,6 +179,20 @@ public:
   getNextPath()
   {
     return _nextPaths;
+  }
+
+  /**
+   * @brief Whether an expanded path that collapsed to empty should be reported.
+   *
+   * Whether the replacement collapses depends on the request, so the condition recurs per
+   * transaction for as long as the pattern stays misconfigured. Report it once per remap instance
+   * so a bad pattern is visible without flooding the error log. A config reload builds a new
+   * instance and reports again.
+   */
+  bool
+  shouldReportEmptyPath()
+  {
+    return !_reportedEmptyPath.exchange(true, std::memory_order_relaxed);
   }
 
   void
@@ -196,17 +226,21 @@ public:
   bool finalize();
 
 private:
-  std::string _apiHeader;
-  std::string _nextHeader;
-  std::string _fetchPolicy;
-  std::string _replaceHost;
-  std::string _namespace;
-  std::string _metricsPrefix;
-  std::string _logName;
-  std::string _queryKey;
-  unsigned _fetchCount = 1;
-  unsigned _fetchMax   = 0;
-  bool _front          = false;
-  bool _exactMatch     = false;
+  std::string  _apiHeader;
+  std::string  _nextHeader;
+  std::string  _fetchPolicy;
+  std::string  _replaceHost;
+  std::string  _namespace;
+  std::string  _metricsPrefix;
+  std::string  _logName;
+  std::string  _queryKey;
+  unsigned     _fetchCount    = 1;
+  unsigned     _fetchMax      = 0;
+  EvalPolicy   _fetchOverflow = EvalPolicy::Overflow32;
+  bool         _front         = false;
+  bool         _exactMatch    = false;
+  bool         _cmcd_nor      = false;
   MultiPattern _nextPaths;
+
+  std::atomic<bool> _reportedEmptyPath{false}; /* see shouldReportEmptyPath() */
 };

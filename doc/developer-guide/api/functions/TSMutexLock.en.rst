@@ -16,7 +16,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSMutexLock
 ***********
@@ -28,7 +28,10 @@ Synopsis
 
     #include <ts/ts.h>
 
-.. function:: void TSMutexLock(TSMutex mutexp)
+.. function:: void TSMutexLock(TSMutex mutexp) noexcept
 
 Description
 ===========
+
+Locks the mutex (recursively).  Should only be called from a continuation
+handler function or a :type:`TSThread` function.

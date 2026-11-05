@@ -17,7 +17,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSUrlHostGet
 ************
@@ -40,7 +40,6 @@ Synopsis
 .. function:: int TSUrlRawPortGet(TSMBuffer bufp, TSMLoc offset)
 .. function:: const char * TSUrlPathGet(TSMBuffer bufp, TSMLoc offset, int * length)
 .. function:: const char * TSUrlHttpQueryGet(TSMBuffer bufp, TSMLoc offset, int * length)
-.. function:: const char * TSUrlHttpParamsGet(TSMBuffer bufp, TSMLoc offset, int * length)
 .. function:: const char * TSUrlHttpFragmentGet(TSMBuffer bufp, TSMLoc offset, int * length)
 
 Description
@@ -53,7 +52,7 @@ and retrieve or modify parts of URLs, such as their host, port or scheme
 information.
 
 :func:`TSUrlSchemeGet`, :func:`TSUrlRawSchemeGet`, :func:`TSUrlUserGet`, :func:`TSUrlPasswordGet`,
-:func:`TSUrlHostGet`, :func:`TSUrlPathGet`, :func:`TSUrlHttpParamsGet`, :func:`TSUrlHttpQueryGet`
+:func:`TSUrlHostGet`, :func:`TSUrlPathGet`, :func:`TSUrlHttpQueryGet`
 and :func:`TSUrlHttpFragmentGet` each retrieve an internal pointer to the
 specified portion of the URL from the marshall buffer :arg:`bufp`. The length
 of the returned string is placed in :arg:`length` and a pointer to the URL
@@ -72,11 +71,21 @@ scheme.
 :arg:`offset` within the marshal buffer :arg:`bufp`. If there is no explicit
 port number in the URL, zero is returned.
 
+.. note::
+
+   :func:`TSUrlHostGet` operates on a URL object obtained from
+   :func:`TSHttpHdrUrlGet`. In early hooks such as
+   ``TS_HTTP_READ_REQUEST_HDR_HOOK``, the URL object may not yet be fully
+   parsed, and :func:`TSUrlHostGet` may return ``NULL`` even when a ``Host``
+   header is present. For reliable host retrieval at any hook stage, use
+   :func:`TSHttpHdrHostGet` instead, which checks both the URL and the
+   ``Host`` header field.
+
 Return Values
 =============
 
 All APIs except :func:`TSUrlPortGet` and :func:`TSUrlRawPortGet` return a string, which is
-not guaranteed to be NULL terminated. You must therefore always use the :arg:`length` value
+not guaranteed to be null-terminated. You must therefore always use the :arg:`length` value
 to determine the actual length of the returned string.
 
 :func:`TSUrlPortGet` simply returns the port number as an integer, possibly
@@ -91,6 +100,7 @@ See Also
 :manpage:`TSAPI(3ts)`,
 :manpage:`TSUrlCreate(3ts)`,
 :manpage:`TSHttpHdrUrlGet(3ts)`,
+:manpage:`TSHttpHdrHostGet(3ts)`,
 :manpage:`TSUrlHostSet(3ts)`,
 :manpage:`TSUrlStringGet(3ts)`,
 :manpage:`TSUrlPercentEncode(3ts)`

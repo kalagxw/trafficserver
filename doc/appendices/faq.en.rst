@@ -29,8 +29,7 @@ How do you create a raw disk for the cache if all your disks have mounted file s
 ---------------------------------------------------------------------------------------
 
 Create a large file on filesystem (with :manpage:`dd(1)`) and mount it as loopback device.
-This is accomplished with :manpage:`losetup(8)` on Linux, :manpage:`lofiadm(1m)` on Solaris
-and Illumos, and :manpage:`mdconfig(8)` on FreeBSD.
+This is accomplished with :manpage:`losetup(8)` on Linux, and :manpage:`mdconfig(8)` on FreeBSD.
 
 How do disk I/O errors affect the cache and what does Traffic Server do when a cache disk fails?
 ------------------------------------------------------------------------------------------------
@@ -61,15 +60,6 @@ In Squid- and Netscape-format log files, what do the cache result codes mean?
 -----------------------------------------------------------------------------
 
 This is described in detail in the :ref:`admin-logging-cache-results` documentation.
-
-What is recorded by the ``cqtx`` field in a custom log file?
-------------------------------------------------------------
-
--  In *forward proxy mode*, the ``cqtx`` field records the complete client
-   request in the log file (for example, ``GET http://www.company.com HTTP/1.0``).
--  In *reverse proxy mode*, the ``cqtx`` field records the hostname or IP
-   address of the origin server because Traffic Server first remaps the
-   request as per map rules in the :file:`remap.config` file.
 
 Does Traffic Server refresh entries in its host database after a certain period of time if they have not been used?
 -------------------------------------------------------------------------------------------------------------------
@@ -106,7 +96,7 @@ proxy mode.
 If you want to run in reverse proxy only mode (wherein Traffic Server
 does not serve requests that fail to match a map rule), then you must
 set the configuration variable :ts:cv:`proxy.config.url_remap.remap_required`
-to ``1`` in :file:`records.config`.
+to ``1`` in :file:`records.yaml`.
 
 How do I enable forward proxy mode
 ----------------------------------
@@ -116,7 +106,7 @@ Please refer to the :ref:`forward-proxy` documentation.
 How do I interpret the Via: header code?
 ----------------------------------------
 
-The ``Via`` header string can be decoded with the `Via Decoder Ring <https://trafficserver.apache.org/tools/via>`_.
+The ``Via`` header string can be decoded with the `Via Decoder Ring <https://trafficserver.apache.org/via.html>`_.
 
 The Via header is an optional HTTP header added by Traffic Server and other HTTP proxies. If a request goes through multiple proxies, each one appends its Via header content to the end of the existing Via header. Via header content is for general information and diagnostic use only and should not be used as a programmatic interface to Traffic Server. The header is cached by each intermediary with the object as received from its downstream node. Thus, the last node in the list to report a cache hit is the end of the transaction for that specific request. Nodes reported earlier were from a previous transaction.
 
@@ -329,31 +319,14 @@ You are unable to execute Traffic Control commands
 
 :program:`traffic_ctl` commands do not execute under the following conditions:
 
-**When the traffic_manager process is not running**
-    Check to see if the :program:`traffic_manager` process is running by entering the
-    following command::
+**When the traffic_server process is not running**
+    :program:`traffic_ctl` needs traffic_server to be running, the former needs
+    the later to be running in order to connect to the jsonrpc endpoint. You can
+    check this :ref:`jsonrpc-node` for more information.
 
-        pgrep -l traffic_manager
-
-    If the :program:`traffic_manager` process is not running, then enter the
-    following command from the Traffic Server ``bin`` directory to start it::
-
-        ./traffic_manager
-
-.. XXX: this is wrong
-
-    You should always start and stop Traffic Server with the
-    :program:`trafficserver start` and :program:`trafficserver stop` commands to ensure
-    that all the processes start and stop correctly. For more information,
-    refer to :ref:`getting-started`.
-
-**When you are not executing the command from $TSHome/bin**
-    If the Traffic Server ``bin`` directory is not in your path, then prepend the
-    Traffic Control commands with ``./`` (for example, ``./traffic_ctl -h``).
-
-**When multiple Traffic Server installations are present and you are not
-executing the Traffic Control command from the active Traffic Server path
-specified in ``/etc/trafficserver``**
+**When :program:`traffic_ctl` is unable to locate the jsonrpc socket.**
+    The program needs to know where the path is located, this could be the default
+    build folder or the one specified by the runroot file.
 
 
 Web browsers display an error document with a 'data missing' message
@@ -408,7 +381,7 @@ A requested object was larger than the maximum size allowed in the
 Traffic Server cache, so Traffic Server provided proxy service for the
 oversized object but did not cache it. To set the object size limit for
 the cache, modify the :ts:cv:`proxy.config.cache.max_doc_size`
-variable in the records.config file. If you do not want to limit the
+variable in the :file:`records.yaml` file. If you do not want to limit the
 size of objects in the cache, then set the document size
 to ``0`` (zero).
 
@@ -424,7 +397,7 @@ generated, verify the following:
 
 - Make sure you're looking in the correct directory. By default, Traffic
   Server creates log files in the ``logs`` directory. This can be modified
-  by changing :ts:cv:`proxy.config.log.logfile_dir` in :file:`records.config`.
+  by changing :ts:cv:`proxy.config.log.logfile_dir` in :file:`records.yaml`.
 
 - Check that the log directory has read/write permissions for the Traffic
   Server user account. If the log directory does not have the correct
@@ -432,9 +405,9 @@ generated, verify the following:
   open or create log files.
 
 - Check that logging is enabled by checking the value of the
-  :ts:cv:`proxy.config.log.logging_enabled` variable in :file:`records.config`.
+  :ts:cv:`proxy.config.log.logging_enabled` variable in :file:`records.yaml`.
 
-- Check that a log format is enabled. In :file:`records.config`, select
+- Check that a log format is enabled. In :file:`records.yaml`, select
   the standard or custom format by editing variables in the Logging Config
   section.
 
@@ -466,7 +439,7 @@ Service Overload
 
 If necessary, you can adjust the maximum number of connections supported
 by Traffic Server by editing :ts:cv:`proxy.config.net.connections_throttle` in
-:file:`records.config`.
+:file:`records.yaml`.
 
 .. note::
 
@@ -512,7 +485,7 @@ By default, Traffic Server will timeout after 30 seconds when contacting
 origin servers. If you cannot avoid such timeouts by otherwise addressing the
 performance on your origin servers, you may adjust the origin connection timeout
 in Traffic Server by changing :ts:cv:`proxy.config.http.connect_attempts_timeout`
-in :file:`records.config` to a larger value.
+in :file:`records.yaml` to a larger value.
 
 Log entries for some transactions are skipped
 ---------------------------------------------
@@ -525,7 +498,7 @@ This happens when a log entry is too big to fit in a log buffer.  This is often 
 URLs in the entry.  You can truncate long URLs using the slice syntax for the URL log field in the log
 format, for example::
 
-    %<cquc[:1000]>
+    %<pquc[:1000]>
 
 You can also increase the value of :ts:cv:`proxy.config.log.log_buffer_size`, but this can have impacts
 on performance and memory usage.  Very large values may trigger software bugs.  Some production proxies

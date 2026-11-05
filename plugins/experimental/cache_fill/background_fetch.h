@@ -40,14 +40,30 @@
 #include "ts/ts.h"
 #include "ts/remap.h"
 
-typedef std::unordered_map<std::string, bool> OutstandingRequests;
-const char PLUGIN_NAME[] = "cache_fill";
+using OutstandingRequests = std::unordered_map<std::string, bool>;
+const char PLUGIN_NAME[]  = "cache_fill";
 
+// This is the list of all headers that must be removed when we make the actual background
+// fetch request for range requests.
+static const std::array<const std::string_view, 6> FILTER_HEADERS{
+  {{TS_MIME_FIELD_RANGE, static_cast<size_t>(TS_MIME_LEN_RANGE)},
+   {TS_MIME_FIELD_IF_MATCH, static_cast<size_t>(TS_MIME_LEN_IF_MATCH)},
+   {TS_MIME_FIELD_IF_MODIFIED_SINCE, static_cast<size_t>(TS_MIME_LEN_IF_MODIFIED_SINCE)},
+   {TS_MIME_FIELD_IF_NONE_MATCH, static_cast<size_t>(TS_MIME_LEN_IF_NONE_MATCH)},
+   {TS_MIME_FIELD_IF_RANGE, static_cast<size_t>(TS_MIME_LEN_IF_RANGE)},
+   {TS_MIME_FIELD_IF_UNMODIFIED_SINCE, static_cast<size_t>(TS_MIME_LEN_IF_UNMODIFIED_SINCE)}}
+};
+
+namespace cache_fill_ns
+{
+extern DbgCtl dbg_ctl;
+}
+using namespace cache_fill_ns;
 class BgFetchState
 {
 public:
-  BgFetchState()                     = default;
-  BgFetchState(BgFetchState const &) = delete;
+  BgFetchState()                       = default;
+  BgFetchState(BgFetchState const &)   = delete;
   void operator=(BgFetchState const &) = delete;
 
   static BgFetchState &
@@ -73,7 +89,7 @@ public:
     }
     TSMutexUnlock(_lock);
 
-    TSDebug(PLUGIN_NAME, "BgFetchState.acquire(): ret = %d, url = %s", ret, url.c_str());
+    Dbg(dbg_ctl, "BgFetchState.acquire(): ret = %d, url = %s", ret, url.c_str());
 
     return ret;
   }
@@ -83,21 +99,20 @@ public:
   {
     bool ret;
 
-    TSMutexLock(_lock);
+    TSMutexLockGuard lock(_lock);
     if (_urls.end() == _urls.find(url)) {
       ret = false;
     } else {
       _urls.erase(url);
       ret = true;
     }
-    TSMutexUnlock(_lock);
 
     return ret;
   }
 
 private:
   OutstandingRequests _urls;
-  TSMutex _lock = TSMutexCreate();
+  TSMutex             _lock = TSMutexCreate();
 };
 
 //////////////////////////////////////////////////////////////////////////////
@@ -159,23 +174,23 @@ struct BgFetchData {
   bool initialize(TSMBuffer request, TSMLoc req_hdr, TSHttpTxn txnp);
   void schedule();
 
-  TSMBuffer mbuf = TSMBufferCreate();
-  TSMLoc hdr_loc = TS_NULL_MLOC;
-  TSMLoc url_loc = TS_NULL_MLOC;
+  TSMBuffer mbuf    = TSMBufferCreate();
+  TSMLoc    hdr_loc = TS_NULL_MLOC;
+  TSMLoc    url_loc = TS_NULL_MLOC;
 
   struct sockaddr_storage client_ip;
 
   // This is for the actual background fetch / NetVC
-  TSVConn vc                          = nullptr;
-  TSIOBuffer req_io_buf               = nullptr;
-  TSIOBuffer resp_io_buf              = nullptr;
+  TSVConn          vc                 = nullptr;
+  TSIOBuffer       req_io_buf         = nullptr;
+  TSIOBuffer       resp_io_buf        = nullptr;
   TSIOBufferReader req_io_buf_reader  = nullptr;
   TSIOBufferReader resp_io_buf_reader = nullptr;
-  TSVIO r_vio                         = nullptr;
-  TSVIO w_vio                         = nullptr;
+  TSVIO            r_vio              = nullptr;
+  TSVIO            w_vio              = nullptr;
 
 private:
   std::string _url;
-  int64_t _bytes = 0;
-  TSCont _cont   = nullptr;
+  int64_t     _bytes = 0;
+  TSCont      _cont  = nullptr;
 };

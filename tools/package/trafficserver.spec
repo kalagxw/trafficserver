@@ -35,6 +35,7 @@ URL:		https://trafficserver.apache.org/
 Source0:	http://www.apache.org/dist/%{name}/%{name}-%{version}.tar.bz2
 
 BuildRequires:	expat-devel hwloc-devel openssl-devel pcre-devel zlib-devel xz-devel
+BuildRequires:  libzstd-devel lz4-devel
 BuildRequires:  libcurl-devel ncurses-devel
 BuildRequires:	gcc gcc-c++ perl-ExtUtils-MakeMaker
 BuildRequires:  libcap-devel
@@ -180,7 +181,6 @@ getent passwd ats >/dev/null || useradd -r -u 176 -g ats -d / -s /sbin/nologin -
 
 %files devel
 %defattr(-,root,root,-)
-%{_bindir}/tsxs
 %{_includedir}/ts
 %{_includedir}/tscpp
 %{_datadir}/pkgconfig/trafficserver.pc

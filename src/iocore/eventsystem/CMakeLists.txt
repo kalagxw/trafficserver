@@ -1,0 +1,84 @@
+#######################
+#
+#  Licensed to the Apache Software Foundation (ASF) under one or more contributor license
+#  agreements.  See the NOTICE file distributed with this work for additional information regarding
+#  copyright ownership.  The ASF licenses this file to you under the Apache License, Version 2.0
+#  (the "License"); you may not use this file except in compliance with the License.  You may obtain
+#  a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software distributed under the License
+#  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+#  or implied. See the License for the specific language governing permissions and limitations under
+#  the License.
+#
+#######################
+
+add_library(
+  inkevent STATIC
+  EventSystem.cc
+  IOBuffer.cc
+  Lock.cc
+  MIOBufferWriter.cc
+  PQ-List.cc
+  Processor.cc
+  ProtectedQueue.cc
+  ProxyAllocator.cc
+  Tasks.cc
+  Thread.cc
+  UnixEThread.cc
+  UnixEvent.cc
+  UnixEventProcessor.cc
+  UnixSocket.cc
+  ConfigProcessor.cc
+  RecRawStatsImpl.cc
+  RecProcess.cc
+  Watchdog.cc
+  VIO.cc
+)
+add_library(ts::inkevent ALIAS inkevent)
+
+target_link_libraries(
+  inkevent
+  PUBLIC ts::records ts::tscore
+  PRIVATE libswoc::libswoc resolv::resolv # transitive
+          tsutil # transitive
+          yaml-cpp::yaml-cpp # transitive
+)
+
+if(TS_USE_HWLOC)
+  target_link_libraries(inkevent PRIVATE hwloc::hwloc)
+endif()
+
+if(BUILD_TESTING)
+  add_executable(test_EventSystem unit_tests/test_EventSystem.cc)
+  target_link_libraries(test_EventSystem ts::inkevent configmanager Catch2::Catch2WithMain)
+  add_executable(test_IOBuffer unit_tests/test_IOBuffer.cc)
+  target_link_libraries(test_IOBuffer ts::inkevent configmanager Catch2::Catch2WithMain)
+
+  add_executable(test_MIOBufferWriter unit_tests/test_MIOBufferWriter.cc)
+  target_link_libraries(test_MIOBufferWriter libswoc::libswoc Catch2::Catch2WithMain)
+
+  add_catch2_test(NAME test_EventSystem COMMAND test_EventSystem)
+  add_catch2_test(NAME test_IOBuffer COMMAND test_IOBuffer)
+  add_catch2_test(NAME test_MIOBufferWriter COMMAND test_MIOBufferWriter)
+
+  add_executable(test_Continuation unit_tests/test_Continuation.cc)
+  target_link_libraries(test_Continuation ts::inkevent configmanager Catch2::Catch2WithMain)
+  add_catch2_test(NAME test_Continuation COMMAND test_Continuation)
+
+  add_executable(test_Action unit_tests/test_Action.cc)
+  target_link_libraries(test_Action ts::inkevent configmanager Catch2::Catch2WithMain)
+  add_catch2_test(NAME test_Action COMMAND test_Action)
+
+  add_executable(test_Lock unit_tests/test_Lock.cc)
+  target_link_libraries(test_Lock ts::inkevent configmanager Catch2::Catch2WithMain)
+  add_catch2_test(NAME test_Lock COMMAND test_Lock)
+
+  add_executable(test_WatchdogPolicy unit_tests/test_WatchdogPolicy.cc)
+  target_link_libraries(test_WatchdogPolicy ts::inkevent configmanager Catch2::Catch2WithMain)
+  add_catch2_test(NAME test_WatchdogPolicy COMMAND test_WatchdogPolicy)
+endif()
+
+clang_tidy_check(inkevent)

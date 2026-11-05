@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -23,20 +23,24 @@
 
 #include <fcntl.h>
 #include <openssl/crypto.h>
-#include "tscore/I_Layout.h"
+#include <openssl/ssl.h>
+#include <swoc/BufferWriter.h>
+#include <swoc/bwf_base.h>
+#include "tscore/Layout.h"
 #include "tscore/Filenames.h"
-#include "tscore/BufferWriter.h"
-#include "records/I_RecProcess.h"
-#include "RecordsConfig.h"
+#include "records/RecCore.h"
+#include "records/RecordsConfig.h"
 #include "info.h"
+#include "iocore/eventsystem/RecProcess.h"
+
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h>
 
 #if TS_USE_HWLOC
 #include <hwloc.h>
 #endif
 
-#if HAVE_ZLIB_H
 #include <zlib.h>
-#endif
 
 #if HAVE_LZMA_H
 #include <lzma.h>
@@ -45,6 +49,47 @@
 #if HAVE_BROTLI_ENCODE_H
 #include <brotli/encode.h>
 #endif
+
+#if HAVE_ZSTD_H
+#include <zstd.h>
+#endif
+
+#if HAVE_LZ4_H
+#include <lz4.h>
+#endif
+
+#if HAVE_SSL_CTX_ADD_CERT_COMPRESSION_ALG
+static constexpr int ts_has_cert_compression_callbacks = 1;
+#else
+static constexpr int ts_has_cert_compression_callbacks = 0;
+#endif
+
+#if HAVE_SSL_CTX_ADD_CERT_COMPRESSION_ALG
+static constexpr int ts_has_cert_compression_zlib = 1;
+#elif HAVE_SSL_CTX_SET1_CERT_COMP_PREFERENCE && !defined(OPENSSL_NO_ZLIB)
+static constexpr int ts_has_cert_compression_zlib = 1;
+#else
+static constexpr int ts_has_cert_compression_zlib = 0;
+#endif
+
+#if HAVE_SSL_CTX_ADD_CERT_COMPRESSION_ALG && HAVE_BROTLI_ENCODE_H
+static constexpr int ts_has_cert_compression_brotli = 1;
+#elif !HAVE_SSL_CTX_ADD_CERT_COMPRESSION_ALG && HAVE_SSL_CTX_SET1_CERT_COMP_PREFERENCE && !defined(OPENSSL_NO_BROTLI)
+static constexpr int ts_has_cert_compression_brotli = 1;
+#else
+static constexpr int ts_has_cert_compression_brotli = 0;
+#endif
+
+#if HAVE_SSL_CTX_ADD_CERT_COMPRESSION_ALG && HAVE_ZSTD_H
+static constexpr int ts_has_cert_compression_zstd = 1;
+#elif !HAVE_SSL_CTX_ADD_CERT_COMPRESSION_ALG && HAVE_SSL_CTX_SET1_CERT_COMP_PREFERENCE && !defined(OPENSSL_NO_ZSTD)
+static constexpr int ts_has_cert_compression_zstd = 1;
+#else
+static constexpr int ts_has_cert_compression_zstd = 0;
+#endif
+
+static constexpr int ts_has_cert_compression =
+  ts_has_cert_compression_zlib | ts_has_cert_compression_brotli | ts_has_cert_compression_zstd;
 
 // Produce output about compile time features, useful for checking how things were built
 static void
@@ -78,11 +123,6 @@ produce_features(bool json)
   print_feature("BUILD_PERSON", BUILD_PERSON, json);
   print_feature("BUILD_GROUP", BUILD_GROUP, json);
   print_feature("BUILD_NUMBER", BUILD_NUMBER, json);
-#if HAVE_ZLIB_H
-  print_feature("TS_HAS_LIBZ", 1, json);
-#else
-  print_feature("TS_HAS_LIBZ", 0, json);
-#endif
 #if HAVE_LZMA_H
   print_feature("TS_HAS_LZMA", 1, json);
 #else
@@ -93,38 +133,55 @@ produce_features(bool json)
 #else
   print_feature("TS_HAS_BROTLI", 0, json);
 #endif
+#ifdef HAVE_ZSTD_H
+  print_feature("TS_HAS_ZSTD", 1, json);
+#else
+  print_feature("TS_HAS_ZSTD", 0, json);
+#endif
+#ifdef HAVE_LZ4_H
+  print_feature("TS_HAS_LZ4", 1, json);
+#else
+  print_feature("TS_HAS_LZ4", 0, json);
+#endif
+  print_feature("TS_HAS_CERT_COMPRESSION", ts_has_cert_compression, json);
+  print_feature("TS_HAS_CERT_COMPRESSION_CALLBACKS", ts_has_cert_compression_callbacks, json);
+  print_feature("TS_HAS_CERT_COMPRESSION_ZLIB", ts_has_cert_compression_zlib, json);
+  print_feature("TS_HAS_CERT_COMPRESSION_BROTLI", ts_has_cert_compression_brotli, json);
+  print_feature("TS_HAS_CERT_COMPRESSION_ZSTD", ts_has_cert_compression_zstd, json);
+  print_feature("TS_HAS_CRIPTS", TS_HAS_CRIPTS, json);
 #ifdef F_GETPIPE_SZ
   print_feature("TS_HAS_PIPE_BUFFER_SIZE_CONFIG", 1, json);
 #else
   print_feature("TS_HAS_PIPE_BUFFER_SIZE_CONFIG", 0, json);
 #endif /* F_GETPIPE_SZ */
   print_feature("TS_HAS_JEMALLOC", TS_HAS_JEMALLOC, json);
-  print_feature("TS_HAS_TCMALLOC", TS_HAS_TCMALLOC, json);
   print_feature("TS_HAS_IN6_IS_ADDR_UNSPECIFIED", TS_HAS_IN6_IS_ADDR_UNSPECIFIED, json);
   print_feature("TS_HAS_BACKTRACE", TS_HAS_BACKTRACE, json);
   print_feature("TS_HAS_PROFILER", TS_HAS_PROFILER, json);
   print_feature("TS_USE_FAST_SDK", TS_USE_FAST_SDK, json);
+  print_feature("TS_USE_MALLOC_ALLOCATOR", TS_USE_MALLOC_ALLOCATOR, json);
   print_feature("TS_USE_DIAGS", TS_USE_DIAGS, json);
+  print_feature("TS_USE_CACHE_SHM", TS_USE_CACHE_SHM, json);
   print_feature("TS_USE_EPOLL", TS_USE_EPOLL, json);
   print_feature("TS_USE_KQUEUE", TS_USE_KQUEUE, json);
-  print_feature("TS_USE_PORT", TS_USE_PORT, json);
   print_feature("TS_USE_POSIX_CAP", TS_USE_POSIX_CAP, json);
   print_feature("TS_USE_TPROXY", TS_USE_TPROXY, json);
   print_feature("TS_HAS_SO_MARK", TS_HAS_SO_MARK, json);
   print_feature("TS_HAS_IP_TOS", TS_HAS_IP_TOS, json);
   print_feature("TS_USE_HWLOC", TS_USE_HWLOC, json);
-  print_feature("TS_USE_SET_RBIO", TS_USE_SET_RBIO, json);
   print_feature("TS_USE_TLS13", TS_USE_TLS13, json);
+  print_feature("TS_USE_RPK", TS_USE_RPK, json);
   print_feature("TS_USE_QUIC", TS_USE_QUIC, json);
-  print_feature("TS_USE_LINUX_NATIVE_AIO", TS_USE_LINUX_NATIVE_AIO, json);
+  print_feature("TS_USE_QMUX", TS_USE_QMUX, json);
+  print_feature("TS_HAS_OPENSSL_QUIC", TS_HAS_OPENSSL_QUIC, json);
+  print_feature("TS_HAS_QUICHE", TS_HAS_QUICHE, json);
   print_feature("TS_HAS_SO_PEERCRED", TS_HAS_SO_PEERCRED, json);
   print_feature("TS_USE_REMOTE_UNWINDING", TS_USE_REMOTE_UNWINDING, json);
-  print_feature("TS_USE_TLS_OCSP", TS_USE_TLS_OCSP, json);
   print_feature("SIZEOF_VOIDP", SIZEOF_VOIDP, json);
   print_feature("TS_IP_TRANSPARENT", TS_IP_TRANSPARENT, json);
   print_feature("TS_HAS_128BIT_CAS", TS_HAS_128BIT_CAS, json);
+  print_feature("TS_HAS_128BIT_CAS_LIBATOMIC", TS_HAS_128BIT_CAS_LIBATOMIC, json);
   print_feature("TS_HAS_TESTS", TS_HAS_TESTS, json);
-  print_feature("TS_HAS_WCCP", TS_HAS_WCCP, json);
   print_feature("TS_MAX_THREADS_IN_EACH_THREAD_TYPE", TS_MAX_THREADS_IN_EACH_THREAD_TYPE, json);
   print_feature("TS_MAX_NUMBER_EVENT_THREADS", TS_MAX_NUMBER_EVENT_THREADS, json);
   print_feature("TS_MAX_HOST_NAME_LEN", TS_MAX_HOST_NAME_LEN, json);
@@ -149,7 +206,7 @@ print_var(std::string_view const &name, std::string_view const &value, bool json
 void
 produce_layout(bool json)
 {
-  RecProcessInit(RECM_STAND_ALONE, nullptr /* diags */);
+  RecProcessInit(nullptr /* diags */);
   LibRecordsConfigInit();
 
   if (json) {
@@ -163,6 +220,7 @@ produce_layout(bool json)
   print_var("RUNTIMEDIR", RecConfigReadRuntimeDir(), json);
   print_var("PLUGINDIR", RecConfigReadPluginDir(), json);
   print_var("INCLUDEDIR", Layout::get()->includedir, json);
+  print_var("LOCALSTATEDIR", Layout::get()->localstatedir, json);
 
   print_var(ts::filename::RECORDS, RecConfigReadConfigPath(nullptr, ts::filename::RECORDS), json);
   print_var(ts::filename::REMAP, RecConfigReadConfigPath("proxy.config.url_remap.filename"), json);
@@ -170,7 +228,6 @@ produce_layout(bool json)
   print_var(ts::filename::SSL_MULTICERT, RecConfigReadConfigPath("proxy.config.ssl.server.multicert.filename"), json);
   print_var(ts::filename::STORAGE, RecConfigReadConfigPath(nullptr, ts::filename::STORAGE), json);
   print_var(ts::filename::HOSTING, RecConfigReadConfigPath("proxy.config.cache.hosting_filename"), json);
-  print_var(ts::filename::VOLUME, RecConfigReadConfigPath("proxy.config.cache.volume_filename"), json);
   print_var(ts::filename::IP_ALLOW, RecConfigReadConfigPath("proxy.config.cache.ip_allow.filename"), json, true);
   if (json) {
     printf("}\n");
@@ -180,27 +237,23 @@ produce_layout(bool json)
 void
 produce_versions(bool json)
 {
-  using LBW = ts::LocalBufferWriter<128>;
+  using LBW = swoc::LocalBufferWriter<128>;
   [[maybe_unused]] static const std::string_view undef{"undef"};
 
   if (json) {
     printf("{\n");
   }
 
+  print_var("libz", LBW().print("{}", ZLIB_VERSION).view(), json);
   print_var("openssl", LBW().print("{:#x}", OPENSSL_VERSION_NUMBER).view(), json);
   print_var("openssl_str", LBW().print(OPENSSL_VERSION_TEXT).view(), json);
-  print_var("pcre", LBW().print("{}.{}", PCRE_MAJOR, PCRE_MINOR).view(), json);
+  print_var("pcre2", LBW().print("{}.{}", PCRE2_MAJOR, PCRE2_MINOR).view(), json);
   // These are optional, for now at least.
 #if TS_USE_HWLOC
   print_var("hwloc", LBW().print("{:#x}", HWLOC_API_VERSION).view(), json);
   print_var("hwloc.run", LBW().print("{:#x}", hwloc_get_api_version()).view(), json);
 #else
   print_var("hwloc", undef, json);
-#endif
-#if HAVE_ZLIB_H
-  print_var("libz", LBW().print("{}", ZLIB_VERSION).view(), json);
-#else
-  print_var("libz", undef, json);
 #endif
 #if HAVE_LZMA_H
   print_var("lzma", LBW().print("{}", LZMA_VERSION_STRING).view(), json);
@@ -212,6 +265,17 @@ produce_versions(bool json)
   print_var("brotli", LBW().print("{:#x}", BrotliEncoderVersion()).view(), json);
 #else
   print_var("brotli", undef, json);
+#endif
+#ifdef HAVE_ZSTD_H
+  print_var("zstd", LBW().print("{}", ZSTD_versionString()).view(), json);
+#else
+  print_var("zstd", undef, json);
+#endif
+#ifdef HAVE_LZ4_H
+  // Runtime version, matching what the zstd line above reports.
+  print_var("lz4", LBW().print("{}", LZ4_versionString()).view(), json);
+#else
+  print_var("lz4", undef, json);
 #endif
 
   // This should always be last

@@ -16,17 +16,13 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSIpStringToAddr
 ****************
 
 Synopsis
 ========
-
-.. code-block:: cpp
-
-    #include <ts/experimental.h>
 
 .. function:: TSReturnCode TSIpStringToAddr(const char * str, int str_len, sockaddr* addr)
 
@@ -47,10 +43,9 @@ used to differentiate between an address and an attached port. E.g.
 Return values
 =============
 
-It returns :data:`TS_SUCCESS` on success, or :data:`TS_ERROR` on failure.
+It returns :enumerator:`TS_SUCCESS` on success, or :enumerator:`TS_ERROR` on failure.
 
 Notes
 =====
 
 This API may be changed in the future version since it is experimental.
-

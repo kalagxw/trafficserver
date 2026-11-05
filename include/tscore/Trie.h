@@ -2,7 +2,7 @@
 
     Trie implementation for 8-bit string keys.
 
-    @section license License
+    @par License
 
     Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
@@ -30,9 +30,16 @@
 #include "tscore/List.h"
 #include "tscore/Diags.h"
 
+class TrieImpl
+{
+protected:
+  inline static DbgCtl dbg_ctl_insert{"Trie::Insert"};
+  inline static DbgCtl dbg_ctl_search{"Trie::Search"};
+};
+
 // Note that you should provide the class to use here, but we'll store
 // pointers to such objects internally.
-template <typename T> class Trie
+template <typename T> class Trie : private TrieImpl
 {
 public:
   Trie() { m_root.Clear(); }
@@ -41,7 +48,7 @@ public:
   bool Insert(const char *key, T *value, int rank, int key_len = -1);
 
   // will return false if not found; else value_ptr will point to found value
-  T *Search(const char *key, int key_len = -1) const;
+  T   *Search(const char *key, int key_len = -1) const;
   void Clear();
   void Print() const;
 
@@ -71,9 +78,9 @@ private:
   class Node
   {
   public:
-    T *value;
+    T   *value;
     bool occupied;
-    int rank;
+    int  rank;
 
     void
     Clear()
@@ -84,7 +91,7 @@ private:
       ink_zero(children);
     }
 
-    void Print(const char *debug_tag) const;
+    void Print(const DbgCtl &dbg_ctl) const;
     inline Node *
     GetChild(char index) const
     {
@@ -104,7 +111,7 @@ private:
     Node *children[N_NODE_CHILDREN];
   };
 
-  Node m_root;
+  Node     m_root;
   Queue<T> m_value_list;
 
   void _CheckArgs(const char *key, int &key_len) const;
@@ -112,9 +119,9 @@ private:
 
   // make copy-constructor and assignment operator private
   // till we properly implement them
-  Trie(const Trie<T> &rhs){};
+  Trie(const Trie<T> & /* rhs ATS_UNUSED */){};
   Trie &
-  operator=(const Trie<T> &rhs)
+  operator=(const Trie<T> & /* rhs ATS_UNUSED */)
   {
     return *this;
   }
@@ -139,12 +146,12 @@ Trie<T>::Insert(const char *key, T *value, int rank, int key_len /* = -1 */)
 
   Node *next_node;
   Node *curr_node = &m_root;
-  int i           = 0;
+  int   i         = 0;
 
   while (true) {
-    if (is_debug_tag_set("Trie::Insert")) {
-      Debug("Trie::Insert", "Visiting Node...");
-      curr_node->Print("Trie::Insert");
+    if (dbg_ctl_insert.on()) {
+      Dbg(dbg_ctl_insert, "Visiting Node...");
+      curr_node->Print(dbg_ctl_insert);
     }
 
     if (i == key_len) {
@@ -154,7 +161,7 @@ Trie<T>::Insert(const char *key, T *value, int rank, int key_len /* = -1 */)
     next_node = curr_node->GetChild(key[i]);
     if (!next_node) {
       while (i < key_len) {
-        Debug("Trie::Insert", "Creating child node for char %c (%d)", key[i], key[i]);
+        Dbg(dbg_ctl_insert, "Creating child node for char %c (%d)", key[i], key[i]);
         curr_node = curr_node->AllocateChild(key[i]);
         ++i;
       }
@@ -165,7 +172,7 @@ Trie<T>::Insert(const char *key, T *value, int rank, int key_len /* = -1 */)
   }
 
   if (curr_node->occupied) {
-    Debug("Trie::Insert", "Cannot insert duplicate!");
+    Dbg(dbg_ctl_insert, "Cannot insert duplicate!");
     return false;
   }
 
@@ -173,7 +180,7 @@ Trie<T>::Insert(const char *key, T *value, int rank, int key_len /* = -1 */)
   curr_node->value    = value;
   curr_node->rank     = rank;
   m_value_list.enqueue(curr_node->value);
-  Debug("Trie::Insert", "inserted new element!");
+  Dbg(dbg_ctl_insert, "inserted new element!");
   return true;
 }
 
@@ -185,12 +192,12 @@ Trie<T>::Search(const char *key, int key_len /* = -1 */) const
 
   const Node *found_node = nullptr;
   const Node *curr_node  = &m_root;
-  int i                  = 0;
+  int         i          = 0;
 
   while (curr_node) {
-    if (is_debug_tag_set("Trie::Search")) {
-      Debug("Trie::Search", "Visiting node...");
-      curr_node->Print("Trie::Search");
+    if (dbg_ctl_search.on()) {
+      DbgPrint(dbg_ctl_search, "Visiting node...");
+      curr_node->Print(dbg_ctl_search);
     }
     if (curr_node->occupied) {
       if (!found_node || curr_node->rank <= found_node->rank) {
@@ -205,7 +212,7 @@ Trie<T>::Search(const char *key, int key_len /* = -1 */) const
   }
 
   if (found_node) {
-    Debug("Trie::Search", "Returning element with rank %d", found_node->rank);
+    Dbg(dbg_ctl_search, "Returning element with rank %d", found_node->rank);
     return found_node->value;
   }
 
@@ -250,18 +257,18 @@ Trie<T>::Print() const
 
 template <typename T>
 void
-Trie<T>::Node::Print(const char *debug_tag) const
+Trie<T>::Node::Print(const DbgCtl &dbg_ctl) const
 {
   if (occupied) {
-    Debug(debug_tag, "Node is occupied");
-    Debug(debug_tag, "Node has rank %d", rank);
+    Dbg(dbg_ctl, "Node is occupied");
+    Dbg(dbg_ctl, "Node has rank %d", rank);
   } else {
-    Debug(debug_tag, "Node is not occupied");
+    Dbg(dbg_ctl, "Node is not occupied");
   }
 
   for (int i = 0; i < N_NODE_CHILDREN; ++i) {
     if (GetChild(i)) {
-      Debug(debug_tag, "Node has child for char %c", static_cast<char>(i));
+      Dbg(dbg_ctl, "Node has child for char %c", static_cast<char>(i));
     }
   }
 }

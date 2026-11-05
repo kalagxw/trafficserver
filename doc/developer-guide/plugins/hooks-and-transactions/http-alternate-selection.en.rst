@@ -16,6 +16,7 @@
    under the License.
 
 .. include:: ../../../common.defs
+.. default-domain:: cpp
 
 .. _developer-plugins-hooks-alternate-selection:
 
@@ -47,7 +48,7 @@ register locally to the hook ``TS_HTTP_SELECT_ALT_HOOK`` by using
 transaction or an HTTP session on hand when alternate selection is
 performed, it is only valid to hook onto the global list of
 ``TS_HTTP_SELECT_ALT_HOOK``. Traffic Server calls each of the select
-alternate hooks with the ``TS_EVENT_HTTP_SELECT_ALT`` event. The
+alternate hooks with the :enumerator:`TS_EVENT_HTTP_SELECT_ALT` event. The
 ``void *edata`` argument that is passed to the continuation is a pointer
 to an ``TSHttpAltInfo`` structure. It can be used later to call the HTTP
 alternate selection functions listed at the end of this section. Unlike
@@ -73,8 +74,8 @@ The sample code below shows how to call the alternate APIs.
       TSMLoc content_transform_field;
 
       int accept_transform_len = -1, content_transform_len = -1;
-      const char* accept_transform_value = NULL;
-      const char* content_transform_value = NULL;
+      const char* accept_transform_value = nullptr;
+      const char* content_transform_value = nullptr;
       int content_plugin, accept_plugin;
 
       float quality;
@@ -89,8 +90,8 @@ The sample code below shows how to call the alternate APIs.
       if (accept_transform_field) {
          TSMimeHdrFieldValueStringGet(client_req_buf, client_req_hdr,
             accept_transform_field, 0, &accept_transform_value, &accept_transform_len);
-         TSDebug(DBG_TAG, "Accept-Transform = |%s|",
-            accept_transform_value);
+         Dbg(dbg_ctl, "Accept-Transform = |%s|",
+             accept_transform_value);
       }
 
       /* get the Content-Transform field value from cached server response */
@@ -99,8 +100,8 @@ The sample code below shows how to call the alternate APIs.
       if (content_transform_field) {
          TSMimeHdrFieldValueStringGet(cache_resp_buf, cache_resp_hdr,
             content_transform_field, 0, &content_transform_value, &content_transform_len);
-         TSDebug(DBG_TAG, "Content-Transform = |%s|",
-            content_transform_value);
+         Dbg(dbg_ctl, "Content-Transform = |%s|",
+             content_transform_value);
       }
 
       /* compute quality */
@@ -118,7 +119,7 @@ The sample code below shows how to call the alternate APIs.
          quality = content_plugin ? 0.0 : 0.5;
       }
 
-      TSDebug(DBG_TAG, "Setting quality to %3.1f", quality);
+      Dbg(dbg_ctl, "Setting quality to %3.1f", quality);
 
       /* set quality for this alternate */
       TSHttpAltInfoQualitySet(infop, quality);
@@ -141,7 +142,7 @@ The sample code below shows how to call the alternate APIs.
 
       switch (event) {
          case TS_EVENT_HTTP_SELECT_ALT:
-            infop = (TSHttpAltInfo)edata;
+            infop = static_cast<TSHttpAltInfo>(edata);
             handle_select_alt(infop);
             break;
 
@@ -155,7 +156,7 @@ The sample code below shows how to call the alternate APIs.
    void TSPluginInit (int argc, const char *argv[])
    {
       TSHttpHookAdd(TS_HTTP_SELECT_ALT_HOOK, TSContCreate (alt_plugin,
-         NULL));
+         nullptr));
    }
 
 Traffic Server augments the alternate selection through these callouts

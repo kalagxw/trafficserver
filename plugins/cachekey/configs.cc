@@ -28,13 +28,14 @@
 #include <cstring>   /* strlen() */
 
 #include "configs.h"
+#include "tsutil/StringCompare.h"
 
 template <typename ContainerType>
 static void
 commaSeparateString(ContainerType &c, const String &input)
 {
   std::istringstream istr(input);
-  String token;
+  String             token;
 
   while (std::getline(istr, token, ',')) {
     c.insert(c.end(), token);
@@ -44,7 +45,7 @@ commaSeparateString(ContainerType &c, const String &input)
 static bool
 isTrue(const char *arg)
 {
-  return (nullptr == arg || 0 == strncasecmp("true", arg, 4) || 0 == strncasecmp("1", arg, 1) || 0 == strncasecmp("yes", arg, 3));
+  return (nullptr == arg || ts::iequals("true", arg) || ts::iequals("1", arg) || ts::iequals("yes", arg));
 }
 
 void
@@ -62,11 +63,9 @@ ConfigElements::setInclude(const char *arg)
 static void
 setPattern(MultiPattern &multiPattern, const char *arg)
 {
-  Pattern *p = new Pattern();
+  auto p = std::make_unique<Pattern>();
   if (nullptr != p && p->init(arg)) {
-    multiPattern.add(p);
-  } else {
-    delete p;
+    multiPattern.add(std::move(p));
   }
 }
 
@@ -90,7 +89,7 @@ ConfigElements::setCapture(const String &name, const String &pattern)
 void
 ConfigElements::addCapture(const char *arg)
 {
-  StringView args(arg);
+  StringView            args(arg);
   StringView::size_type pos = args.find_first_of(':');
   if (StringView::npos != pos) {
     String name(args.substr(0, pos));
@@ -300,8 +299,8 @@ Configs::loadClassifiers(const String &args, bool denylist)
   String path(makeConfigPath(filename));
 
   std::ifstream ifstr;
-  String regex;
-  unsigned lineno = 0;
+  String        regex;
+  unsigned      lineno = 0;
 
   ifstr.open(path.c_str());
   if (!ifstr) {
@@ -309,11 +308,11 @@ Configs::loadClassifiers(const String &args, bool denylist)
     return false;
   }
 
-  MultiPattern *multiPattern;
+  std::unique_ptr<MultiPattern> multiPattern;
   if (denylist) {
-    multiPattern = new NonMatchingMultiPattern(classname);
+    multiPattern = std::make_unique<NonMatchingMultiPattern>(classname);
   } else {
-    multiPattern = new MultiPattern(classname);
+    multiPattern = std::make_unique<MultiPattern>(classname);
   }
   if (nullptr == multiPattern) {
     CacheKeyError("failed to allocate classifier '%s'", classname.c_str());
@@ -323,7 +322,6 @@ Configs::loadClassifiers(const String &args, bool denylist)
   CacheKeyDebug("loading classifier '%s' from '%s'", classname.c_str(), path.c_str());
 
   while (std::getline(ifstr, regex)) {
-    Pattern *p;
     String::size_type pos;
 
     ++lineno;
@@ -338,28 +336,25 @@ Configs::loadClassifiers(const String &args, bool denylist)
       continue;
     }
 
-    p = new Pattern();
+    auto p = std::make_unique<Pattern>();
 
-    if (nullptr != p && p->init(regex)) {
+    if (p->init(regex)) {
       if (denylist) {
         CacheKeyDebug("Added pattern '%s' to deny list '%s'", regex.c_str(), classname.c_str());
-        multiPattern->add(p);
+        multiPattern->add(std::move(p));
       } else {
         CacheKeyDebug("Added pattern '%s' to allow list '%s'", regex.c_str(), classname.c_str());
-        multiPattern->add(p);
+        multiPattern->add(std::move(p));
       }
     } else {
       CacheKeyError("%s:%u: failed to parse regex '%s'", path.c_str(), lineno, regex.c_str());
-      delete p;
     }
   }
 
   ifstr.close();
 
   if (!multiPattern->empty()) {
-    _classifier.add(multiPattern);
-  } else {
-    delete multiPattern;
+    _classifier.add(std::move(multiPattern));
   }
 
   return true;
@@ -376,31 +371,31 @@ bool
 Configs::init(int argc, const char *argv[], bool perRemapConfig)
 {
   static const struct option longopt[] = {
-    {const_cast<char *>("exclude-params"), optional_argument, nullptr, 'a'},
-    {const_cast<char *>("include-params"), optional_argument, nullptr, 'b'},
+    {const_cast<char *>("exclude-params"),       optional_argument, nullptr, 'a'},
+    {const_cast<char *>("include-params"),       optional_argument, nullptr, 'b'},
     {const_cast<char *>("include-match-params"), optional_argument, nullptr, 'c'},
     {const_cast<char *>("exclude-match-params"), optional_argument, nullptr, 'd'},
-    {const_cast<char *>("sort-params"), optional_argument, nullptr, 'e'},
-    {const_cast<char *>("remove-all-params"), optional_argument, nullptr, 'f'},
-    {const_cast<char *>("include-headers"), optional_argument, nullptr, 'g'},
-    {const_cast<char *>("include-cookies"), optional_argument, nullptr, 'h'},
-    {const_cast<char *>("ua-capture"), optional_argument, nullptr, 'i'},
-    {const_cast<char *>("ua-allowlist"), optional_argument, nullptr, 'j'},
-    {const_cast<char *>("ua-denylist"), optional_argument, nullptr, 'k'},
-    {const_cast<char *>("static-prefix"), optional_argument, nullptr, 'l'},
-    {const_cast<char *>("capture-prefix"), optional_argument, nullptr, 'm'},
-    {const_cast<char *>("capture-prefix-uri"), optional_argument, nullptr, 'n'},
-    {const_cast<char *>("capture-path"), optional_argument, nullptr, 'o'},
-    {const_cast<char *>("capture-path-uri"), optional_argument, nullptr, 'p'},
-    {const_cast<char *>("remove-prefix"), optional_argument, nullptr, 'q'},
-    {const_cast<char *>("remove-path"), optional_argument, nullptr, 'r'},
-    {const_cast<char *>("separator"), optional_argument, nullptr, 's'},
-    {const_cast<char *>("uri-type"), optional_argument, nullptr, 't'},
-    {const_cast<char *>("key-type"), optional_argument, nullptr, 'u'},
-    {const_cast<char *>("capture-header"), optional_argument, nullptr, 'v'},
-    {const_cast<char *>("canonical-prefix"), optional_argument, nullptr, 'w'},
+    {const_cast<char *>("sort-params"),          optional_argument, nullptr, 'e'},
+    {const_cast<char *>("remove-all-params"),    optional_argument, nullptr, 'f'},
+    {const_cast<char *>("include-headers"),      optional_argument, nullptr, 'g'},
+    {const_cast<char *>("include-cookies"),      optional_argument, nullptr, 'h'},
+    {const_cast<char *>("ua-capture"),           optional_argument, nullptr, 'i'},
+    {const_cast<char *>("ua-allowlist"),         optional_argument, nullptr, 'j'},
+    {const_cast<char *>("ua-denylist"),          optional_argument, nullptr, 'k'},
+    {const_cast<char *>("static-prefix"),        optional_argument, nullptr, 'l'},
+    {const_cast<char *>("capture-prefix"),       optional_argument, nullptr, 'm'},
+    {const_cast<char *>("capture-prefix-uri"),   optional_argument, nullptr, 'n'},
+    {const_cast<char *>("capture-path"),         optional_argument, nullptr, 'o'},
+    {const_cast<char *>("capture-path-uri"),     optional_argument, nullptr, 'p'},
+    {const_cast<char *>("remove-prefix"),        optional_argument, nullptr, 'q'},
+    {const_cast<char *>("remove-path"),          optional_argument, nullptr, 'r'},
+    {const_cast<char *>("separator"),            optional_argument, nullptr, 's'},
+    {const_cast<char *>("uri-type"),             optional_argument, nullptr, 't'},
+    {const_cast<char *>("key-type"),             optional_argument, nullptr, 'u'},
+    {const_cast<char *>("capture-header"),       optional_argument, nullptr, 'v'},
+    {const_cast<char *>("canonical-prefix"),     optional_argument, nullptr, 'w'},
     /* reserve 'z' for 'config' files */
-    {nullptr, 0, nullptr, 0},
+    {nullptr,                                    0,                 nullptr, 0  },
   };
 
   bool status = true;
@@ -593,7 +588,7 @@ Configs::setKeyType(const char *arg)
     StringVector types;
     ::commaSeparateString<StringVector>(types, arg);
 
-    for (auto type : types) {
+    for (const auto &type : types) {
       if (9 == type.length() && 0 == strncasecmp(type.c_str(), "cache_key", 9)) {
         _keyTypes.insert(CacheKeyKeyType::CACHE_KEY);
         CacheKeyDebug("setting cache key");

@@ -16,7 +16,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSHttpHdrDestroy
 ****************
@@ -28,7 +28,7 @@ Synopsis
 
     #include <ts/ts.h>
 
-.. function:: void TSHttpHdrDestroy(TSMBuffer bufp, TSMLoc offset)
+.. function:: void TSHttpHdrDestroy(TSMBuffer bufp, TSMLoc offset) noexcept
 
 Description
 ===========
@@ -39,4 +39,4 @@ Destroys the HTTP header located at :arg:`hdr_loc` within the marshal buffer
 .. important::
 
    Do not forget to release the handle :arg:`hdr_loc` with a call to
-   :c:func:`TSHandleMLocRelease`.
+   :func:`TSHandleMLocRelease`.

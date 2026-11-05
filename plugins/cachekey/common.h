@@ -25,17 +25,18 @@
 
 #define PLUGIN_NAME "cachekey"
 
+#include <memory>
 #include <string>
 #include <string_view>
 #include <set>
 #include <list>
 #include <vector>
 
-typedef std::string String;
-typedef std::string_view StringView;
-typedef std::set<std::string> StringSet;
-typedef std::list<std::string> StringList;
-typedef std::vector<std::string> StringVector;
+using String       = std::string;
+using StringView   = std::string_view;
+using StringSet    = std::set<std::string>;
+using StringList   = std::list<std::string>;
+using StringVector = std::vector<std::string>;
 
 #ifdef CACHEKEY_UNIT_TEST
 #include <stdio.h>
@@ -48,14 +49,16 @@ void PrintToStdErr(const char *fmt, ...);
 #else /* CACHEKEY_UNIT_TEST */
 #include "ts/ts.h"
 
-#define CacheKeyDebug(fmt, ...)                                                           \
-  do {                                                                                    \
-    TSDebug(PLUGIN_NAME, "%s:%d:%s() " fmt, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+extern DbgCtl CacheKey_dbg_ctl;
+
+#define CacheKeyDebug(fmt, ...)                \
+  do {                                         \
+    Dbg(CacheKey_dbg_ctl, fmt, ##__VA_ARGS__); \
   } while (0)
 
-#define CacheKeyError(fmt, ...)                                                           \
-  do {                                                                                    \
-    TSError("(%s) " fmt, PLUGIN_NAME, ##__VA_ARGS__);                                     \
-    TSDebug(PLUGIN_NAME, "%s:%d:%s() " fmt, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+#define CacheKeyError(fmt, ...)                       \
+  do {                                                \
+    TSError("(%s) " fmt, PLUGIN_NAME, ##__VA_ARGS__); \
+    Dbg(CacheKey_dbg_ctl, fmt, ##__VA_ARGS__);        \
   } while (0)
 #endif /* CACHEKEY_UNIT_TEST */

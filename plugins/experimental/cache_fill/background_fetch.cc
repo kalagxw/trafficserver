@@ -34,11 +34,38 @@
 #include <array>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/un.h>
 
 #include "ts/ts.h"
 #include "ts/remap.h"
 #include "background_fetch.h"
 using OutstandingRequests = std::unordered_map<std::string, bool>;
+
+namespace cache_fill_ns
+{
+DbgCtl dbg_ctl{PLUGIN_NAME};
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Remove a header (fully) from an TSMLoc / TSMBuffer. Return the number
+// of fields (header values) we removed.
+int
+remove_header(TSMBuffer bufp, TSMLoc hdr_loc, const char *header, int len)
+{
+  TSMLoc field = TSMimeHdrFieldFind(bufp, hdr_loc, header, len);
+  int    cnt   = 0;
+
+  while (field) {
+    TSMLoc tmp = TSMimeHdrFieldNextDup(bufp, hdr_loc, field);
+
+    ++cnt;
+    TSMimeHdrFieldDestroy(bufp, hdr_loc, field);
+    TSHandleMLocRelease(bufp, hdr_loc, field);
+    field = tmp;
+  }
+
+  return cnt;
+}
 
 ///////////////////////////////////////////////////////////////////////////
 // Set a header to a specific value. This will avoid going to through a
@@ -51,7 +78,7 @@ set_header(TSMBuffer bufp, TSMLoc hdr_loc, const char *header, int len, const ch
     return false;
   }
 
-  bool ret         = false;
+  bool   ret       = false;
   TSMLoc field_loc = TSMimeHdrFieldFind(bufp, hdr_loc, header, len);
 
   if (!field_loc) {
@@ -64,8 +91,8 @@ set_header(TSMBuffer bufp, TSMLoc hdr_loc, const char *header, int len, const ch
       TSHandleMLocRelease(bufp, hdr_loc, field_loc);
     }
   } else {
-    TSMLoc tmp = nullptr;
-    bool first = true;
+    TSMLoc tmp   = nullptr;
+    bool   first = true;
 
     while (field_loc) {
       tmp = TSMimeHdrFieldNextDup(bufp, hdr_loc, field_loc);
@@ -86,27 +113,27 @@ set_header(TSMBuffer bufp, TSMLoc hdr_loc, const char *header, int len, const ch
 }
 
 ///////////////////////////////////////////////////////////////////////////
-// Dump a header on stderr, useful together with TSDebug().
+// Dump a header on stderr, useful together with Dbg().
 static void
-dump_headers(TSMBuffer bufp, TSMLoc hdr_loc)
+dump_headers(TSMLoc hdr_loc)
 {
-  TSIOBuffer output_buffer;
+  TSIOBuffer       output_buffer;
   TSIOBufferReader reader;
-  TSIOBufferBlock block;
-  int64_t block_avail;
+  TSIOBufferBlock  block;
+  int64_t          block_avail;
 
   output_buffer = TSIOBufferCreate();
   reader        = TSIOBufferReaderAlloc(output_buffer);
 
   /* This will print  just MIMEFields and not the http request line */
-  TSMimeHdrPrint(bufp, hdr_loc, output_buffer);
+  TSMimeHdrPrint(hdr_loc, output_buffer);
 
   /* We need to loop over all the buffer blocks, there can be more than 1 */
   block = TSIOBufferReaderStart(reader);
   do {
     const char *block_start = TSIOBufferBlockReadStart(block, reader, &block_avail);
     if (block_avail > 0) {
-      TSDebug(PLUGIN_NAME, "Headers are:\n%.*s", static_cast<int>(block_avail), block_start);
+      Dbg(dbg_ctl, "Headers are:\n%.*s", static_cast<int>(block_avail), block_start);
     }
     TSIOBufferReaderConsume(reader, block_avail);
     block = TSIOBufferReaderStart(reader);
@@ -120,8 +147,8 @@ dump_headers(TSMBuffer bufp, TSMLoc hdr_loc)
 bool
 BgFetchData::initialize(TSMBuffer request, TSMLoc req_hdr, TSHttpTxn txnp)
 {
-  struct sockaddr const *ip = TSHttpTxnClientAddrGet(txnp);
-  bool ret                  = false;
+  struct sockaddr const *ip  = TSHttpTxnClientAddrGet(txnp);
+  bool                   ret = false;
 
   TSAssert(TS_NULL_MLOC == hdr_loc);
   TSAssert(TS_NULL_MLOC == url_loc);
@@ -131,8 +158,11 @@ BgFetchData::initialize(TSMBuffer request, TSMLoc req_hdr, TSHttpTxn txnp)
       memcpy(&client_ip, ip, sizeof(sockaddr_in));
     } else if (ip->sa_family == AF_INET6) {
       memcpy(&client_ip, ip, sizeof(sockaddr_in6));
+    } else if (ip->sa_family == AF_UNIX) {
+      memcpy(&client_ip, ip, sizeof(sockaddr_un));
     } else {
       TSError("[%s] Unknown address family %d", PLUGIN_NAME, ip->sa_family);
+      return false;
     }
   } else {
     TSError("[%s] Failed to get client host info", PLUGIN_NAME);
@@ -147,8 +177,8 @@ BgFetchData::initialize(TSMBuffer request, TSMLoc req_hdr, TSHttpTxn txnp)
     if (TS_SUCCESS == TSHttpTxnPristineUrlGet(txnp, &request, &p_url)) {
       if (TS_SUCCESS == TSUrlClone(mbuf, request, p_url, &url_loc)) {
         TSMLoc c_url = TS_NULL_MLOC;
-        int len;
-        char *url = nullptr;
+        int    len;
+        char  *url = nullptr;
 
         // Get the cache key URL (for now), since this has better lookup behavior when using
         // e.g. the cachekey plugin.
@@ -156,7 +186,7 @@ BgFetchData::initialize(TSMBuffer request, TSMLoc req_hdr, TSHttpTxn txnp)
           if (TS_SUCCESS == TSHttpTxnCacheLookupUrlGet(txnp, request, c_url)) {
             url = TSUrlStringGet(request, c_url, &len);
             TSHandleMLocRelease(request, TS_NULL_MLOC, c_url);
-            TSDebug(PLUGIN_NAME, "Cache URL is %.*s", len, url);
+            Dbg(dbg_ctl, "Cache URL is %.*s", len, url);
           }
         }
 
@@ -169,7 +199,13 @@ BgFetchData::initialize(TSMBuffer request, TSMLoc req_hdr, TSHttpTxn txnp)
             const char *hostp = TSUrlHostGet(mbuf, url_loc, &len);
 
             if (set_header(mbuf, hdr_loc, TS_MIME_FIELD_HOST, TS_MIME_LEN_HOST, hostp, len)) {
-              TSDebug(PLUGIN_NAME, "Set header Host: %.*s", len, hostp);
+              Dbg(dbg_ctl, "Set header Host: %.*s", len, hostp);
+            }
+            // Next, remove the Range headers and IMS (conditional) headers from the request
+            for (auto const &header : FILTER_HEADERS) {
+              if (remove_header(mbuf, hdr_loc, header.data(), header.size()) > 0) {
+                Dbg(dbg_ctl, "Removed the %s header from request", header.data());
+              }
             }
             ret = true;
           }
@@ -212,31 +248,31 @@ static int
 cont_bg_fetch(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
 {
   BgFetchData *data = static_cast<BgFetchData *>(TSContDataGet(contp));
-  int64_t avail;
+  int64_t      avail;
 
   switch (event) {
   case TS_EVENT_IMMEDIATE:
   case TS_EVENT_TIMEOUT:
     // Debug info for this particular bg fetch (put all debug in here please)
-    if (TSIsDebugTagSet(PLUGIN_NAME)) {
-      char buf[INET6_ADDRSTRLEN];
+    if (dbg_ctl.on()) {
+      char            buf[INET6_ADDRSTRLEN];
       const sockaddr *sockaddress = reinterpret_cast<const sockaddr *>(&data->client_ip);
 
       switch (sockaddress->sa_family) {
       case AF_INET:
         inet_ntop(AF_INET, &(((struct sockaddr_in *)sockaddress)->sin_addr), buf, INET_ADDRSTRLEN);
-        TSDebug(PLUGIN_NAME, "Client IPv4 = %s", buf);
+        Dbg(dbg_ctl, "Client IPv4 = %s", buf);
         break;
       case AF_INET6:
         inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)sockaddress)->sin6_addr), buf, INET6_ADDRSTRLEN);
-        TSDebug(PLUGIN_NAME, "Client IPv6 = %s", buf);
+        Dbg(dbg_ctl, "Client IPv6 = %s", buf);
         break;
       default:
         TSError("[%s] Unknown address family %d", PLUGIN_NAME, sockaddress->sa_family);
         break;
       }
-      TSDebug(PLUGIN_NAME, "Starting background fetch, replaying:");
-      dump_headers(data->mbuf, data->hdr_loc);
+      Dbg(dbg_ctl, "Starting background fetch, replaying:");
+      dump_headers(data->hdr_loc);
     }
 
     // Setup the NetVC for background fetch
@@ -244,7 +280,6 @@ cont_bg_fetch(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
     if ((data->vc = TSHttpConnectWithPluginId(reinterpret_cast<sockaddr *>(&data->client_ip), PLUGIN_NAME, 0)) != nullptr) {
       TSHttpHdrPrint(data->mbuf, data->hdr_loc, data->req_io_buf);
       // We never send a body with the request. ToDo: Do we ever need to support that ?
-      TSIOBufferWrite(data->req_io_buf, "\r\n", 2);
 
       data->r_vio = TSVConnRead(data->vc, contp, data->resp_io_buf, INT64_MAX);
       data->w_vio = TSVConnWrite(data->vc, contp, data->req_io_buf_reader, TSIOBufferReaderAvail(data->req_io_buf_reader));
@@ -257,7 +292,7 @@ cont_bg_fetch(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
   case TS_EVENT_VCONN_WRITE_COMPLETE:
     // TSVConnShutdown(data->vc, 0, 1);
     // TSVIOReenable(data->w_vio);
-    TSDebug(PLUGIN_NAME, "Write Complete");
+    Dbg(dbg_ctl, "Write Complete");
     break;
 
   case TS_EVENT_VCONN_READ_READY:
@@ -273,13 +308,13 @@ cont_bg_fetch(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
   case TS_EVENT_VCONN_INACTIVITY_TIMEOUT:
   case TS_EVENT_ERROR:
     if (event == TS_EVENT_VCONN_INACTIVITY_TIMEOUT) {
-      TSDebug(PLUGIN_NAME, "Encountered Inactivity Timeout");
+      Dbg(dbg_ctl, "Encountered Inactivity Timeout");
       TSVConnAbort(data->vc, TS_VC_CLOSE_ABORT);
     } else {
       TSVConnClose(data->vc);
     }
 
-    TSDebug(PLUGIN_NAME, "Closing down background transaction, event= %s(%d)", TSHttpEventNameLookup(event), event);
+    Dbg(dbg_ctl, "Closing down background transaction, event= %s(%d)", TSHttpEventNameLookup(event), event);
     avail = TSIOBufferReaderAvail(data->resp_io_buf_reader);
     data->addBytes(avail);
     TSIOBufferReaderConsume(data->resp_io_buf_reader, avail);
@@ -291,7 +326,7 @@ cont_bg_fetch(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
     break;
 
   default:
-    TSDebug(PLUGIN_NAME, "Unhandled event: %s (%d)", TSHttpEventNameLookup(event), event);
+    Dbg(dbg_ctl, "Unhandled event: %s (%d)", TSHttpEventNameLookup(event), event);
     break;
   }
 

@@ -16,7 +16,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSHttpHdrHostGet
 ****************
@@ -41,5 +41,21 @@ header field.
 
 .. note::
 
-   This is much faster than calling :c:func:`TSHttpTxnEffectiveUrlStringGet` and
+   This is much faster than calling :func:`TSHttpTxnEffectiveUrlStringGet` and
    extracting the host from the result.
+
+.. note::
+
+   :func:`TSHttpHdrHostGet` checks both the URL and the ``Host`` header field,
+   making it reliable at any hook stage. In contrast, :func:`TSUrlHostGet`
+   operates only on the URL object obtained from :func:`TSHttpHdrUrlGet`. In
+   early hooks such as ``TS_HTTP_READ_REQUEST_HDR_HOOK``, the URL object may
+   not yet be fully parsed, and :func:`TSUrlHostGet` may return ``NULL`` even
+   when a ``Host`` header is present.
+
+See Also
+========
+
+:func:`TSUrlHostGet`,
+:func:`TSHttpHdrUrlGet`,
+:func:`TSHttpTxnEffectiveUrlStringGet`

@@ -31,7 +31,9 @@
 #include <chrono>
 #include <arpa/inet.h>
 
+#include <yaml-cpp/yaml.h>
 #include "ts/ts.h"
+#include "utilities.h"
 
 namespace IpReputation
 {
@@ -45,8 +47,15 @@ using LruEntry = std::tuple<KeyClass, uint32_t, uint32_t, std::chrono::time_poin
 // certain size.
 class SieveBucket : public std::list<LruEntry>
 {
+  using self_type = SieveBucket;
+
 public:
   SieveBucket(uint32_t max_size) : _max_size(max_size) {}
+
+  SieveBucket()                           = delete;
+  SieveBucket(self_type &&)               = delete;
+  self_type &operator=(const self_type &) = delete;
+  self_type &operator=(self_type &&)      = delete;
 
   bool
   full() const
@@ -83,17 +92,19 @@ using HashMap = std::unordered_map<KeyClass, SieveBucket::iterator>; // The hash
 // hashed value from the IP as the key (just like the hashed in cache_promote).
 class SieveLru
 {
-public:
-  SieveLru() : _lock(TSMutexCreate()){}; // The unitialized version
-  SieveLru(uint32_t num_buckets, uint32_t size);
-  ~SieveLru()
-  {
-    for (uint32_t i = 0; i <= _num_buckets + 1; ++i) { // Remember to delete the two special allow/block buckets too
-      delete _buckets[i];
-    }
-  }
+  using self_type = SieveLru;
 
-  void initialize(uint32_t num_buckets = 10, uint32_t size = 15);
+public:
+  SieveLru(std::string &name) : _lock(TSMutexCreate()) { _name = name; }
+
+  SieveLru()                              = delete;
+  SieveLru(self_type &&)                  = delete;
+  self_type &operator=(const self_type &) = delete;
+  self_type &operator=(self_type &&)      = delete;
+
+  ~SieveLru() {}
+
+  bool parseYaml(const YAML::Node &node);
 
   // Return value is the bucket (0 .. num_buckets) that the IP is in, and the
   // current count of "hits". The lookup version is similar, except it doesn't
@@ -114,21 +125,9 @@ public:
   }
 
   uint32_t
-  allow(KeyClass key)
-  {
-    return move_bucket(key, allowBucket());
-  }
-
-  uint32_t
   block(const sockaddr *sock)
   {
     return move_bucket(hasher(sock), blockBucket());
-  }
-
-  uint32_t
-  allow(const sockaddr *sock)
-  {
-    return move_bucket(hasher(sock), allowBucket());
   }
 
   // Lookup the current state of an IP
@@ -149,7 +148,6 @@ public:
   //   entryBucket == the highest bucket, where new IPs enter (also the biggest bucket)
   //   lastBucket  == the last bucket, which is most likely to be abusive
   //   blockBucket == the bucket where we "permanently" block bad IPs
-  //   allowBucket == the bucket where we "permanently" allow good IPs (can not be blocked)
   uint32_t
   entryBucket() const
   {
@@ -168,12 +166,6 @@ public:
     return 0;
   }
 
-  uint32_t
-  allowBucket() const
-  {
-    return _num_buckets + 1;
-  }
-
   size_t
   bucketSize(uint32_t bucket) const
   {
@@ -190,7 +182,42 @@ public:
     return _initialized;
   }
 
-  // Aging getters and setters
+  const std::string &
+  name() const
+  {
+    return _name;
+  }
+
+  uint32_t
+  numBuckets() const
+  {
+    return _num_buckets;
+  }
+
+  uint32_t
+  size() const
+  {
+    return _size;
+  }
+
+  uint32_t
+  percentage() const
+  {
+    return _percentage;
+  }
+
+  uint32_t
+  permablock_count() const
+  {
+    return _permablock_limit;
+  }
+
+  uint32_t
+  permablock_threshold() const
+  {
+    return _permablock_threshold;
+  }
+
   std::chrono::seconds
   maxAge() const
   {
@@ -200,37 +227,31 @@ public:
   std::chrono::seconds
   permaMaxAge() const
   {
-    return _perma_max_age;
-  }
-
-  void
-  maxAge(std::chrono::seconds maxage)
-  {
-    _max_age = maxage;
-  }
-
-  void
-  permaMaxAge(std::chrono::seconds maxage)
-  {
-    _perma_max_age = maxage;
+    return _permablock_max_age;
   }
 
   // Debugging tool, dumps some info around the buckets
-  void dump();
+  void   dump();
   size_t memoryUsed() const;
 
 protected:
   int32_t move_bucket(KeyClass key, uint32_t to_bucket);
 
 private:
-  HashMap _map;
-  std::vector<SieveBucket *> _buckets;
-  uint32_t _num_buckets               = 10;                           // Leave this at 10 ...
-  uint32_t _size                      = 0;                            // Set this up to initialize
-  std::chrono::seconds _max_age       = std::chrono::seconds::zero(); // Aging time in the SieveLru (default off)
-  std::chrono::seconds _perma_max_age = std::chrono::seconds::zero(); // Aging time in the SieveLru for perma-blocks
-  bool _initialized                   = false;                        // If this has been properly initialized yet
-  TSMutex _lock;                                                      // The lock around all data access
+  HashMap                                   _map;
+  std::vector<std::unique_ptr<SieveBucket>> _buckets;
+  std::string                               _name;
+  bool                                      _initialized = false; // If this has been properly initialized yet
+  TSMutex                                   _lock;                // The lock around all data access
+  // Standard options
+  uint32_t             _num_buckets = 10;                           // Leave this at 10 ...
+  uint32_t             _size        = 0;                            // Set this up to initialize
+  uint32_t             _percentage  = 90;                           // At what percentage of limit do we start blocking
+  std::chrono::seconds _max_age     = std::chrono::seconds::zero(); // Aging time in the SieveLru (default off)
+  // Perma-block options
+  uint32_t             _permablock_limit     = 0;                            // "Hits" limit for blocking permanently
+  uint32_t             _permablock_threshold = 0;                            // Pressure threshold for permanent block
+  std::chrono::seconds _permablock_max_age   = std::chrono::seconds::zero(); // Aging time in the SieveLru for perma-blocks
 };
 
 } // namespace IpReputation

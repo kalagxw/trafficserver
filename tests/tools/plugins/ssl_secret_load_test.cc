@@ -37,8 +37,13 @@
 #include <unordered_map>
 #include <vector>
 
-#define PN "ssl_secret_load_test"
+#define PN  "ssl_secret_load_test"
 #define PCP "[" PN " Plugin] "
+
+namespace
+{
+DbgCtl dbg_ctl{PN};
+}
 
 // Map of secret name to last modified time
 std::unordered_map<std::string, time_t> secret_versions;
@@ -67,13 +72,13 @@ load_file(const std::string &newname, struct stat *statdata, std::string &data_i
 
   int fd = open(newname.c_str(), O_RDONLY);
   if (fd < 0) {
-    TSDebug(PN, "Failed to load %s", newname.c_str());
+    Dbg(dbg_ctl, "Failed to load %s", newname.c_str());
     return false;
   }
   size_t total_size = statdata->st_size;
   data_item.resize(total_size);
   size_t offset = 0;
-  char *data    = data_item.data();
+  char  *data   = data_item.data();
   while (offset < total_size) {
     int num_read = read(fd, data + offset, total_size - offset);
     if (num_read < 0) {
@@ -87,11 +92,11 @@ load_file(const std::string &newname, struct stat *statdata, std::string &data_i
 }
 
 int
-CB_Load_Secret(TSCont cont, TSEvent event, void *edata)
+CB_Load_Secret(TSCont /* cont ATS_UNUSED */, TSEvent /* event ATS_UNUSED */, void *edata)
 {
   TSSecretID *id = reinterpret_cast<TSSecretID *>(edata);
 
-  TSDebug(PN, "Load secret for %*.s", static_cast<int>(id->cert_name_len), id->cert_name);
+  Dbg(dbg_ctl, "Load secret for %*.s", static_cast<int>(id->cert_name_len), id->cert_name);
 
   std::string newname;
   std::string data_item;
@@ -99,7 +104,7 @@ CB_Load_Secret(TSCont cont, TSEvent event, void *edata)
 
   update_file_name(std::string_view{id->cert_name, id->cert_name_len}, newname);
 
-  TSDebug(PN, "Really load secret for %s", newname.c_str());
+  Dbg(dbg_ctl, "Really load secret for %s", newname.c_str());
 
   // Load the secret and add it to the map
   if (!load_file(newname, &statdata, data_item)) {
@@ -110,10 +115,10 @@ CB_Load_Secret(TSCont cont, TSEvent event, void *edata)
   TSSslSecretSet(id->cert_name, id->cert_name_len, data_item.data(), data_item.size());
 
   if (id->key_name_len > 0) {
-    TSDebug(PN, "Load secret for %*.s", static_cast<int>(id->key_name_len), id->key_name);
+    Dbg(dbg_ctl, "Load secret for %*.s", static_cast<int>(id->key_name_len), id->key_name);
     update_file_name(std::string_view{id->key_name, id->key_name_len}, newname);
 
-    TSDebug(PN, "Really load secret for %s", newname.c_str());
+    Dbg(dbg_ctl, "Really load secret for %s", newname.c_str());
 
     // Load the secret and add it to the map
     if (!load_file(newname, &statdata, data_item)) {
@@ -128,7 +133,7 @@ CB_Load_Secret(TSCont cont, TSEvent event, void *edata)
 }
 
 int
-CB_Update_Secret(TSCont cont, TSEvent event, void *edata)
+CB_Update_Secret(TSCont cont, TSEvent /* event ATS_UNUSED */, void * /* edata ATS_UNUSED */)
 {
   std::vector<std::string> updates;
   for (auto iter = secret_versions.begin(); iter != secret_versions.end(); ++iter) {
@@ -137,14 +142,14 @@ CB_Update_Secret(TSCont cont, TSEvent event, void *edata)
     struct stat statdata;
 
     update_file_name(iter->first, newname);
-    TSDebug(PN, "check secret for %s, really %s", iter->first.c_str(), newname.c_str());
+    Dbg(dbg_ctl, "check secret for %s, really %s", iter->first.c_str(), newname.c_str());
 
     if (stat(newname.c_str(), &statdata) < 0) {
       continue;
     }
 
     if (statdata.st_mtime > iter->second) {
-      TSDebug(PN, "check secret %s has been updated", newname.c_str());
+      Dbg(dbg_ctl, "check secret %s has been updated", newname.c_str());
       if (!load_file(newname, &statdata, data_item)) {
         continue;
       }
@@ -154,8 +159,12 @@ CB_Update_Secret(TSCont cont, TSEvent event, void *edata)
     }
   }
   for (auto name : updates) {
-    TSDebug(PN, "update cert for secret %s", name.c_str());
-    TSSslSecretUpdate(name.c_str(), name.length());
+    TSReturnCode result = TSSslSecretUpdate(name.c_str(), name.length());
+    if (result == TS_SUCCESS) {
+      Dbg(dbg_ctl, "updated cert for secret %s", name.c_str());
+    } else {
+      TSError("[%s] failed to update cert for secret %s", PN, name.c_str());
+    }
   }
   TSContScheduleOnPool(cont, 3000, TS_THREAD_POOL_TASK);
   return TS_SUCCESS;
@@ -163,7 +172,7 @@ CB_Update_Secret(TSCont cont, TSEvent event, void *edata)
 
 // Called by ATS as our initialization point
 void
-TSPluginInit(int argc, const char *argv[])
+TSPluginInit(int /* argc ATS_UNUSED */, const char ** /* argv ATS_UNUSED */)
 {
   TSPluginRegistrationInfo info;
   info.plugin_name   = const_cast<char *>("SSL secret load test");

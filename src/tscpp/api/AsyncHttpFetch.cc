@@ -24,7 +24,6 @@
 #include <arpa/inet.h>
 #include "tscpp/api/AsyncHttpFetch.h"
 #include "ts/ts.h"
-#include "ts/experimental.h"
 #include "logging_internal.h"
 #include "utils_internal.h"
 
@@ -33,27 +32,28 @@
 #include <utility>
 
 using namespace atscppapi;
+
 using std::string;
 
 /**
  * @private
  */
 struct atscppapi::AsyncHttpFetchState : noncopyable {
-  std::shared_ptr<Request> request_;
-  Response response_;
-  string request_body_;
-  AsyncHttpFetch::Result result_;
-  const void *body_;
-  size_t body_size_;
-  TSMBuffer hdr_buf_;
-  TSMLoc hdr_loc_;
+  std::shared_ptr<Request>                     request_;
+  Response                                     response_;
+  string                                       request_body_;
+  AsyncHttpFetch::Result                       result_;
+  const void                                  *body_;
+  size_t                                       body_size_;
+  TSMBuffer                                    hdr_buf_;
+  TSMLoc                                       hdr_loc_;
   std::shared_ptr<AsyncDispatchControllerBase> dispatch_controller_;
-  AsyncHttpFetch::StreamingFlag streaming_flag_;
-  TSFetchSM fetch_sm_;
-  static const size_t BODY_BUFFER_SIZE = 32 * 1024;
-  char body_buffer_[BODY_BUFFER_SIZE];
+  AsyncHttpFetch::StreamingFlag                streaming_flag_;
+  TSFetchSM                                    fetch_sm_;
+  static const size_t                          BODY_BUFFER_SIZE = 32 * 1024;
+  char                                         body_buffer_[BODY_BUFFER_SIZE];
 
-  AsyncHttpFetchState(const string &url_str, HttpMethod http_method, string request_body,
+  AsyncHttpFetchState(const std::string &url_str, HttpMethod http_method, string request_body,
                       AsyncHttpFetch::StreamingFlag streaming_flag)
     : request_body_(std::move(request_body)),
       result_(AsyncHttpFetch::RESULT_FAILURE),
@@ -89,25 +89,25 @@ struct atscppapi::AsyncHttpFetchState : noncopyable {
 namespace
 {
 const unsigned int LOCAL_IP_ADDRESS = 0x0100007f;
-const int LOCAL_PORT                = 8080;
+const int          LOCAL_PORT       = 8080;
 
 static int
 handleFetchEvents(TSCont cont, TSEvent event, void *edata)
 {
   LOG_DEBUG("Received fetch event = %d, edata = %p", event, edata);
-  AsyncHttpFetch *fetch_provider = static_cast<AsyncHttpFetch *>(TSContDataGet(cont));
-  AsyncHttpFetchState *state     = utils::internal::getAsyncHttpFetchState(*fetch_provider);
+  AsyncHttpFetch      *fetch_provider = static_cast<AsyncHttpFetch *>(TSContDataGet(cont));
+  AsyncHttpFetchState *state          = utils::internal::getAsyncHttpFetchState(*fetch_provider);
 
   if (state->streaming_flag_ == AsyncHttpFetch::STREAMING_DISABLED) {
     if (event == static_cast<int>(AsyncHttpFetch::RESULT_SUCCESS)) {
-      TSHttpTxn txn = static_cast<TSHttpTxn>(edata);
-      int data_len;
+      TSHttpTxn   txn = static_cast<TSHttpTxn>(edata);
+      int         data_len;
       const char *data_start = TSFetchRespGet(txn, &data_len);
       if (data_start && (data_len > 0)) {
-        const char *data_end = data_start + data_len;
-        TSHttpParser parser  = TSHttpParserCreate();
-        state->hdr_buf_      = TSMBufferCreate();
-        state->hdr_loc_      = TSHttpHdrCreate(state->hdr_buf_);
+        const char  *data_end = data_start + data_len;
+        TSHttpParser parser   = TSHttpParserCreate();
+        state->hdr_buf_       = TSMBufferCreate();
+        state->hdr_loc_       = TSHttpHdrCreate(state->hdr_buf_);
         TSHttpHdrTypeSet(state->hdr_buf_, state->hdr_loc_, TS_HTTP_TYPE_RESPONSE);
         if (TSHttpHdrParseResp(parser, state->hdr_buf_, state->hdr_loc_, &data_start, data_end) == TS_PARSE_DONE) {
           TSHttpStatus status = TSHttpHdrStatusGet(state->hdr_buf_, state->hdr_loc_);
@@ -154,31 +154,32 @@ handleFetchEvents(TSCont cont, TSEvent event, void *edata)
 }
 } // namespace
 
-AsyncHttpFetch::AsyncHttpFetch(const string &url_str, const string &request_body)
+AsyncHttpFetch::AsyncHttpFetch(const std::string &url_str, const std::string &request_body)
 {
   init(url_str, HTTP_METHOD_POST, request_body, STREAMING_DISABLED);
 }
 
-AsyncHttpFetch::AsyncHttpFetch(const string &url_str, HttpMethod http_method)
+AsyncHttpFetch::AsyncHttpFetch(const std::string &url_str, HttpMethod http_method)
 {
   init(url_str, http_method, "", STREAMING_DISABLED);
 }
 
-AsyncHttpFetch::AsyncHttpFetch(const string &url_str, StreamingFlag streaming_flag, const string &request_body)
+AsyncHttpFetch::AsyncHttpFetch(const std::string &url_str, StreamingFlag streaming_flag, const std::string &request_body)
 {
   init(url_str, HTTP_METHOD_POST, request_body, streaming_flag);
 }
 
-AsyncHttpFetch::AsyncHttpFetch(const string &url_str, StreamingFlag streaming_flag, HttpMethod http_method)
+AsyncHttpFetch::AsyncHttpFetch(const std::string &url_str, StreamingFlag streaming_flag, HttpMethod http_method)
 {
   init(url_str, http_method, "", streaming_flag);
 }
 
 void
-AsyncHttpFetch::init(const string &url_str, HttpMethod http_method, const string &request_body, StreamingFlag streaming_flag)
+AsyncHttpFetch::init(const std::string &url_str, HttpMethod http_method, const std::string &request_body,
+                     StreamingFlag streaming_flag)
 {
   LOG_DEBUG("Created new AsyncHttpFetch object %p", this);
-  state_ = new AsyncHttpFetchState(url_str, http_method, request_body, streaming_flag);
+  state_ = std::make_unique<AsyncHttpFetchState>(url_str, http_method, request_body, streaming_flag);
 }
 
 void
@@ -263,7 +264,7 @@ AsyncHttpFetch::getRequestUrl() const
   return state_->request_->getUrl();
 }
 
-const string &
+const std::string &
 AsyncHttpFetch::getRequestBody() const
 {
   return state_->request_body_;
@@ -282,7 +283,4 @@ AsyncHttpFetch::getResponseBody(const void *&body, size_t &body_size) const
   body_size = state_->body_size_;
 }
 
-AsyncHttpFetch::~AsyncHttpFetch()
-{
-  delete state_;
-}
+AsyncHttpFetch::~AsyncHttpFetch() {}

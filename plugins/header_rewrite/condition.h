@@ -21,6 +21,7 @@
 //
 #pragma once
 
+#include <memory>
 #include <string>
 
 #include "ts/ts.h"
@@ -30,47 +31,36 @@
 #include "matcher.h"
 #include "parser.h"
 
-// Condition modifiers
-enum CondModifiers {
-  COND_NONE   = 0,
-  COND_OR     = 1,
-  COND_AND    = 2,
-  COND_NOT    = 4,
-  COND_NOCASE = 8, // Not implemented
-  COND_LAST   = 16,
-  COND_CHAIN  = 32 // Not implemented
-};
-
 ///////////////////////////////////////////////////////////////////////////////
 // Base class for all Conditions (this is also the interface)
 //
 class Condition : public Statement
 {
 public:
-  Condition() { TSDebug(PLUGIN_NAME_DBG, "Calling CTOR for Condition"); }
+  Condition() { Dbg(dbg_ctl, "Calling CTOR for Condition"); }
 
-  ~Condition() override
-  {
-    TSDebug(PLUGIN_NAME_DBG, "Calling DTOR for Condition");
-    delete _matcher;
-  }
+  ~Condition() override { Dbg(dbg_ctl, "Calling DTOR for Condition"); }
 
   // noncopyable
-  Condition(const Condition &) = delete;
+  Condition(const Condition &)      = delete;
   void operator=(const Condition &) = delete;
 
   // Inline this, it's critical for speed (and only used twice)
   bool
   do_eval(const Resources &res)
   {
+    // In do_eval, so AND/OR short-circuited conditions aren't counted.
+    if (hrw_stat_conditions != nullptr) {
+      ts::Metrics::Counter::increment(hrw_stat_conditions);
+    }
     bool rt = eval(res);
 
-    if (_mods & COND_NOT) {
+    if (has_modifier(_mods, CondModifiers::NOT)) {
       rt = !rt;
     }
 
     if (_next) {
-      if (_mods & COND_OR) {
+      if (has_modifier(_mods, CondModifiers::OR)) {
         return rt || (static_cast<Condition *>(_next)->do_eval(res));
       } else { // AND is the default
         // Short circuit if we're an AND and the first condition is FALSE.
@@ -90,21 +80,34 @@ public:
   bool
   last() const
   {
-    return _mods & COND_LAST;
+    return has_modifier(_mods, CondModifiers::MOD_L);
+  }
+
+  CondModifiers
+  mods() const
+  {
+    return _mods;
+  }
+
+  void
+  set_mods(CondModifiers mods)
+  {
+    _mods = mods;
   }
 
   // Setters
   virtual void
   set_qualifier(const std::string &q)
   {
-    _qualifier = q;
+    _qualifier_wks = TSMimeHdrStringToWKS(q.c_str(), q.length());
+    _qualifier     = q;
   }
 
   // Some getters
   const Matcher *
   get_matcher() const
   {
-    return _matcher;
+    return _matcher.get();
   }
 
   MatcherOps
@@ -119,18 +122,34 @@ public:
     return _qualifier;
   }
 
-  // Virtual methods, has to be implemented by each conditional;
   void initialize(Parser &p) override;
-  virtual void append_value(std::string &s, const Resources &res) = 0;
+
+  // Modifiers apply here, so conditions and %{} expansions in values see the same value.
+  void
+  append_value(std::string &s, const Resources &res)
+  {
+    size_t start = s.size();
+
+    do_append_value(s, res);
+    if (has_modifier(_mods, CondModifiers::MOD_NORM)) {
+      normalize(s, start);
+    }
+  }
 
 protected:
   // Evaluate the condition
   virtual bool eval(const Resources &res) = 0;
 
-  std::string _qualifier;
-  MatcherOps _cond_op = MATCH_EQUAL;
-  Matcher *_matcher   = nullptr;
+  std::string              _qualifier;
+  const char              *_qualifier_wks = nullptr;
+  MatcherOps               _cond_op       = MATCH_EQUAL;
+  std::unique_ptr<Matcher> _matcher       = nullptr;
 
 private:
-  CondModifiers _mods = COND_NONE;
+  // Private, so a caller holding a Condition * can't skip the modifiers in append_value().
+  virtual void do_append_value(std::string &s, const Resources &res) = 0;
+
+  static void normalize(std::string &s, size_t start);
+
+  CondModifiers _mods = CondModifiers::NONE;
 };

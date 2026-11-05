@@ -37,7 +37,12 @@
 
 #include "ts/ts.h"
 #include "ts/remap.h"
+#include "ts/remap_version.h"
 #include "background_fetch.h"
+#include "configs.h"
+
+// Global config, if we don't have a remap specific config.
+static BgFetchConfig *gConfig = nullptr;
 
 static const char *
 getCacheLookupResultName(TSCacheLookupResult result)
@@ -59,7 +64,6 @@ getCacheLookupResultName(TSCacheLookupResult result)
     return "UNKNOWN_CACHE_LOOKUP_EVENT";
     break;
   }
-  return "UNKNOWN_CACHE_LOOKUP_EVENT";
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -72,21 +76,24 @@ cont_check_cacheable(TSHttpTxn txnp)
     return false;
   }
   int lookupStatus;
-  TSHttpTxnCacheLookupStatusGet(txnp, &lookupStatus);
-  TSDebug(PLUGIN_NAME, "lookup status: %s", getCacheLookupResultName(static_cast<TSCacheLookupResult>(lookupStatus)));
+  if (TSHttpTxnCacheLookupStatusGet(txnp, &lookupStatus) == TS_ERROR) {
+    TSError("[%s] Couldn't get cache status of object", PLUGIN_NAME);
+    return false;
+  }
+  Dbg(dbg_ctl, "lookup status: %s", getCacheLookupResultName(static_cast<TSCacheLookupResult>(lookupStatus)));
   bool ret = false;
   if (TS_CACHE_LOOKUP_MISS == lookupStatus || TS_CACHE_LOOKUP_HIT_STALE == lookupStatus) {
     bool const nostore = TSHttpTxnServerRespNoStoreGet(txnp);
 
-    TSDebug(PLUGIN_NAME, "is nostore set %d", nostore);
+    Dbg(dbg_ctl, "is nostore set %d", nostore);
     if (!nostore) {
       TSMBuffer request;
-      TSMLoc req_hdr;
+      TSMLoc    req_hdr;
       if (TS_SUCCESS == TSHttpTxnClientReqGet(txnp, &request, &req_hdr)) {
         BgFetchData *data = new BgFetchData();
         // Initialize the data structure (can fail) and acquire a privileged lock on the URL
         if (data->initialize(request, req_hdr, txnp) && data->acquireUrl()) {
-          TSDebug(PLUGIN_NAME, "scheduling background fetch");
+          Dbg(dbg_ctl, "scheduling background fetch");
           data->schedule();
           ret = true;
         } else {
@@ -107,24 +114,58 @@ cont_check_cacheable(TSHttpTxn txnp)
 static int
 cont_handle_cache(TSCont contp, TSEvent event, void *edata)
 {
-  TSHttpTxn txnp = static_cast<TSHttpTxn>(edata);
-  if (TS_EVENT_HTTP_CACHE_LOOKUP_COMPLETE == event) {
-    bool const requested = cont_check_cacheable(txnp);
-    if (requested) // Made a background fetch request, do not cache the response
-    {
-      TSDebug(PLUGIN_NAME, "setting no store");
-      TSHttpTxnCntlSet(txnp, TS_HTTP_CNTL_SERVER_NO_STORE, true);
-      TSHttpTxnCacheLookupStatusSet(txnp, TS_CACHE_LOOKUP_MISS);
+  TSHttpTxn      txnp   = static_cast<TSHttpTxn>(edata);
+  BgFetchConfig *config = static_cast<BgFetchConfig *>(TSContDataGet(contp));
+
+  if (nullptr == config) {
+    // something seriously wrong..
+    TSError("[%s] Can't get configurations", PLUGIN_NAME);
+  } else if (config->bgFetchAllowed(txnp)) {
+    if (TS_EVENT_HTTP_CACHE_LOOKUP_COMPLETE == event) {
+      bool const requested = cont_check_cacheable(txnp);
+      if (requested) // Made a background fetch request, do not cache the response
+      {
+        Dbg(dbg_ctl, "setting no store");
+        TSHttpTxnCntlSet(txnp, TS_HTTP_CNTL_SERVER_NO_STORE, true);
+        TSHttpTxnCacheLookupStatusSet(txnp, TS_CACHE_LOOKUP_MISS);
+      }
+
+    } else {
+      TSError("[%s] Unknown event for this plugin %d", PLUGIN_NAME, event);
+      Dbg(dbg_ctl, "unknown event for this plugin %d", event);
     }
-
-  } else {
-    TSError("[%s] Unknown event for this plugin %d", PLUGIN_NAME, event);
-    TSDebug(PLUGIN_NAME, "unknown event for this plugin %d", event);
   }
-
   // Reenable and continue with the state machine.
   TSHttpTxnReenable(txnp, TS_EVENT_HTTP_CONTINUE);
   return 0;
+}
+
+///////////////////////////////////////////////////////////////////////////
+// Setup global hooks
+void
+TSPluginInit(int argc, const char *argv[])
+{
+  TSPluginRegistrationInfo info;
+
+  info.plugin_name   = (char *)PLUGIN_NAME;
+  info.vendor_name   = (char *)"Apache Software Foundation";
+  info.support_email = (char *)"dev@trafficserver.apache.org";
+
+  if (TS_SUCCESS != TSPluginRegister(&info)) {
+    TSError("[%s] Plugin registration failed", PLUGIN_NAME);
+  }
+
+  TSCont cont = TSContCreate(cont_handle_cache, nullptr);
+
+  gConfig = new BgFetchConfig(cont);
+
+  if (gConfig->parseOptions(argc, argv)) {
+    Dbg(dbg_ctl, "cache fill plugin is successfully initialized globally");
+    TSHttpHookAdd(TS_HTTP_CACHE_LOOKUP_COMPLETE_HOOK, cont);
+  } else {
+    // ToDo: Hmmm, no way to fail a global plugin here?
+    Dbg(dbg_ctl, "Failed to initialize as global plugin");
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -135,19 +176,8 @@ cont_handle_cache(TSCont contp, TSEvent event, void *edata)
 TSReturnCode
 TSRemapInit(TSRemapInterface *api_info, char *errbuf, int errbuf_size)
 {
-  TSDebug(PLUGIN_NAME, "cache fill remap init");
-  if (!api_info) {
-    strncpy(errbuf, "[tsremap_init] - Invalid TSRemapInterface argument", errbuf_size - 1);
-    return TS_ERROR;
-  }
-
-  if (api_info->tsremap_version < TSREMAP_VERSION) {
-    snprintf(errbuf, errbuf_size, "[TSRemapInit] - Incorrect API version %ld.%ld", api_info->tsremap_version >> 16,
-             (api_info->tsremap_version & 0xffff));
-    return TS_ERROR;
-  }
-
-  TSDebug(PLUGIN_NAME, "cache fill remap is successfully initialized");
+  CHECK_REMAP_API_COMPATIBILITY(api_info, errbuf, errbuf_size);
+  Dbg(dbg_ctl, "cache fill remap is successfully initialized");
   return TS_SUCCESS;
 }
 
@@ -155,18 +185,46 @@ TSRemapInit(TSRemapInterface *api_info, char *errbuf, int errbuf_size)
 // We don't have any specific "instances" here, at least not yet.
 //
 TSReturnCode
-TSRemapNewInstance(int argc, char *argv[], void **ih, char * /* errbuf */, int /* errbuf_size */)
+TSRemapNewInstance(int argc, char **argv, void **ih, char * /* errbuf ATS_UNUSED */, int /* errbuf_size ATS_UNUSED */)
 {
-  TSCont cont = TSContCreate(cont_handle_cache, nullptr);
-  *ih         = cont;
-  return TS_SUCCESS;
+  TSCont         cont    = TSContCreate(cont_handle_cache, nullptr);
+  BgFetchConfig *config  = new BgFetchConfig(cont);
+  bool           success = true;
+
+  // The first two arguments are the "from" and "to" URL string. We need to
+  // skip them, but we also require that there be an option to masquerade as
+  // argv[0], so we increment the argument indexes by 1 rather than by 2.
+  argc--;
+  argv++;
+
+  // This is for backwards compatibility, ugly! ToDo: Remove for ATS v9.0.0 IMO.
+  if (argc > 1 && *argv[1] != '-') {
+    Dbg(dbg_ctl, "config file %s", argv[1]);
+    if (!config->readConfig(argv[1])) {
+      success = false;
+    }
+  } else {
+    if (!config->parseOptions(argc, const_cast<const char **>(argv))) {
+      success = false;
+    }
+  }
+
+  if (success) {
+    *ih = config;
+
+    return TS_SUCCESS;
+  }
+
+  // Something went wrong with the configuration setup.
+  delete config;
+  return TS_ERROR;
 }
 
 void
 TSRemapDeleteInstance(void *ih)
 {
-  TSCont cont = static_cast<TSCont>(ih);
-  TSContDestroy(cont);
+  BgFetchConfig *config = static_cast<BgFetchConfig *>(ih);
+  delete config;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -178,9 +236,9 @@ TSRemapDoRemap(void *ih, TSHttpTxn txnp, TSRemapRequestInfo * /* rri */)
   if (nullptr == ih) {
     return TSREMAP_NO_REMAP;
   }
-  TSCont const cont = static_cast<TSCont>(ih);
-  TSHttpTxnHookAdd(txnp, TS_HTTP_CACHE_LOOKUP_COMPLETE_HOOK, cont);
-  TSDebug(PLUGIN_NAME, "TSRemapDoRemap() added hook");
+  BgFetchConfig *config = static_cast<BgFetchConfig *>(ih);
+  TSHttpTxnHookAdd(txnp, TS_HTTP_CACHE_LOOKUP_COMPLETE_HOOK, config->getCont());
+  Dbg(dbg_ctl, "TSRemapDoRemap() added hook");
 
   return TSREMAP_NO_REMAP;
 }

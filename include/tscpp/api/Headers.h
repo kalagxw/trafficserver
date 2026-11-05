@@ -20,13 +20,20 @@
  * @file Headers.h
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include "tscpp/api/noncopyable.h"
+#include <memory>
 #include <string>
 
 namespace atscppapi
 {
+class Request;
+class ClientRequest;
+class Response;
+
 struct HeadersState;
 struct HeaderFieldIteratorState;
 struct HeaderFieldValueIteratorState;
@@ -45,7 +52,7 @@ private:
   std::string name_;
 
 public:
-  typedef std::string::size_type size_type;
+  using size_type = std::string::size_type;
 
   /**
    * Constructor: build a new HeaderField name with the given string
@@ -112,7 +119,7 @@ class HeaderField;
 class header_field_value_iterator
 {
 private:
-  HeaderFieldValueIteratorState *state_;
+  std::unique_ptr<HeaderFieldValueIteratorState> state_;
 
 public:
   using iterator_category = std::forward_iterator_tag;
@@ -121,7 +128,7 @@ public:
   /**
    * Constructor for header_field_value_iterator, this shouldn't need to be used directly.
    * @param bufp the TSMBuffer associated with the headers
-   * @param mloc the TSMLoc associated with the headers.
+   * @param[in] hdr_loc the TSMLoc associated with the headers.
    * @param field_loc the TSMLoc associated with the field.
    * @param index the index of the value in the HeaderField
    * @warning This shouldn't need to be used directly!
@@ -130,7 +137,7 @@ public:
 
   /**
    * Copy Constructor for header_field_value_iterator, this shouldn't need to be used directly.
-   * @param header_field_value_iterator an existing iterator to copy
+   * @param[in] it an existing iterator to copy
    * @warning This shouldn't need to be used directly!
    */
   header_field_value_iterator(const header_field_value_iterator &it);
@@ -175,7 +182,7 @@ public:
 class header_field_iterator
 {
 private:
-  HeaderFieldIteratorState *state_;
+  std::unique_ptr<HeaderFieldIteratorState> state_;
   header_field_iterator(void *hdr_buf, void *hdr_loc, void *field_loc);
 
 public:
@@ -186,7 +193,7 @@ public:
 
   /**
    * Copy Constructor for header_field_iterator, this shouldn't need to be used directly.
-   * @param header_field_iterator: for constructing the iterator.
+   * @param[in] it for constructing the iterator.
    * @warning This shouldn't need to be used directly!
    */
   header_field_iterator(const header_field_iterator &it);
@@ -244,8 +251,8 @@ private:
   HeaderField(const header_field_iterator &iter) : iter_(iter) {}
 
 public:
-  typedef unsigned int size_type;
-  typedef header_field_value_iterator iterator;
+  using size_type = unsigned int;
+  using iterator  = header_field_value_iterator;
 
   ~HeaderField();
 
@@ -276,21 +283,21 @@ public:
 
   /**
    * Join all the values of this HeaderField into a single string separated by the join string.
-   * @param an optional join string (defaults to ",")
+   * @param[in] join An optional join string (defaults to ",")
    * @return a string which is all of the joined values of this HeaderField
    */
   std::string values(const char *join = ",");
 
   /**
    * Join all the values of this HeaderField into a single string separated by the join string.
-   * @param a join string
+   * @param[in] join A join string
    * @return a string which is all of the joined values of this HeaderField
    */
   std::string values(const std::string &join);
 
   /**
    * Join all the values of this HeaderField into a single string separated by the join string.
-   * @param a optional join character
+   * @param[in] join An optional join character
    * @return a string which is all of the joined values of this HeaderField
    */
   std::string values(const char join);
@@ -309,29 +316,29 @@ public:
 
   /**
    * Remove a single value from this HeaderField which is pointed to by the given iterator
-   * @param an iterator which points to a single HeaderField value.
+   * @param[in] it An iterator which points to a single HeaderField value.
    * @return true if the header value was successfully erased.
    */
   bool erase(const iterator &it);
 
   /**
    * Append a value or a separated list of values to this HeaderField
-   * @param a string containing the value(s).
+   * @param[in] value A string containing the value(s).
    * @return true if the values was appended.
    */
   bool append(const std::string &value);
 
   /**
    * Append a value or a separated list of values to this HeaderField
-   * @param a string containing the value.
-   * @param the length of the value that is being appended.
+   * @param[in] value A string containing the value.
+   * @param[in] length The length of the value that is being appended.
    * @return true if the values was appended.
    */
   bool append(const char *value, int length = -1);
 
   /**
    * Change the name of this HeaderField to the given key.
-   * @param string - the new name of the header field
+   * @param[in] str The new name of the header field
    * @return true if the header field name was successfully changed.
    */
   bool setName(const std::string &str);
@@ -363,21 +370,21 @@ public:
 
   /**
    * Set the VALUES of the header field to the given value string
-   * @param string - the values to set on the current header field
+   * @param[in] field_value The values to set on the current header field
    * @return true if the value is successfully changed.
    */
   bool operator=(const std::string &field_value);
 
   /**
    * Set the VALUES of the header field to the given value string
-   * @param the values to set on the current header field
+   * @param[in] field_value The values to set on the current header field
    * @return true if the value is successfully changed.
    */
   bool operator=(const char *field_value);
 
   /**
    * Get the index value from this HeaderField
-   * @param the index to retrieve a copy of
+   * @param[in] index The index to retrieve a copy of
    * @return a copy of the string which is the index^th value in this HeaderField
    * @note as currently written this returns an immutable string, it will NOT allow you to
    * change the value.
@@ -435,8 +442,8 @@ public:
    */
   bool isInitialized() const;
 
-  typedef unsigned int size_type;
-  typedef header_field_iterator iterator;
+  using size_type = unsigned int;
+  using iterator  = header_field_iterator;
 
   /**
    * Check if the headers are empty
@@ -476,69 +483,69 @@ public:
 
   /**
    * Erase a single header field pointed to by an iterator
-   * @param an iterator pointing to a header field.
+   * @param[in] it An iterator pointing to a header field.
    * @return true if the header field pointed to by the iterator was erased.
    */
   bool erase(const iterator &it);
 
   /**
    * Erase all headers whose name matches key (this is a case insensitive match).
-   * @param the name of the header fields to erase
+   * @param[in] key The name of the header fields to erase
    * @return the number of elements erased that matched the key
    */
   size_type erase(const std::string &key);
 
   /**
    * Erase all headers whose name matches key (this is a case insensitive match).
-   * @param the name of the header fields to erase
-   * @param the length of the key (optional).
+   * @param[in] key The name of the header fields to erase
+   * @param[in] length The length of the key (optional).
    * @return the number of elements erased that matched the key
    */
   size_type erase(const char *key, int length = -1);
 
   /**
    * Count all headers whose name matches key (this is a case insensitive match).
-   * @param the name of the header fields to erase
-   * @param the length of the key (optional).
-   * @return the number of elements erased that matched the key
+   * @param[in] key The name of the header fields to count
+   * @param[in] length The length of the key (optional).
+   * @return the number of elements that matched the key
    */
   size_type count(const char *key, int length = -1);
 
   /**
    * Count all headers whose name matches key (this is a case insensitive match).
-   * @param the name of the header fields to count
+   * @param[in] key The name of the header fields to count
    * @return the number of elements whose name is key.
    */
   size_type count(const std::string &key);
 
   /**
    * Join all headers whos name is key with the optionally specified join string
-   * @param the name of the headers to join into a single string
-   * @param an optional join string (defaults to ",")
+   * @param[in] key The name of the headers to join into a single string
+   * @param[in] join An optional join string (defaults to ",")
    * @return a string which is all of the joined values of headers matching key.
    */
   std::string values(const std::string &key, const char *join = ",");
 
   /**
    * Join all headers whos name is key with the optionally specified join string
-   * @param the name of the headers to join into a single string
-   * @param the string to join the fields with
+   * @param[in] key The name of the headers to join into a single string
+   * @param[in] join The string to join the fields with
    * @return a string which is all of the joined values of headers matching key.
    */
   std::string values(const std::string &key, const std::string &join);
 
   /**
    * Join all headers whos name is key with the optionally specified join character
-   * @param the name of the headers to join into a single string
-   * @param the join character.
+   * @param[in] key The name of the headers to join into a single string
+   * @param[in] join The join character.
    * @return a string which is all of the joined values of headers matching key.
    */
   std::string values(const std::string &key, const char join);
 
   /**
    * Returns the value at given position of header with given name
-   * @param name of header
-   * @param position of value
+   * @param[in] key Name of header
+   * @param[in] index Position of value
    * @return value
    */
   std::string value(const std::string &key, size_type index = 0);
@@ -553,7 +560,7 @@ public:
   /**
    * Returns an iterator to the first HeaderField with the name key.
    * @param key the name of first header field ot find.
-   * @param the length of the key specified (optional).
+   * @param[in] length The length of the key specified (optional).
    * @return an iterator that points to the first matching header field with name key.
    */
   iterator find(const char *key, int length = -1);
@@ -601,7 +608,7 @@ public:
   ~Headers();
 
 private:
-  HeadersState *state_;
+  std::unique_ptr<HeadersState> state_;
   friend class Request;
   friend class ClientRequest;
   friend class Response;

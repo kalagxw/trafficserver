@@ -20,6 +20,8 @@
  * @file TransformationPlugin.h
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include <string_view>
@@ -84,10 +86,12 @@ public:
    * The available types of Transformations.
    */
   enum Type {
-    REQUEST_TRANSFORMATION = 0, /**< Transform the Request body content */
-    RESPONSE_TRANSFORMATION,    /**< Transform the Response body content */
-    SINK_TRANSFORMATION         /**< Sink transformation, meaning you get a separate stream of the Response
-                                     body content that does not get hooked up to a downstream input */
+    REQUEST_TRANSFORMATION = 0,          /**< Transform the Request body content */
+    RESPONSE_TRANSFORMATION,             /**< Transform the Response body content */
+    CLIENT_RESPONSE_SINK_TRANSFORMATION, /**< Sink transformation, meaning you get a separate stream of the Response
+                                              body content that does not get hooked up to a downstream input */
+    CLIENT_REQUEST_SINK_TRANSFORMATION,  /**< Sink transformation, meaning you get a separate stream of the Request
+                                              body content that does not get hooked up to a downstream input */
   };
 
   /**
@@ -136,9 +140,9 @@ protected:
   TransformationPlugin(Transaction &transaction, Type type);
 
 private:
-  TransformationPluginState *state_; /** Internal state for a TransformationPlugin */
-  size_t doProduce(std::string_view);
-  static int resumeCallback(TSCont cont, TSEvent event, void *edata); /** Resume callback*/
+  std::unique_ptr<TransformationPluginState> state_; /** Internal state for a TransformationPlugin */
+  size_t                                     doProduce(std::string_view);
+  static int                                 resumeCallback(TSCont cont, TSEvent event, void *edata); /** Resume callback*/
 };
 
 } // namespace atscppapi

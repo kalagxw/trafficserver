@@ -29,12 +29,6 @@
 #include <ts/ts.h>
 #include <unistd.h>
 #include <netinet/in.h>
-// This is a bit of a hack, to get the more linux specific tcp_info struct ...
-#if HAVE_STRUCT_LINUX_TCP_INFO
-#include <linux/tcp.h>
-#elif HAVE_NETINET_IN_H
-#include <netinet/tcp.h>
-#endif
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <getopt.h>
@@ -51,10 +45,10 @@
 #define TCPI_PLUGIN_SUPPORTED 1
 #endif
 
-#define TCPI_HOOK_SSN_START 0x01u
-#define TCPI_HOOK_TXN_START 0x02u
+#define TCPI_HOOK_SSN_START     0x01u
+#define TCPI_HOOK_TXN_START     0x02u
 #define TCPI_HOOK_SEND_RESPONSE 0x04u
-#define TCPI_HOOK_TXN_CLOSE 0x10u
+#define TCPI_HOOK_TXN_CLOSE     0x10u
 
 // Log format headers. These are emitted once at the start of a log file. Note that we
 // carefully order the fields so the field ordering is compatible. This lets you change
@@ -63,15 +57,17 @@ static const char *tcpi_headers[] = {"timestamp event client server rtt",
                                      "timestamp event client server rtt rttvar last_sent last_recv snd_cwnd "
                                      "snd_ssthresh rcv_ssthresh unacked sacked lost retrans fackets all_retrans"
 // Additional information from linux's linux/tcp.h appended here
-#if HAVE_STRUCT_LINUX_TCP_INFO
+#if HAVE_STRUCT_TCP_INFO_TCPI_DATA_SEGS_OUT
                                      " data_segs_in data_segs_out"
 #endif
 };
 
+static DbgCtl dbg_ctl{"tcpinfo"};
+
 struct Config {
-  int sample             = 1000;
-  unsigned int log_level = 1;
-  TSTextLogObject log    = nullptr;
+  int             sample    = 1000;
+  unsigned int    log_level = 1;
+  TSTextLogObject log       = nullptr;
 
   ~Config()
   {
@@ -82,8 +78,8 @@ struct Config {
 };
 
 union const_sockaddr_ptr {
-  const struct sockaddr *sa;
-  const struct sockaddr_in *in;
+  const struct sockaddr     *sa;
+  const struct sockaddr_in  *in;
   const struct sockaddr_in6 *in6;
 
   const void *
@@ -105,28 +101,28 @@ union const_sockaddr_ptr {
 static void
 log_tcp_info(Config *config, const char *event_name, TSHttpSsn ssnp)
 {
-  char client_str[INET6_ADDRSTRLEN];
-  char server_str[INET6_ADDRSTRLEN];
+  char               client_str[INET6_ADDRSTRLEN];
+  char               server_str[INET6_ADDRSTRLEN];
   const_sockaddr_ptr client_addr;
   const_sockaddr_ptr server_addr;
 
   struct tcp_info info;
-  socklen_t tcp_info_len = sizeof(info);
-  int fd;
+  socklen_t       tcp_info_len = sizeof(info);
+  int             fd;
 
   TSReleaseAssert(config->log != nullptr);
 
   if (ssnp != nullptr && (TSHttpSsnClientFdGet(ssnp, &fd) != TS_SUCCESS || fd <= 0)) {
-    TSDebug("tcpinfo", "error getting the client socket fd from ssn");
+    Dbg(dbg_ctl, "error getting the client socket fd from ssn");
     return;
   }
   if (ssnp == nullptr) {
-    TSDebug("tcpinfo", "ssn is not specified");
+    Dbg(dbg_ctl, "ssn is not specified");
     return;
   }
 
   if (getsockopt(fd, IPPROTO_TCP, TCP_INFO, &info, &tcp_info_len) != 0) {
-    TSDebug("tcpinfo", "getsockopt(%d, TCP_INFO) failed: %s", fd, strerror(errno));
+    Dbg(dbg_ctl, "getsockopt(%d, TCP_INFO) failed: %s", fd, strerror(errno));
     return;
   }
 
@@ -144,21 +140,21 @@ log_tcp_info(Config *config, const char *event_name, TSHttpSsn ssnp)
   TSReturnCode ret;
 
   if (config->log_level == 2) {
-#if !defined(freebsd) || defined(__GLIBC__)
-#if HAVE_STRUCT_LINUX_TCP_INFO
+#if HAVE_STRUCT_TCP_INFO_TCPI_DATA_SEGS_OUT
+    // Linux 4.6+
     ret = TSTextLogObjectWrite(config->log, "%s %s %s %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u", event_name, client_str,
                                server_str, info.tcpi_rtt, info.tcpi_rttvar, info.tcpi_last_data_sent, info.tcpi_last_data_recv,
                                info.tcpi_snd_cwnd, info.tcpi_snd_ssthresh, info.tcpi_rcv_ssthresh, info.tcpi_unacked,
                                info.tcpi_sacked, info.tcpi_lost, info.tcpi_retrans, info.tcpi_fackets, info.tcpi_total_retrans,
                                info.tcpi_data_segs_in, info.tcpi_data_segs_out);
-#else
+#elif HAVE_STRUCT_TCP_INFO_TCPI_TOTAL_RETRANS
+    // Linux 2.6.12+
     ret = TSTextLogObjectWrite(config->log, "%s %s %s %u %u %u %u %u %u %u %u %u %u %u %u %u", event_name, client_str, server_str,
                                info.tcpi_rtt, info.tcpi_rttvar, info.tcpi_last_data_sent, info.tcpi_last_data_recv,
                                info.tcpi_snd_cwnd, info.tcpi_snd_ssthresh, info.tcpi_rcv_ssthresh, info.tcpi_unacked,
                                info.tcpi_sacked, info.tcpi_lost, info.tcpi_retrans, info.tcpi_fackets, info.tcpi_total_retrans);
-#endif
-#else
-    // E.g. FreeBSD and macOS
+#elif HAVE_STRUCT_TCP_INFO___TCPI_RETRANS
+    // FreeBSD 6.0+
     ret = TSTextLogObjectWrite(config->log, "%s %s %s %u %u %u %u %u %u %u %u %u %u %u %u %u", event_name, client_str, server_str,
                                info.tcpi_rtt, info.tcpi_rttvar, info.__tcpi_last_data_sent, info.tcpi_last_data_recv,
                                info.tcpi_snd_cwnd, info.tcpi_snd_ssthresh, info.__tcpi_rcv_ssthresh, info.__tcpi_unacked,
@@ -188,10 +184,10 @@ log_tcp_info(Config * /* config */, const char * /* event_name */, TSHttpSsn /* 
 static int
 tcp_info_hook(TSCont contp, TSEvent event, void *edata)
 {
-  TSHttpSsn ssnp = nullptr;
-  TSHttpTxn txnp = nullptr;
-  int random     = 0;
-  Config *config = static_cast<Config *>(TSContDataGet(contp));
+  TSHttpSsn ssnp   = nullptr;
+  TSHttpTxn txnp   = nullptr;
+  int       random = 0;
+  Config   *config = static_cast<Config *>(TSContDataGet(contp));
 
   const char *event_name;
   switch (event) {
@@ -218,7 +214,7 @@ tcp_info_hook(TSCont contp, TSEvent event, void *edata)
     return 0;
   }
 
-  TSDebug("tcpinfo", "logging hook called for %s (%s) with log object %p", TSHttpEventNameLookup(event), event_name, config->log);
+  Dbg(dbg_ctl, "logging hook called for %s (%s) with log object %p", TSHttpEventNameLookup(event), event_name, config->log);
 
   if (config->log == nullptr) {
     goto done;
@@ -233,11 +229,11 @@ tcp_info_hook(TSCont contp, TSEvent event, void *edata)
   if (config->sample < 1000) {
     // coverity[dont_call]
     random = rand() % 1000;
-    TSDebug("tcpinfo", "random: %d, config->sample: %d", random, config->sample);
+    Dbg(dbg_ctl, "random: %d, config->sample: %d", random, config->sample);
   }
 
   if (random < config->sample) {
-    TSDebug("tcpinfo", "sampling TCP metrics for %s event", event_name);
+    Dbg(dbg_ctl, "sampling TCP metrics for %s event", event_name);
     log_tcp_info(config, event_name, ssnp);
   }
 
@@ -279,18 +275,20 @@ static unsigned
 parse_hook_list(const char *hook_list)
 {
   unsigned mask = 0;
-  char *tok;
-  char *str;
-  char *last;
+  char    *tok;
+  char    *str;
+  char    *last;
 
   const struct hookmask {
     const char *name;
-    unsigned mask;
-  } hooks[] = {{"ssn_start", TCPI_HOOK_SSN_START},
-               {"txn_start", TCPI_HOOK_TXN_START},
-               {"send_resp_hdr", TCPI_HOOK_SEND_RESPONSE},
-               {"txn_close", TCPI_HOOK_TXN_CLOSE},
-               {nullptr, 0u}};
+    unsigned    mask;
+  } hooks[] = {
+    {"ssn_start",     TCPI_HOOK_SSN_START    },
+    {"txn_start",     TCPI_HOOK_TXN_START    },
+    {"send_resp_hdr", TCPI_HOOK_SEND_RESPONSE},
+    {"txn_close",     TCPI_HOOK_TXN_CLOSE    },
+    {nullptr,         0u                     }
+  };
 
   str = TSstrdup(hook_list);
 
@@ -299,8 +297,8 @@ parse_hook_list(const char *hook_list)
 
     for (const struct hookmask *m = hooks; m->name != nullptr; ++m) {
       if (strcmp(m->name, tok) == 0) {
-        mask |= m->mask;
-        match = true;
+        mask  |= m->mask;
+        match  = true;
         break;
       }
     }
@@ -317,32 +315,32 @@ parse_hook_list(const char *hook_list)
 void
 TSPluginInit(int argc, const char *argv[])
 {
-  static const char usage[] = "tcpinfo.so [--log-file=PATH] [--log-level=LEVEL] [--hooks=LIST] [--sample-rate=COUNT] "
-                              "[--rolling-enabled=VALUE] [--rolling-offset-hr=HOUR] [--rolling-interval-sec=SECONDS] "
-                              "[--rolling-size=MB]";
+  static const char          usage[]    = "tcpinfo.so [--log-file=PATH] [--log-level=LEVEL] [--hooks=LIST] [--sample-rate=COUNT] "
+                                          "[--rolling-enabled=VALUE] [--rolling-offset-hr=HOUR] [--rolling-interval-sec=SECONDS] "
+                                          "[--rolling-size=MB]";
   static const struct option longopts[] = {
-    {const_cast<char *>("sample-rate"), required_argument, nullptr, 'r'},
-    {const_cast<char *>("log-file"), required_argument, nullptr, 'f'},
-    {const_cast<char *>("log-level"), required_argument, nullptr, 'l'},
-    {const_cast<char *>("hooks"), required_argument, nullptr, 'h'},
-    {const_cast<char *>("rolling-enabled"), required_argument, nullptr, 'e'},
-    {const_cast<char *>("rolling-offset-hr"), required_argument, nullptr, 'H'},
+    {const_cast<char *>("sample-rate"),          required_argument, nullptr, 'r'},
+    {const_cast<char *>("log-file"),             required_argument, nullptr, 'f'},
+    {const_cast<char *>("log-level"),            required_argument, nullptr, 'l'},
+    {const_cast<char *>("hooks"),                required_argument, nullptr, 'h'},
+    {const_cast<char *>("rolling-enabled"),      required_argument, nullptr, 'e'},
+    {const_cast<char *>("rolling-offset-hr"),    required_argument, nullptr, 'H'},
     {const_cast<char *>("rolling-interval-sec"), required_argument, nullptr, 'S'},
-    {const_cast<char *>("rolling-size"), required_argument, nullptr, 'M'},
-    {nullptr, 0, nullptr, 0},
+    {const_cast<char *>("rolling-size"),         required_argument, nullptr, 'M'},
+    {nullptr,                                    0,                 nullptr, 0  },
   };
 
   TSPluginRegistrationInfo info;
-  auto config          = std::make_unique<Config>();
-  const char *filename = "tcpinfo";
-  TSCont cont;
-  unsigned int hooks                = 0;
-  int rolling_enabled               = -1;
-  unsigned int rolling_interval_sec = 86400;
-  unsigned int rolling_offset_hr    = 0;
-  unsigned int rolling_size         = 1024;
-  unsigned int i                    = 0;
-  char *endptr;
+  auto                     config   = std::make_unique<Config>();
+  const char              *filename = "tcpinfo";
+  TSCont                   cont;
+  unsigned int             hooks                = 0;
+  int                      rolling_enabled      = -1;
+  unsigned int             rolling_interval_sec = 86400;
+  unsigned int             rolling_offset_hr    = 0;
+  unsigned int             rolling_size         = 1024;
+  unsigned int             i                    = 0;
+  char                    *endptr;
 
   info.plugin_name   = (char *)"tcpinfo";
   info.vendor_name   = (char *)"Apache Software Foundation";
@@ -422,11 +420,11 @@ init:
   TSError("[tcpinfo] TCP metrics are not supported on this platform");
 #endif
 
-  TSDebug("tcpinfo", "sample: %d", config->sample);
-  TSDebug("tcpinfo", "log filename: %s", filename);
-  TSDebug("tcpinfo", "log_level: %u", config->log_level);
-  TSDebug("tcpinfo", "rolling_enabled: %d", rolling_enabled);
-  TSDebug("tcpinfo", "hook mask: 0x%x", hooks);
+  Dbg(dbg_ctl, "sample: %d", config->sample);
+  Dbg(dbg_ctl, "log filename: %s", filename);
+  Dbg(dbg_ctl, "log_level: %u", config->log_level);
+  Dbg(dbg_ctl, "rolling_enabled: %d", rolling_enabled);
+  Dbg(dbg_ctl, "hook mask: 0x%x", hooks);
 
   if (TSTextLogObjectCreate(filename, TS_LOG_MODE_ADD_TIMESTAMP, &config->log) != TS_SUCCESS) {
     TSError("[tcpinfo] failed to create log file '%s'", filename);
@@ -435,7 +433,7 @@ init:
   if (rolling_enabled == -1) {
     // The user either did not provide a value or the value they provided was
     // invalid.
-    TSDebug("tcpinfo", "Using system default value of proxy.config.log.rolling_enabled ");
+    Dbg(dbg_ctl, "Using system default value of proxy.config.log.rolling_enabled ");
   } else {
     if (TSTextLogObjectRollingEnabledSet(config->log, rolling_enabled) != TS_SUCCESS) {
       TSError("[tcpinfo] failed to enable log file rolling to: '%d'", rolling_enabled);
@@ -453,21 +451,21 @@ init:
 
   if (hooks & TCPI_HOOK_SSN_START) {
     TSHttpHookAdd(TS_HTTP_SSN_START_HOOK, cont);
-    TSDebug("tcpinfo", "added hook to the start of the TCP connection");
+    Dbg(dbg_ctl, "added hook to the start of the TCP connection");
   }
 
   if (hooks & TCPI_HOOK_TXN_START) {
     TSHttpHookAdd(TS_HTTP_TXN_START_HOOK, cont);
-    TSDebug("tcpinfo", "added hook to the start of the transaction");
+    Dbg(dbg_ctl, "added hook to the start of the transaction");
   }
 
   if (hooks & TCPI_HOOK_SEND_RESPONSE) {
     TSHttpHookAdd(TS_HTTP_SEND_RESPONSE_HDR_HOOK, cont);
-    TSDebug("tcpinfo", "added hook to the sending of the headers");
+    Dbg(dbg_ctl, "added hook to the sending of the headers");
   }
 
   if (hooks & TCPI_HOOK_TXN_CLOSE) {
     TSHttpHookAdd(TS_HTTP_TXN_CLOSE_HOOK, cont);
-    TSDebug("tcpinfo", "added hook to the close of the transaction");
+    Dbg(dbg_ctl, "added hook to the close of the transaction");
   }
 }

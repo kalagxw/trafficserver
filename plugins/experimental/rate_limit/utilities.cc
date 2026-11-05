@@ -21,22 +21,27 @@
 #include "ts/remap.h"
 #include "utilities.h"
 
+namespace rate_limit_ns
+{
+DbgCtl dbg_ctl{PLUGIN_NAME};
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 // Add a header with the delay imposed on this transaction. This can be used
 // for logging, and other types of metrics.
 //
 void
-delayHeader(TSHttpTxn txnp, std::string &header, std::chrono::milliseconds delay)
+delayHeader(TSHttpTxn txnp, const std::string &header, std::chrono::milliseconds delay)
 {
   if (header.size() > 0) {
-    TSMLoc hdr_loc   = nullptr;
-    TSMBuffer bufp   = nullptr;
-    TSMLoc field_loc = nullptr;
+    TSMLoc    hdr_loc   = nullptr;
+    TSMBuffer bufp      = nullptr;
+    TSMLoc    field_loc = nullptr;
 
     if (TS_SUCCESS == TSHttpTxnClientReqGet(txnp, &bufp, &hdr_loc)) {
       if (TS_SUCCESS == TSMimeHdrFieldCreateNamed(bufp, hdr_loc, header.c_str(), header.size(), &field_loc)) {
         if (TS_SUCCESS == TSMimeHdrFieldValueIntSet(bufp, hdr_loc, field_loc, -1, static_cast<int>(delay.count()))) {
-          TSDebug(PLUGIN_NAME, "Added client request header; %s: %d", header.c_str(), static_cast<int>(delay.count()));
+          Dbg(dbg_ctl, "Added client request header; %s: %d", header.c_str(), static_cast<int>(delay.count()));
           TSMimeHdrFieldAppend(bufp, hdr_loc, field_loc);
         }
         TSHandleMLocRelease(bufp, hdr_loc, field_loc);
@@ -54,14 +59,14 @@ void
 retryAfter(TSHttpTxn txnp, unsigned retry)
 {
   if (retry > 0) {
-    TSMLoc hdr_loc   = nullptr;
-    TSMBuffer bufp   = nullptr;
-    TSMLoc field_loc = nullptr;
+    TSMLoc    hdr_loc   = nullptr;
+    TSMBuffer bufp      = nullptr;
+    TSMLoc    field_loc = nullptr;
 
     if (TS_SUCCESS == TSHttpTxnClientRespGet(txnp, &bufp, &hdr_loc)) {
       if (TS_SUCCESS == TSMimeHdrFieldCreateNamed(bufp, hdr_loc, "Retry-After", 11, &field_loc)) {
         if (TS_SUCCESS == TSMimeHdrFieldValueIntSet(bufp, hdr_loc, field_loc, -1, retry)) {
-          TSDebug(PLUGIN_NAME, "Added a Retry-After: %u", retry);
+          Dbg(dbg_ctl, "Added a Retry-After: %u", retry);
           TSMimeHdrFieldAppend(bufp, hdr_loc, field_loc);
         }
         TSHandleMLocRelease(bufp, hdr_loc, field_loc);
@@ -80,22 +85,22 @@ retryAfter(TSHttpTxn txnp, unsigned retry)
 std::string
 getDescriptionFromUrl(const char *url)
 {
-  TSMBuffer const buf = TSMBufferCreate();
-  TSMLoc url_loc      = nullptr;
+  TSMBuffer const buf     = TSMBufferCreate();
+  TSMLoc          url_loc = nullptr;
 
-  const int url_len = strlen(url);
+  const int   url_len = strlen(url);
   std::string description;
 
   if (TS_SUCCESS == TSUrlCreate(buf, &url_loc) && TS_PARSE_DONE == TSUrlParse(buf, url_loc, &url, url + url_len)) {
-    int host_len, scheme_len = 0;
-    const char *s  = TSUrlSchemeGet(buf, url_loc, &scheme_len);
-    const char *h  = TSUrlHostGet(buf, url_loc, &host_len);
-    const int port = TSUrlPortGet(buf, url_loc);
+    int         host_len, scheme_len = 0;
+    const char *s    = TSUrlSchemeGet(buf, url_loc, &scheme_len);
+    const char *h    = TSUrlHostGet(buf, url_loc, &host_len);
+    const int   port = TSUrlPortGet(buf, url_loc);
 
     const std::string hostname = std::string(h, host_len);
     const std::string scheme   = std::string(s, scheme_len);
 
-    TSDebug(PLUGIN_NAME, "scheme = %s, host = %s, port = %d", scheme.c_str(), hostname.c_str(), port);
+    Dbg(dbg_ctl, "scheme = %s, host = %s, port = %d", scheme.c_str(), hostname.c_str(), port);
 
     description = scheme;
     description.append(".");
@@ -104,7 +109,8 @@ getDescriptionFromUrl(const char *url)
     // only append the port when it is non-standard
     if (!(strncmp(s, TS_URL_SCHEME_HTTP, scheme_len) == 0 && port == 80) &&
         !(strncmp(s, TS_URL_SCHEME_HTTPS, scheme_len) == 0 && port == 443)) {
-      description.append(":" + std::to_string(port));
+      description.push_back(':');
+      description.append(std::to_string(port));
     }
   }
 

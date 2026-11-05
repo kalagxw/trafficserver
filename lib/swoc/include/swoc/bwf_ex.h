@@ -32,8 +32,9 @@ struct Pattern {
  * is type 'd' then just the numeric value is printed.
  */
 struct Errno {
-  int _e;
+  int _e; ///< Errno value.
 
+  /// Construct wrapper, default to current @c errno
   explicit Errno(int e = errno) : _e(e) {}
 };
 
@@ -42,12 +43,19 @@ struct Errno {
  * provided a format like "2017 Jun 29 14:11:29" is used.
  */
 struct Date {
+  /// Default format
   static constexpr std::string_view DEFAULT_FORMAT{"%Y %b %d %H:%M:%S"_sv};
-  time_t _epoch;
-  std::string_view _fmt;
+  time_t _epoch;         ///< The time.
+  std::string_view _fmt; ///< Data format.
 
+  /** Constructor.
+   *
+   * @param t The timestamp.
+   * @param fmt Timestamp format.
+   */
   Date(time_t t, std::string_view fmt = DEFAULT_FORMAT) : _epoch(t), _fmt(fmt) {}
 
+  /// Default construct using current time with optional format.
   Date(std::string_view fmt = DEFAULT_FORMAT);
 };
 
@@ -75,7 +83,7 @@ FirstOfConverter(T &&t) {
 /// All arguments must be convertible to @c std::string_view.
 template <typename... Args>
 std::string_view
-FirstOf(Args &&... args) {
+FirstOf(Args &&...args) {
   std::array<std::string_view, sizeof...(args)> strings{{detail::FirstOfConverter(args)...}};
   for (auto &s : strings) {
     if (!s.empty())
@@ -135,7 +143,7 @@ SubText<Args...>::operator!() const {
  */
 template <typename... Args>
 SubText<Args...>
-If(bool flag, TextView const &fmt, Args &&... args) {
+If(bool flag, TextView const &fmt, Args &&...args) {
   return SubText<Args...>(flag ? fmt : TextView{}, std::forward_as_tuple(args...));
 }
 
@@ -198,14 +206,72 @@ SubText<ARG>
 Optional(TextView fmt, ARG &&arg) {
   return detail::Optional(meta::CaseArg, fmt, std::forward<ARG>(arg));
 }
+
+/** Convert from ASCII hexadecimal to raw bytes.
+ *
+ * E.g. if the source span contains "4576696c20446176652052756c7a" then "Evil Dave Rulz" is the output.
+ * For format specifier support, on lhe max width is used. Any @c MemSpan compatible class can be used
+ * as the target, including @c std::string and @c std::string_view.
+ *
+ * @code
+ *   void f(std::string const& str) {
+ *     w.print("{}", bwf::UnHex(str));
+ *     // ...
+ * @endcode
+ */
+struct UnHex {
+  UnHex(MemSpan<void const> const &span) : _span(span) {}
+  MemSpan<void const> _span; ///< Source span.
+};
 } // namespace bwf
 
+/** Repeatedly output a pattern.
+ *
+ * @param w Output.
+ * @param spec Format specifier.
+ * @param pattern Output patterning.
+ * @return @a w
+ *
+ * The @a pattern contains the count and text to output.
+ */
 BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, bwf::Pattern const &pattern);
 
+/** Format an integer as an @c errno value.
+ *
+ * @param w Output.
+ * @param spec Format specifier.
+ * @param e Error code.
+ * @return @a w
+ */
 BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, bwf::Errno const &e);
 
+/** Format a timestamp wrapped in a @c Date.
+ *
+ * @param w Output.
+ * @param spec Format specifier.
+ * @param date Timestamp.
+ * @return @a w
+ */
 BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, bwf::Date const &date);
 
+BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, bwf::UnHex const &obj);
+
+/** Output a nested formatted string.
+ *
+ * @tparam Args Argument pack for @a subtext.
+ * @param w Output
+ * @param subtext Format string and arguments.
+ * @return @a w
+ *
+ * This supports a nested format string and arguments inside another format string. This is most often useful
+ * if one of the formats is fixed or pre-compiled.
+ *
+ * @code
+ * bwformat(w, "Line {} offset {} with data {}.", line_no, line_off, bwf::SubText("alpha {} bravo {}", alpha, bravo"));
+ * @endcode
+ *
+ * @see bwf::Subtext
+ */
 template <typename... Args>
 BufferWriter &
 bwformat(BufferWriter &w, bwf::Spec const &, bwf::SubText<Args...> const &subtext) {

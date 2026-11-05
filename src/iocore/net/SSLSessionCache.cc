@@ -1,0 +1,150 @@
+/** @file
+
+  @par License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+
+#include "P_SSLConfig.h"
+#include "SSLSessionCache.h"
+#include "P_SSLUtils.h"
+#include "SSLStats.h"
+#include "iocore/eventsystem/IOBuffer.h"
+
+#include <cstring>
+#include <memory>
+#include <shared_mutex>
+
+namespace
+{
+DbgCtl dbg_ctl_ssl_origin_session_cache{"ssl.origin_session_cache"};
+} // end anonymous namespace
+
+// Custom deleter for shared origin sessions
+void
+SSLSessDeleter(SSL_SESSION *_p)
+{
+  SSL_SESSION_free(_p);
+}
+
+SSLOriginSessionCache::SSLOriginSessionCache() {}
+
+SSLOriginSessionCache::~SSLOriginSessionCache() TS_NO_THREAD_SAFETY_ANALYSIS // single-threaded teardown
+{
+  while (auto *node = orig_sess_que.pop()) {
+    delete node;
+  }
+  orig_sess_map.clear();
+}
+
+void
+SSLOriginSessionCache::insert_session(const std::string &lookup_key, SSL_SESSION *sess, SSL *ssl)
+{
+  // i2d_SSL_SESSION() returns an int and reports failure as a non-positive value, so
+  // check it before widening: assigning straight to size_t turns a failure into a huge
+  // length that then misreports itself as an oversized session.
+  int serialized_len = i2d_SSL_SESSION(sess, nullptr);
+  if (serialized_len <= 0) {
+    Dbg(dbg_ctl_ssl_origin_session_cache, "Unable to save SSL session because it could not be serialized");
+    return;
+  }
+
+  /* do not cache a session that's too big. */
+  size_t len = static_cast<size_t>(serialized_len);
+  if (len > SSLConfigParams::origin_session_max_size) {
+    Dbg(dbg_ctl_ssl_origin_session_cache, "Unable to save SSL session because size of %zu exceeds the max of %zu", len,
+        SSLConfigParams::origin_session_max_size);
+    return;
+  }
+
+  // Duplicate the session from the connection, we'll be keeping track the ref-count with a shared pointer ourself
+  SSL_SESSION *sess_ptr = SSLSessionDup(sess);
+
+  Dbg(dbg_ctl_ssl_origin_session_cache, "insert session: %s = %p", lookup_key.c_str(), sess_ptr);
+
+  ssl_curve_id curve      = (ssl == nullptr) ? 0 : SSLGetCurveNID(ssl);
+  std::string  group_name = (ssl == nullptr) ? "" : std::string{SSLGetGroupName(ssl)};
+
+  std::unique_ptr<SSLOriginSession> ssl_orig_session(
+    new SSLOriginSession(lookup_key, curve, group_name, std::shared_ptr<SSL_SESSION>{sess_ptr, SSLSessDeleter}));
+  auto new_node = ssl_orig_session.release();
+
+  ts::write_guard lock(mutex);
+  auto            entry = orig_sess_map.find(lookup_key);
+  if (entry != orig_sess_map.end()) {
+    auto node = entry->second;
+    Dbg(dbg_ctl_ssl_origin_session_cache, "found duplicate key: %s, replacing %p with %p", lookup_key.c_str(),
+        node->shared_sess.get(), sess_ptr);
+    orig_sess_que.remove(node);
+    orig_sess_map.erase(entry);
+    delete node;
+  } else if (orig_sess_map.size() >= SSLConfigParams::origin_session_cache_size) {
+    Dbg(dbg_ctl_ssl_origin_session_cache, "origin session cache full, removing oldest session");
+    remove_oldest_session();
+  }
+
+  orig_sess_que.enqueue(new_node);
+  orig_sess_map[lookup_key] = new_node;
+}
+
+std::shared_ptr<SSL_SESSION>
+SSLOriginSessionCache::get_session(const std::string &lookup_key, ssl_curve_id *curve, std::string &group_name)
+{
+  Dbg(dbg_ctl_ssl_origin_session_cache, "get session: %s", lookup_key.c_str());
+
+  ts::read_guard lock(mutex);
+  auto           entry = orig_sess_map.find(lookup_key);
+  if (entry == orig_sess_map.end()) {
+    return nullptr;
+  }
+
+  if (curve != nullptr) {
+    *curve = entry->second->curve_id;
+  }
+
+  group_name = entry->second->group_name;
+
+  return entry->second->shared_sess;
+}
+
+void
+SSLOriginSessionCache::remove_oldest_session()
+{
+  while (orig_sess_que.head && orig_sess_que.size >= static_cast<int>(SSLConfigParams::origin_session_cache_size)) {
+    auto node = orig_sess_que.pop();
+    Dbg(dbg_ctl_ssl_origin_session_cache, "remove oldest session: %s, session ptr: %p", node->key.c_str(), node->shared_sess.get());
+    orig_sess_map.erase(node->key);
+    delete node;
+  }
+}
+
+void
+SSLOriginSessionCache::remove_session(const std::string &lookup_key)
+{
+  // We can't bail on contention here because this session MUST be removed.
+  ts::write_guard lock(mutex);
+  auto            entry = orig_sess_map.find(lookup_key);
+  if (entry != orig_sess_map.end()) {
+    auto node = entry->second;
+    Dbg(dbg_ctl_ssl_origin_session_cache, "remove session: %s, session ptr: %p", lookup_key.c_str(), node->shared_sess.get());
+    orig_sess_que.remove(node);
+    orig_sess_map.erase(entry);
+    delete node;
+  }
+
+  return;
+}

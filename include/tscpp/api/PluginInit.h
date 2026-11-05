@@ -20,21 +20,21 @@
  * @brief Provides hooks that plugins have to implement. ATS will invoke these when loading the plugin .so files.
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 #include <ts/apidefs.h>
 #include "tscpp/api/utils.h"
-extern "C" {
 
 /**
  * Invoked for "general" plugins - listed in plugin.config. The arguments in the
  * plugin.config line are provided in this invocation.
  *
- * @param argc Count of arguments
- * @param argv Array of pointers pointing to arguments
+ * @see TSPluginInit in ts/apidefs.h.
  */
 void TSPluginInit(int argc, const char *argv[]);
 /**
- * Invoked for remap plugins - listed in remap.config. The arguments provided as @pparam
+ * Invoked for remap plugins - listed in remap.config. The arguments provided as \@pparam
  * in the remap.config line are provided in this invocation.
  *
  * @param argc Count of arguments
@@ -44,4 +44,3 @@ void TSPluginInit(int argc, const char *argv[]);
  * @param errbuf_size Not used
  */
 TSReturnCode TSRemapNewInstance(int argc, char *argv[], void **instance_handle, char *errbuf, int errbuf_size);
-}

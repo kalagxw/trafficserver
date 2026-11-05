@@ -31,30 +31,31 @@
 #include <cstdlib>
 
 #include "ts/ts.h"
-#include "ts/experimental.h"
 #include "tscore/ink_defs.h"
 
 #define PLUGIN_NAME "cache_scan"
+
+static DbgCtl dbg_ctl{PLUGIN_NAME};
 
 static TSCont global_contp;
 
 struct cache_scan_state_t {
   TSVConn net_vc;
   TSVConn cache_vc;
-  TSVIO read_vio;
-  TSVIO write_vio;
+  TSVIO   read_vio;
+  TSVIO   write_vio;
 
-  TSIOBuffer req_buffer;
-  TSIOBuffer resp_buffer;
+  TSIOBuffer       req_buffer;
+  TSIOBuffer       resp_buffer;
   TSIOBufferReader resp_reader;
 
-  TSHttpTxn http_txnp;
-  TSAction pending_action;
+  TSHttpTxn  http_txnp;
+  TSAction   pending_action;
   TSCacheKey key_to_delete;
 
   int64_t total_bytes;
-  int total_items;
-  int done;
+  int     total_items;
+  int     done;
 
   bool write_pending;
 };
@@ -68,10 +69,10 @@ handle_scan(TSCont contp, TSEvent event, void *edata)
   cache_scan_state *cstate = static_cast<cache_scan_state *>(TSContDataGet(contp));
 
   if (event == TS_EVENT_CACHE_REMOVE) {
-    cstate->done       = 1;
-    const char error[] = "Cache remove operation succeeded";
-    cstate->cache_vc   = static_cast<TSVConn>(edata);
-    cstate->write_vio  = TSVConnWrite(cstate->net_vc, contp, cstate->resp_reader, INT64_MAX);
+    cstate->done         = 1;
+    const char error[]   = "Cache remove operation succeeded";
+    cstate->cache_vc     = static_cast<TSVConn>(edata);
+    cstate->write_vio    = TSVConnWrite(cstate->net_vc, contp, cstate->resp_reader, INT64_MAX);
     cstate->total_bytes += TSIOBufferWrite(cstate->resp_buffer, error, sizeof(error) - 1);
     TSVIONBytesSet(cstate->write_vio, cstate->total_bytes);
     TSVIOReenable(cstate->write_vio);
@@ -81,10 +82,10 @@ handle_scan(TSCont contp, TSEvent event, void *edata)
   if (event == TS_EVENT_CACHE_REMOVE_FAILED) {
     cstate->done       = 1;
     const char error[] = "Cache remove operation failed error=";
-    char rc[12];
+    char       rc[12];
     snprintf(rc, 12, "%p", edata);
-    cstate->cache_vc  = static_cast<TSVConn>(edata);
-    cstate->write_vio = TSVConnWrite(cstate->net_vc, contp, cstate->resp_reader, INT64_MAX);
+    cstate->cache_vc     = static_cast<TSVConn>(edata);
+    cstate->write_vio    = TSVConnWrite(cstate->net_vc, contp, cstate->resp_reader, INT64_MAX);
     cstate->total_bytes += TSIOBufferWrite(cstate->resp_buffer, error, sizeof(error) - 1);
     cstate->total_bytes += TSIOBufferWrite(cstate->resp_buffer, rc, strlen(rc));
 
@@ -104,7 +105,7 @@ handle_scan(TSCont contp, TSEvent event, void *edata)
       event == TS_EVENT_CACHE_SCAN_OPERATION_FAILED) {
     cstate->done = 1;
     if (cstate->resp_buffer) {
-      const char error[] = "Cache scan operation blocked or failed";
+      const char error[]   = "Cache scan operation blocked or failed";
       cstate->total_bytes += TSIOBufferWrite(cstate->resp_buffer, error, sizeof(error) - 1);
     }
     if (cstate->write_vio) {
@@ -122,10 +123,10 @@ handle_scan(TSCont contp, TSEvent event, void *edata)
     TSCacheHttpInfo cache_infop = static_cast<TSCacheHttpInfo>(edata);
 
     TSMBuffer req_bufp, resp_bufp;
-    TSMLoc req_hdr_loc, resp_hdr_loc;
-    TSMLoc url_loc;
+    TSMLoc    req_hdr_loc, resp_hdr_loc;
+    TSMLoc    url_loc;
 
-    int url_len;
+    int        url_len;
     const char s1[] = "URL: ", s2[] = "\n";
     cstate->total_bytes += TSIOBufferWrite(cstate->resp_buffer, s1, sizeof(s1) - 1);
     TSCacheHttpInfoReqGet(cache_infop, &req_bufp, &req_hdr_loc);
@@ -143,7 +144,7 @@ handle_scan(TSCont contp, TSEvent event, void *edata)
     // print the response headers
     TSCacheHttpInfoRespGet(cache_infop, &resp_bufp, &resp_hdr_loc);
     cstate->total_bytes += TSMimeHdrLengthGet(resp_bufp, resp_hdr_loc);
-    TSMimeHdrPrint(resp_bufp, resp_hdr_loc, cstate->resp_buffer);
+    TSMimeHdrPrint(resp_hdr_loc, cstate->resp_buffer);
     TSHandleMLocRelease(resp_bufp, TS_NULL_MLOC, resp_hdr_loc);
 
     cstate->total_bytes += TSIOBufferWrite(cstate->resp_buffer, s2, sizeof(s2) - 1);
@@ -159,12 +160,12 @@ handle_scan(TSCont contp, TSEvent event, void *edata)
   if (event == TS_EVENT_CACHE_SCAN_DONE) {
     cstate->done = 1;
     char s[512];
-    int s_len = snprintf(s, sizeof(s),
-                         "</pre></p>\n<p>%d total objects in cache</p>\n"
-                         "<form method=\"GET\" action=\"/show-cache\">"
-                         "Enter URL to delete: <input type=\"text\" size=\"40\" name=\"remove_url\">"
-                         "<input type=\"submit\"  value=\"Delete URL\">",
-                         cstate->total_items);
+    int  s_len           = snprintf(s, sizeof(s),
+                                    "</pre></p>\n<p>%d total objects in cache</p>\n"
+                                               "<form method=\"GET\" action=\"/show-cache\">"
+                                               "Enter URL to delete: <input type=\"text\" size=\"40\" name=\"remove_url\">"
+                                               "<input type=\"submit\"  value=\"Delete URL\">",
+                                    cstate->total_items);
     cstate->total_bytes += TSIOBufferWrite(cstate->resp_buffer, s, s_len);
     TSVIONBytesSet(cstate->write_vio, cstate->total_bytes);
     if (!cstate->write_pending) {
@@ -271,7 +272,7 @@ handle_io(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
         cstate->pending_action = actionp;
       }
     } else {
-      char head[] = "<h3>Cache Contents:</h3>\n<p><pre>\n";
+      char head[]          = "<h3>Cache Contents:</h3>\n<p><pre>\n";
       cstate->total_bytes += TSIOBufferWrite(cstate->resp_buffer, head, sizeof(head) - 1);
       // start scan
       TSAction actionp = TSCacheScan(contp, nullptr, 512000);
@@ -283,14 +284,14 @@ handle_io(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
     return 0;
   } break;
   case TS_EVENT_VCONN_WRITE_READY: {
-    TSDebug(PLUGIN_NAME, "ndone: %" PRId64 " total_bytes: % " PRId64, TSVIONDoneGet(cstate->write_vio), cstate->total_bytes);
+    Dbg(dbg_ctl, "ndone: %" PRId64 " total_bytes: % " PRId64, TSVIONDoneGet(cstate->write_vio), cstate->total_bytes);
     cstate->write_pending = false;
     // the cache scan handler should call vio reenable when there is
     // available data
     return 0;
   } break;
   case TS_EVENT_VCONN_WRITE_COMPLETE: {
-    TSDebug(PLUGIN_NAME, "write complete");
+    Dbg(dbg_ctl, "write complete");
     cstate->done = 1;
     cleanup(contp);
   } break;
@@ -309,7 +310,7 @@ handle_io(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
 static int
 cache_intercept(TSCont contp, TSEvent event, void *edata)
 {
-  TSDebug(PLUGIN_NAME, "cache_intercept event: %d", event);
+  Dbg(dbg_ctl, "cache_intercept event: %d", event);
 
   switch (event) {
   case TS_EVENT_NET_ACCEPT:
@@ -350,7 +351,7 @@ unescapifyStr(char *buffer)
 {
   char *read  = buffer;
   char *write = buffer;
-  char subStr[3];
+  char  subStr[3];
 
   subStr[2] = '\0';
   while (*read != '\0') {
@@ -379,13 +380,13 @@ unescapifyStr(char *buffer)
 static int
 setup_request(TSCont contp, TSHttpTxn txnp)
 {
-  TSMBuffer bufp;
-  TSMLoc hdr_loc;
-  TSMLoc url_loc;
-  TSCont scan_contp;
-  const char *path, *query;
+  TSMBuffer         bufp;
+  TSMLoc            hdr_loc;
+  TSMLoc            url_loc;
+  TSCont            scan_contp;
+  const char       *path, *query;
   cache_scan_state *cstate;
-  int path_len, query_len;
+  int               path_len, query_len;
 
   TSAssert(contp == global_contp);
 
@@ -422,8 +423,8 @@ setup_request(TSCont contp, TSHttpTxn txnp)
 
     if (query && query_len > 11) {
       char querybuf[2048];
-      query_len   = static_cast<unsigned>(query_len) > sizeof(querybuf) - 1 ? sizeof(querybuf) - 1 : query_len;
-      char *start = querybuf, *end = querybuf + query_len;
+      query_len    = static_cast<unsigned>(query_len) > sizeof(querybuf) - 1 ? sizeof(querybuf) - 1 : query_len;
+      char  *start = querybuf, *end = querybuf + query_len;
       size_t del_url_len;
       memcpy(querybuf, query, query_len);
       *end  = '\0';
@@ -437,10 +438,10 @@ setup_request(TSCont contp, TSHttpTxn txnp)
         end         = start + del_url_len;
 
         cstate->key_to_delete = TSCacheKeyCreate();
-        TSDebug(PLUGIN_NAME, "deleting url: %s", start);
+        Dbg(dbg_ctl, "deleting url: %s", start);
 
         TSMBuffer urlBuf = TSMBufferCreate();
-        TSMLoc urlLoc;
+        TSMLoc    urlLoc;
 
         if (TS_SUCCESS == TSUrlCreate(urlBuf, &urlLoc)) {
           if (TSUrlParse(urlBuf, urlLoc, (const char **)&start, end) != TS_PARSE_DONE ||
@@ -461,9 +462,9 @@ setup_request(TSCont contp, TSHttpTxn txnp)
     }
 
     TSContDataSet(scan_contp, cstate);
-    TSDebug(PLUGIN_NAME, "setup cache intercept");
+    Dbg(dbg_ctl, "setup cache intercept");
   } else {
-    TSDebug(PLUGIN_NAME, "not a cache iter request");
+    Dbg(dbg_ctl, "not a cache iter request");
   }
 
 Ldone:

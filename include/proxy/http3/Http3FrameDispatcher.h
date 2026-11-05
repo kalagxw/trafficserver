@@ -1,0 +1,63 @@
+/** @file
+ *
+ *  A brief file description
+ *
+ *  @par License
+ *
+ *  Licensed to the Apache Software Foundation (ASF) under one
+ *  or more contributor license agreements.  See the NOTICE file
+ *  distributed with this work for additional information
+ *  regarding copyright ownership.  The ASF licenses this file
+ *  to you under the Apache License, Version 2.0 (the
+ *  "License"); you may not use this file except in compliance
+ *  with the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
+#pragma once
+
+#include "iocore/net/quic/QUICApplication.h"
+#include "proxy/http3/Http3Frame.h"
+#include "proxy/http3/Http3FrameHandler.h"
+#include <array>
+#include <cstdint>
+
+class QUICStreamVCAdapter;
+
+class Http3FrameDispatcher
+{
+public:
+  Http3ErrorUPtr on_read_ready(QUICStreamId stream_id, Http3StreamType stream_type, IOBufferReader &reader, uint64_t &nread);
+
+  void add_handler(Http3FrameHandler *handler);
+
+private:
+  // At most a handful of handlers ever register interest in the same frame type (currently
+  // up to 3: the frame counter, the protocol enforcer, and one of the header/data handlers).
+  // Inline storage avoids a heap allocation per handler registration, which otherwise runs
+  // once per HTTP/3 request since this dispatcher is a per-transaction object.
+  static constexpr size_t MAX_HANDLERS_PER_TYPE = 4;
+
+  enum READING_STATE {
+    READING_TYPE_LEN,
+    READING_LENGTH_LEN,
+    READING_PAYLOAD_LEN,
+    READING_PAYLOAD,
+  } _reading_state = READING_TYPE_LEN;
+  int64_t                     _reading_frame_type_len;
+  int64_t                     _reading_frame_length_len;
+  uint64_t                    _reading_frame_payload_len;
+  uint64_t                    _bytes_to_skip;
+  Http3FrameFactory           _frame_factory;
+  std::shared_ptr<Http3Frame> _current_frame = nullptr;
+
+  std::array<Http3FrameHandler *, MAX_HANDLERS_PER_TYPE> _handlers[256]      = {};
+  uint8_t                                                _handler_count[256] = {};
+};

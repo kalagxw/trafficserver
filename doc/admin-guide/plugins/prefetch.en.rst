@@ -34,6 +34,15 @@ On every **incoming** URL request, the plugin can decide to pre-fetch the
 **next object** or more objects based on the common URL path pattern and a
 pre-defined pre-fetch policy.
 
+.. note::
+
+   The plugin only prefetches on requests that go through a cache lookup.
+   On transactions where ATS skips the cache lookup -- non-cacheable
+   methods, or caching turned off (:ts:cv:`proxy.config.http.cache.http`
+   set to ``0``) -- the plugin does not prefetch. Issuing prefetches into
+   a cache that will not be consulted would do real work for no cache
+   benefit.
+
 Currently, most HLS video urls follow a predictable pattern, with most URLs
 containing a segment number. Since the segments are ~10s of content, the normal
 usage pattern is to fetch the incremental segment every few seconds. The CDN
@@ -170,6 +179,45 @@ specified with an integer followed by a colon, e.g. ``{8:$2+2}``,
 causing the resulting number to be padded with leading zeroes if it
 has fewer digits than the width.
 
+To allow larger numbers, the following parameter is supported ::
+
+  @pparam=--fetch-overflow=64
+
+This treats the operands as unsigned 64-bit integers. Numbers too
+large will be interpreted as 2\ :sup:`64`\ -1. Note in this case that
+adds between 2 very large numbers might result in overflow.
+
+To allow arbitrary numbers, the following parameter is supported ::
+
+  @pparam=--fetch-overflow=bignum
+
+Additionally bytewise decimal string add/subtract is supported which
+allows arbitrary big numbers. The regex must use \d+ to ensure that
+only digits are passed in the string.
+
+CMCD (Common Media Client Data) CMCD-Request header with nor field
+------------------------------------------------------------------
+
+If the ``--cmcd-nor`` option is specified the Cmcd-Request header with nor field is handled.
+
+With setup ::
+
+  map http://example.com http://origin.com \
+      @plugin=cachekey.so @pparam=--remove-all-params=true \
+      @plugin=prefetch.so \
+          @pparam=--cmcd-nor=true
+
+If the incoming request is ::
+
+  http://example-seed.com/path/someitem.m4a
+
+with header ::
+
+  Cmcd-Request: nor="otheritem.m4a"
+
+The following URL will be requested to be prefetched ::
+
+  http://example-seed.com/path/otheritem.m4a
 
 Overhead from **next object** prefetch
 --------------------------------------
@@ -238,6 +286,7 @@ Plugin parameters
   - ``true`` - configures the plugin run on the **front-tier**,
   - ``false`` - to be run on the **back-tier**.
 * ``--api-header`` - the header used by the plugin internally, also used to mark a prefetch request to the next tier in dual-tier usage.
+* ``--cmcd-nor`` - prefetch for a Cmcd-Request header with nor field.
 * ``--fetch-policy`` - fetch policy
   - ``simple`` - this policy just makes sure there are no same concurrent prefetches triggered (default and always used in combination with any other policy)
   - ``lru:n`` - this policy uses LRU to identify "hot" objects and triggers prefetch if the object is not found. `n` is the size of the LRU
@@ -252,6 +301,13 @@ Plugin parameters
     * if ``false`` (default) the fetch policy would use the **incoming** URL's cache key to find out if the **next object** should be prefetched or not,
     * if ``true`` the fetch policy would use the **next** URL's cache key that to find out if the **next object** should be prefetched or not
 * ``--log-name`` - specifies a custom log name (if not specified a log is not created)
+
+An invalid parameter value is a configuration error. ``--fetch-count`` and ``--fetch-max`` must be
+decimal numbers that fit in an unsigned integer, ``--fetch-overflow`` must be ``32`` or ``64``, and
+``--fetch-path-pattern`` must compile and may only reference capture groups that the pattern
+defines. A remap rule with an invalid value fails to load, instead of loading with prefetch
+silently disabled. ``traffic_ctl config reload`` rejects such a configuration and keeps the running
+one.
 
 Metrics
 =======

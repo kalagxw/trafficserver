@@ -19,6 +19,7 @@
 // condition.cc: Implementation of the condition base class
 //
 //
+#include <charconv>
 #include <string>
 
 #include "ts/ts.h"
@@ -43,9 +44,32 @@ parse_matcher_op(std::string &arg)
     break;
   case '/':
     arg.erase(0, 1);
-    arg.erase(arg.length() - 1, arg.length());
-    return MATCH_REGULAR_EXPRESSION;
+    // There should be a slash at the end
+    if (arg.length() >= 1 && arg[arg.length() - 1] == '/') {
+      arg.erase(arg.length() - 1, arg.length());
+      return MATCH_REGULAR_EXPRESSION;
+    } else {
+      return MATCH_ERROR;
+    }
     break;
+  case '{':
+    arg.erase(0, 1);
+    // There should be a right brace at the end
+    if (arg.length() >= 1 && arg[arg.length() - 1] == '}') {
+      arg.erase(arg.length() - 1, arg.length());
+      return MATCH_IP_RANGES;
+    } else {
+      return MATCH_ERROR;
+    }
+  case '(':
+    arg.erase(0, 1);
+    // There should be a right paren at the end
+    if (arg.length() >= 1 && arg[arg.length() - 1] == ')') {
+      arg.erase(arg.length() - 1, arg.length());
+      return MATCH_SET;
+    } else {
+      return MATCH_ERROR;
+    }
   default:
     return MATCH_EQUAL;
     break;
@@ -53,27 +77,93 @@ parse_matcher_op(std::string &arg)
 }
 
 void
+Condition::normalize(std::string &s, size_t start)
+{
+  auto in = s.find('%', start);
+
+  if (in == std::string::npos) {
+    return;
+  }
+
+  auto out = in;
+
+  while (in < s.size()) {
+    if (s[in] == '%' && s.size() - in > 2) {
+      const char   *hex = s.data() + in + 1;
+      unsigned char c   = 0;
+      auto [end, ec]    = std::from_chars(hex, hex + 2, c, 16);
+
+      // Escaped controls stay encoded, since a decoded CR/LF in an expansion would inject a header field.
+      if (ec == std::errc{} && end == hex + 2 && c >= 0x20 && c != 0x7f) {
+        s[out++]  = static_cast<char>(c);
+        in       += 3;
+        continue;
+      }
+    }
+    s[out++] = s[in++];
+  }
+
+  s.resize(out);
+}
+
+void
 Condition::initialize(Parser &p)
 {
   Statement::initialize(p);
 
-  if (p.mod_exist("OR")) {
-    if (p.mod_exist("AND")) {
+  if (p.consume_mod("OR")) {
+    if (p.consume_mod("AND")) {
       TSError("[%s] Can't have both AND and OR in mods", PLUGIN_NAME);
     } else {
-      _mods = static_cast<CondModifiers>(_mods | COND_OR);
+      _mods |= CondModifiers::OR;
     }
-  } else if (p.mod_exist("AND")) {
-    _mods = static_cast<CondModifiers>(_mods | COND_AND);
+  } else if (p.consume_mod("AND")) {
+    _mods |= CondModifiers::AND;
   }
 
-  if (p.mod_exist("NOT")) {
-    _mods = static_cast<CondModifiers>(_mods | COND_NOT);
+  if (p.consume_mod("NOT")) {
+    _mods |= CondModifiers::NOT;
   }
 
-  if (p.mod_exist("L")) {
-    _mods = static_cast<CondModifiers>(_mods | COND_LAST);
+  // The NOCASE / CASE modifier is a bit special, since it ripples down into the Matchers for
+  // strings and regexes.
+  int _substr_seen = 0;
+
+  if (p.consume_mod("NOCASE")) {
+    _mods |= CondModifiers::MOD_NOCASE;
+  } else if (p.consume_mod("CASE")) {
+    // Nothing to do — default is case-sensitive, but still allow this string for clearness.
+  }
+
+  if (p.consume_mod("EXT")) {
+    _mods |= CondModifiers::MOD_EXT;
+    _substr_seen++;
+  }
+  if (p.consume_mod("SUF")) {
+    _mods |= CondModifiers::MOD_SUF;
+    _substr_seen++;
+  }
+  if (p.consume_mod("PRE")) {
+    _mods |= CondModifiers::MOD_PRE;
+    _substr_seen++;
+  }
+  if (p.consume_mod("MID")) {
+    _mods |= CondModifiers::MOD_MID;
+    _substr_seen++;
+  }
+
+  if (_substr_seen > 1) {
+    throw std::runtime_error("Only one substring modifier (EXT, SUF, PRE, MID) may be used.");
+  }
+
+  if (p.consume_mod("NORM")) {
+    _mods |= CondModifiers::MOD_NORM;
+  }
+
+  if (p.consume_mod("L")) {
+    _mods |= CondModifiers::MOD_L;
   }
 
   _cond_op = parse_matcher_op(p.get_arg());
+  p.validate_mods();
 }

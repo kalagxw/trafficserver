@@ -12,6 +12,7 @@
    under the License.
 
 .. include:: ../../common.defs
+.. default-domain:: cpp
 .. highlight:: none
 
 .. _admin-plugins-header-rewrite:
@@ -82,15 +83,39 @@ This plugin may be enabled globally, so that the conditions and header
 rewriting rules are evaluated for every request made to your |TS| instance.
 This is done by adding the following line to your :file:`plugin.config`::
 
-  header_rewrite.so [--geo-db-path=path/to/geoip.db] config_file_1.conf config_file_2.conf ...
+  header_rewrite.so config_file_1.conf config_file_2.conf ...
 
 You may specify multiple configuration files. Their rules will be evaluated in
 the order the files are listed.
 
-The plugin takes an optional switch ``--geo-db-path``. If MaxMindDB support has
-been compiled in, use this switch to point at your .mmdb file. This also applies to
-the remap context.
+The plugin takes an optional switches.
 
+====================================== ==================================================================================================
+ Option                                Description
+====================================== ==================================================================================================
+ ``--geo-db-path <path_to_geoip_db>``  A file path for MaxMindDB.
+ ``--timezone <value>``                Timezone to use on header rewrite rules.
+ ``--inbound-ip-source <value>``       The source of IP address for the client.
+====================================== ==================================================================================================
+
+Please note that these optional switches needs to appear before config files like you would do on UNIX command lines.
+
+``--geo-db-path``
+~~~~~~~~~~~~~~~~~
+
+If MaxMindDB support has been compiled in, use this switch to point at your .mmdb file.
+This also applies to the remap context.
+
+``--timezone``
+~~~~~~~~~~~~~~
+
+This applies ``set-plugin-cntl TIMEZONE <value>`` to every transaction unconditionally.
+See set-plugin-cntl for the setting values and the effect.
+
+``--inbound-ip-source``
+~~~~~~~~~~~~~~~~~~~~~~~
+This applies ``set-plugin-cntl INBOUND_IP_SOURCE <value>`` to every transaction unconditionally.
+See set-plugin-cntl for the setting values and the effect.
 
 Enabling Per-Mapping
 --------------------
@@ -113,18 +138,167 @@ Rewriting Rules
 
 Header rewriting rules consist of zero or more `Conditions`_ followed by one or
 more `Operators`_. Conditions are used to limit the requests which will be
-affected by the operator(s). Additionally, both conditions and operators may
-have flags which modify their behavior.
+affected by the operator(s) and define when the ruleset is run during the
+transaction (through the `Hook Conditions`_). Additionally, both conditions
+and operators may have flags which modify their behavior.
 
 A complete rule, consisting of two conditions and a single operator might look
 like the following::
 
+    cond %{READ_RESPONSE_HDR_HOOK} [AND]
     cond %{STATUS} >399 [AND]
     cond %{STATUS} <500
-    set-status 404
+      set-status 404
 
 Which converts any 4xx HTTP status code from the origin server to a 404. A
 response from the origin with a status of 200 would be unaffected by this rule.
+
+Advanced Conditionals
+---------------------
+
+The header_rewrite plugin supports advanced conditional logic that allows
+for more sophisticated rule construction, including branching logic, nested
+conditionals, and complex boolean expressions.
+
+else and elif Clauses
+~~~~~~~~~~~~~~~~~~~~~
+
+An optional ``else`` clause may be specified, which will be executed if the
+conditions are not met. The ``else`` clause is specified by starting a new
+line with the word ``else``. The following example illustrates this::
+
+    cond %{STATUS} >399 [AND]
+    cond %{STATUS} <500
+      set-status 404
+    else
+      set-status 503
+
+The ``else`` clause is not a condition, and does not take any flags, it is
+of course optional, but when specified must be followed by at least one
+operator.
+
+You can also do an ``elif`` (else if) clause, which is specified by
+starting a new line with the word ``elif``. The following example
+illustrates this::
+
+    cond %{STATUS} >399 [AND]
+    cond %{STATUS} <500
+      set-status 404
+    elif
+      cond %{STATUS} =503
+        set-status 502
+    else
+      set-status 503
+
+Any number of ``elif`` clauses can be specified. We can consider these
+clauses are more powerful and flexible ``switch`` statement. In an
+``if-elif-else`` rule, only one will evaluate its operators.
+
+Note that while ``else`` and ``elif`` themselves cannot be directly nested,
+you can use ``if``/``endif`` blocks within ``else`` or ``elif`` operator
+sections to achieve nested conditional logic (see `Nested Conditionals with
+if/endif`_).
+
+Similarly, each ``else`` and ``elif`` have the same implied
+:ref:`Hook Condition <hook_conditions>` as the initial condition.
+
+Nested Conditionals with if/endif
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For more complex logic requiring nested conditionals, the ``if`` and
+``endif`` pseudo-operators can be used. While ``else`` and ``elif``
+themselves cannot be directly nested, you can use ``if``/``endif`` blocks
+within any operator section (including inside ``else`` or ``elif`` blocks)
+to achieve arbitrary nesting depth.
+
+The ``if`` operator starts a new conditional block, and ``endif`` closes
+it. Each ``if`` must have a matching ``endif``. Here's an example::
+
+    cond %{READ_RESPONSE_HDR_HOOK} [AND]
+    cond %{STATUS} >399
+      if
+        cond %{HEADER:X-Custom-Error} ="true"
+          set-header X-Error-Handled "yes"
+        else
+          set-header X-Error-Handled "no"
+      endif
+      set-status 500
+
+In this example, the nested ``if``/``endif`` block is only evaluated when
+the status is greater than 399. The nested block itself can contain
+``else`` or ``elif`` clauses, and you can nest multiple levels deep::
+
+    cond %{READ_RESPONSE_HDR_HOOK}
+      if
+        cond %{STATUS} =404
+          if
+            cond %{CLIENT-HEADER:User-Agent} /mobile/
+              set-header X-Error-Type "mobile-404"
+            else
+              set-header X-Error-Type "desktop-404"
+          endif
+      elif
+        cond %{STATUS} =500
+          set-header X-Error-Type "server-error"
+      endif
+
+GROUP Conditions in Advanced Conditionals
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The `GROUP`_ condition can be combined with advanced conditionals to
+create very sophisticated boolean expressions. ``GROUP`` conditions act as
+parentheses in your conditional logic, allowing you to mix AND, OR, and NOT
+operators in complex ways.
+
+Here's an example combining ``GROUP`` with ``if``/``endif``::
+
+    cond %{READ_RESPONSE_HDR_HOOK} [AND]
+    cond %{STATUS} >399
+      if
+        cond %{GROUP} [OR]
+          cond %{CLIENT-HEADER:X-Retry} ="true" [AND]
+          cond %{METHOD} =GET
+        cond %{GROUP:END}
+        cond %{CLIENT-HEADER:X-Force-Cache} ="" [NOT]
+          set-header X-Can-Retry "yes"
+      else
+        set-header X-Can-Retry "no"
+      endif
+      set-status 500
+
+This creates the logic: if error status, then set retry header when
+``((X-Retry=true AND METHOD=GET) OR X-Force-Cache header exists)``.
+The GROUP is necessary here to properly combine the two conditions with OR.
+
+You can also use ``GROUP`` with ``else`` and ``elif`` inside nested conditionals::
+
+    cond %{SEND_RESPONSE_HDR_HOOK} [AND]
+    cond %{STATUS} >399
+      if
+        cond %{GROUP} [OR]
+          cond %{HEADER:X-Custom} ="retry" [AND]
+          cond %{METHOD} =POST
+        cond %{GROUP:END}
+        cond %{HEADER:Content-Type} /json/
+          set-header X-Error-Handler "json-retry"
+        elif
+          cond %{METHOD} =GET
+            set-header X-Error-Handler "get-error"
+        else
+          set-header X-Error-Handler "standard"
+      endif
+      set-status 500
+
+State variables
+---------------
+
+A set of state variables are also available for both conditions and operators.
+There are currently 16 flag states, 4 8-bit integers and one 16-bit integer states.
+These states are all transactional, meaning they are usable and persistent across
+all hooks.
+
+The flag states are numbers 0-15, the 8-bit integer states are numbered 0-3, and the
+one 16-bit integer state is number 0.
 
 Conditions
 ----------
@@ -195,6 +369,25 @@ header operated on by this condition will be a comma separated string of the
 values from every occurrence of the header. More details are provided in
 `Repeated Headers`_ below.
 
+SERVER-HEADER
+~~~~~~~~~~~~~
+::
+
+    cond %{SERVER-HEADER:<name>} <operand>
+
+Value of the header ``<name>`` from the request sent to the origin server
+(regardless of the hook context in which the rule is being evaluated). This is
+useful when you need to check headers that have been modified or added during
+the request processing before being sent to the origin. Note that some headers
+may appear in an HTTP message more than once. In these cases, the value of the
+header operated on by this condition will be a comma separated string of the
+values from every occurrence of the header. More details are provided in
+`Repeated Headers`_ below.
+
+Note that the server request headers are only available after the
+``SEND_REQUEST_HDR_HOOK`` has been reached. Using this condition in earlier
+hooks will result in an empty value.
+
 CLIENT-URL
 ~~~~~~~~~~
 ::
@@ -211,96 +404,19 @@ phase of the transaction.  This happens when there is no host in the incoming UR
 and only set as a host header.  During the remap phase the host header is copied
 to the CLIENT-URL.  Use CLIENT-HEADER:Host if you are going to match the host.
 
-COOKIE
-~~~~~~
+SERVER-URL
+~~~~~~~~~~
 ::
 
-    cond %{COOKIE:<name>} <operand>
+    cond %{SERVER-URL:<part>} <operand>
 
-Value of the cookie ``<name>``. This does not expose or match against a
-cookie's expiration, the domain(s) on which it is valid, whether it is protocol
-restricted, or any of the other metadata; simply the current value of the
-cookie as presented by the client.
+The URL of the request being sent to the origin server. This is the URL after
+any remapping and modifications have been applied. The ``<part>`` may be
+specified according to the options documented in `URL Parts`_.
 
-FROM-URL
-~~~~~~~~
-::
-
-    cond %{FROM-URL:<part>} <operand>
-
-In a remapping context, this condition matches against the source URL from
-which the remapping was generated. This condition is valid only within
-configurations provided through :file:`remap.config` as described in `Enabling
-Per-Mapping`_ above.
-
-The ``<part>`` allows the operand to match against just a component of the URL,
-as documented in `URL Parts`_ below.
-
-GEO
-~~~
-::
-
-    cond %{GEO:<part>} <operand>
-
-Perform a GeoIP lookup of the client-IP, using a 3rd party library and
-DB. Currently the MaxMind GeoIP and MaxMindDB APIs are supported. The default is to
-do a Country lookup, but the following qualifiers are supported::
-
-    %{GEO:COUNTRY}      The country code (e.g. "US")
-    %{GEO:COUNTRY-ISO}  The country ISO code (e.g. 225)
-    %{GEO:ASN}          The AS number for the provider network (e.g. 7922)
-    %{GEO:ASN-NAME}     A descriptive string of the AS provider
-
-These operators can be used both as conditionals, as well as values for
-setting headers. For example::
-
-    cond %{SEND_RESPONSE_HDR_HOOK} [AND]
-    cond %${GEO:COUNTRY} =US
-        set-header ATS-Geo-Country %{GEO:COUNTRY}
-        set-header ATS-Geo-Country-ISO %{GEO:COUNTRY-ISO}
-        set-header ATS-Geo-ASN %{GEO:ASN}
-        set-header ATS-Geo-ASN-NAME %{GEO:ASN-NAME}
-
-
-HEADER
-~~~~~~
-::
-
-    cond %{HEADER:<name>} <operand>
-
-Value of the header ``<name>`` from either the original client request or the
-origin server's response, depending upon the hook context in which the rule is
-being evaluated. Consult `Requests vs. Responses`_ for more information on how
-to distinguish the two, as well as enforce that a rule is always evaluated in
-the desired context.
-
-Note that some headers may appear in an HTTP message more than once. In these
-cases, the value of the header operated on by this condition will be a comma
-separated string of the values from every occurrence of the header. Refer to
-`Repeated Headers`_ for more information.
-
-If you wish to use a client request header, regardless of hook context, you may
-consider using the `CLIENT-HEADER`_ condition instead.
-
-ID
-~~
-::
-
-   cond %{ID:REQUEST} >100
-
-This condition provides access to three identifier values that ATS uses
-internally for things like logging and debugging. Since these are IDs, they
-are mostly useful as a value (operand) to other operators. The three types of
-IDs are ::
-
-    %{ID:REQUEST}    A unique, sequence number for the transaction
-    %{ID:PROCESS}    A UUID string, generated every time ATS restarts
-    %{ID:UNIQUE}     The combination of the previous two IDs
-
-Now, even though these are conditionals, their primary use are as value
-arguments to another operator. For example::
-
-    set-header ATS-Req-UUID %{ID:UNIQUE}
+Note that the server request URL is only available after the
+``SEND_REQUEST_HDR_HOOK`` has been reached. Using this condition in earlier
+hooks will result in an empty value.
 
 CIDR
 ~~~~
@@ -327,7 +443,7 @@ The two arguments, if provided, are comma separated. Valid syntax includes::
 A typical use case is to insert the @-prefixed header as above, and then use
 this header in a custom log format, rather than logging the full client
 IP. Another use case could be to make a special condition on a sub-net,
-e.g.::
+e.g. ::
 
     cond %{CIDR:8} ="8.0.0.0"
         set-header X-Is-Eight "Yes"
@@ -337,11 +453,173 @@ e.g.::
 This condition has no requirements other than access to the Client IP, hence,
 it should work in any and all hooks.
 
+COOKIE
+~~~~~~
+::
+
+    cond %{COOKIE:<name>} <operand>
+
+Value of the cookie ``<name>``. This does not expose or match against a
+cookie's expiration, the domain(s) on which it is valid, whether it is protocol
+restricted, or any of the other metadata; simply the current value of the
+cookie as presented by the client.
+
+FROM-URL
+~~~~~~~~
+::
+
+    cond %{FROM-URL:<part>} <operand>
+
+In a remapping context, this condition matches against the source URL from
+which the remapping was generated. This condition is valid only within
+configurations provided through :file:`remap.config` as described in `Enabling
+Per-Mapping`_ above.
+
+The ``<part>`` allows the operand to match against just a component of the URL,
+as documented in `URL Parts`_ below.
+
+.. _admin-plugins-header-rewrite-geo:
+
+GEO
+~~~
+::
+
+    cond %{GEO:<part>} <operand>
+
+Perform a GeoIP lookup of the client-IP, using a 3rd party library and
+DB. Currently the MaxMind GeoIP and MaxMindDB APIs are supported. The default is to
+do a Country lookup, but the following qualifiers are supported::
+
+    %{GEO:COUNTRY}      The country code (e.g. "US")
+    %{GEO:COUNTRY-ISO}  The country ISO code (e.g. 225)
+    %{GEO:ASN}          The AS number for the provider network (e.g. 7922)
+    %{GEO:ASN-NAME}     A descriptive string of the AS provider
+
+These operators can be used both as conditionals, as well as values for
+setting headers. For example::
+
+    cond %{SEND_RESPONSE_HDR_HOOK} [AND]
+    cond %{GEO:COUNTRY} =US
+        set-header ATS-Geo-Country %{GEO:COUNTRY}
+        set-header ATS-Geo-Country-ISO %{GEO:COUNTRY-ISO}
+        set-header ATS-Geo-ASN %{GEO:ASN}
+        set-header ATS-Geo-ASN-NAME %{GEO:ASN-NAME}
+
+GROUP
+~~~~~
+::
+
+    cond %{GROUP}
+    cond %{GROUP:END}
+
+This condition is a pseudo condition that is used to group conditions together.
+Using these groups, you can construct more complex expressions, that can mix and
+match AND, OR and NOT operators. These groups are the equivalent of parenthesis
+in expressions. The following pseudo example illustrates this. Lets say you want
+to express::
+
+      (A and B) or (C and (D or E))
+
+Assuming A, B, C, D and E are all valid conditions, you would write this as::
+
+    cond %{GROUP} [OR]
+        cond A [AND]
+        cond B
+    cond %{GROUP:END}
+    cond %{GROUP]
+       cond C [AND]
+       cond %{GROUP}
+             cond D [OR]
+             cond E
+       cond %{GROUP:END}
+    cond %{GROUP:END}
+
+Here's a more realistic example, abeit constructed, showing how to use the
+groups to construct a complex expression with real header value comparisons::
+
+    cond %{SEND_REQUEST_HDR_HOOK} [AND]
+    cond %{GROUP} [OR]
+        cond %{CLIENT-HEADER:X-Bar} /foo/ [AND]
+        cond %{CLIENT-HEADER:User-Agent} /Chrome/
+    cond %{GROUP:END}
+    cond %{GROUP}
+        cond %{CLIENT-HEADER:X-Bar} /fie/ [AND]
+        cond %{CLIENT-HEADER:User-Agent} /MSIE/
+    cond %{GROUP:END}
+        set-header X-My-Header "This is a test"
+
+Note that the ``GROUP`` and ``GROUP:END`` conditions do not take any operands per se,
+and you are still limited to operations after the last condition. Also, the ``GROUP:END``
+condition must match exactly with the last ``GROUP`` conditions, and they can be
+nested in one or several levels.
+
+When closing a group with ``GROUP::END``, the modifiers are not used, in fact that entire
+condition is discarded, being used only to close the group. You may still decorate it
+with the same modifier as the opening ``GROUP`` condition, but it is not necessary.
+
+HEADER
+~~~~~~
+::
+
+    cond %{HEADER:<name>} <operand>
+
+Value of the header ``<name>`` from either the original client request or the
+origin server's response, depending upon the hook context in which the rule is
+being evaluated. Consult `Requests vs. Responses`_ for more information on how
+to distinguish the two, as well as enforce that a rule is always evaluated in
+the desired context.
+
+Note that some headers may appear in an HTTP message more than once. In these
+cases, the value of the header operated on by this condition will be a comma
+separated string of the values from every occurrence of the header. Refer to
+`Repeated Headers`_ for more information.
+
+If you wish to use a client request header, regardless of hook context, you may
+consider using the `CLIENT-HEADER`_ condition instead.
+
+HTTP-CNTL
+~~~~~~~~~
+::
+
+    cond %{HTTP-CNTL:<controller>}
+
+This condition allows you to check the state of various HTTP controls. The controls
+are of the same name as for `set-http-cntl`_. This condition returns a ``true`` or
+``false`` value, depending on the state of the control. For example::
+
+    cond %{HTTP-CNTL:LOGGING} [NOT]
+
+would only continue evaluation if logging is turned off.
+
+.. _admin-plugins-header-rewrite-id:
+
+ID
+~~
+::
+
+   cond %{ID:REQUEST} >100
+
+This condition provides access to three identifier values that ATS uses
+internally for things like logging and debugging. Since these are IDs, they
+are mostly useful as a value (operand) to other operators. The three types of
+IDs are ::
+
+    %{ID:REQUEST}    A unique, sequence number for the transaction
+    %{ID:PROCESS}    A UUID string, generated every time ATS restarts
+    %{ID:UNIQUE}     The combination of the previous two IDs
+
+Now, even though these are conditionals, their primary use are as value
+arguments to another operator. For example::
+
+    set-header ATS-Req-UUID %{ID:UNIQUE}
+
+.. _admin-plugins-header-rewrite-inbound:
+
 INBOUND
 ~~~~~~~
 ::
 
-   cond %{INBOUND:TLS} /./
+   cond %{INBOUND:TLS} ="" [NOT]
 
 This condition provides access to information about the inbound (client, user agent) connection to ATS.
 The data that can be checked is ::
@@ -369,11 +647,56 @@ will be true for *non*-TLS connections because it will be true when ``%{INBOUND:
 string. This happens because the default matching is equality and the default value the empty
 string. Therefore the condition is treated as if it were ::
 
-  cond %{INBOUND:TLS}=""
+  cond %{INBOUND:TLS} =""
 
 which is true when the connection is not TLS. The arguments ``H2``, ``IPV4``, and ``IPV6`` work the
 same way.
 
+As a special matcher, the inbound IP addresses can be matched against a list of IP ranges, e.g.
+::
+
+   cond %{INBOUND:REMOTE-ADDR} {192.168.201.0/24,10.0.0.0/8}
+
+.. note::
+    This will not work against the non-IP based conditions, such as the protocol families,
+    and the configuration parser will error out. The format here is very specific, in particular no
+    white spaces are allowed between the ranges.
+
+If |ATS| is built with :ref:`Cripts <developer-guide-cripts>` support, a number of additional
+qualifiers are available exclusively on TLS sessions, for X509 certificate introspection.
+The client certificate (for mutual TLS) is accessed with qualifier prefix of ``CLIENT-CERT:``
+and the server certificate with a prefix qualifier of ``SERVER-CERT:``. The X509 naming of the
+specific fields are the same for the two certificates::
+
+   PEM              The PEM-encoded certificate, as a string.
+   SIG              The signature of the certificate.
+   SUBJECT          The subject of the certificate.
+   ISSUER           The issuer of the certificate.
+   SERIAL           The serial number of the certificate.
+   NOT_BEFORE       The date and time when the certificate becomes valid.
+   NOT_AFTER        The date and time when the certificate expires.
+   VERSION          The version of the certificate.
+   SAN:DNS          The Subject Alternative Name (SAN) DNS entries.
+   SAN:IP           The Subject Alternative Name (SAN) IP addresses.
+   SAN:EMAIL        The Subject Alternative Name (SAN) email addresses.
+   SAN:URI          The Subject Alternative Name (SAN) URIs.
+
+These conditions and qualifiers can be used in conditions of course, but more importantly,
+are also very useful when adding or modifying headers. For example, you can add some
+client certificate and server subject to the response headers, so that the client can see it
+as part of the response ::
+
+    cond %{SEND_RESPONSE_HDR_HOOK} [AND]
+    cond %{INBOUND:TLS} ="" [NOT]
+      set-header X-Client-Cert "%{INBOUND:CLIENT-CERT:PEM}"
+      set-header X-Client-Cert-Subject "%{INBOUND:CLIENT-CERT:SUBJECT}"
+      set-header X-Client-Cert-Issuer "%{INBOUND:CLIENT-CERT:ISSUER}"
+      set-header X-Server-Cert-Subject "%{INBOUND:SERVER-CERT:SUBJECT}""
+
+The ``SAN:`` fields will return a semicolon-separated list of the respective
+values, there can be zero, one or many of each SAN type. Example ::
+
+    cond %{CLIENT-CERT:SAN:DNS} /example\.com/
 
 IP
 ~~
@@ -390,7 +713,7 @@ possible parts being
     %{IP:SERVER}     Upstream (next-hop) server IP address (typically origin, or parent)
     %{IP:OUTBOUND}   ATS's outbound IP address, that was used to connect upstream (next-hop)
 
-Note that both `%{IP:SERVER}` and `%{IP:OUTBOUND}` can be unset, in which case the
+Note that both ``%{IP:SERVER}`` and ``%{IP:OUTBOUND}`` can be unset, in which case the
 empty string is returned. The common use for this condition is
 actually as a value to an operator, e.g. ::
 
@@ -400,6 +723,13 @@ actually as a value to an operator, e.g. ::
      set-header X-Server-IP %{IP:SERVER}
      set-header X-Outbound-IP %{IP:OUTBOUND}
 
+As a special matcher, the `IP` can be matched against a list of IP ranges, e.g.
+::
+
+   cond %{IP:CLIENT} {192.168.201.0/24,10.0.0.0/8}
+
+The format here is very specific, in particular no white spaces are allowed between the
+ranges.
 
 INTERNAL-TRANSACTION
 ~~~~~~~~~~~~~~~~~~~~
@@ -408,9 +738,36 @@ INTERNAL-TRANSACTION
     cond %{INTERNAL-TRANSACTION}
 
 Returns true if the current transaction was internally-generated by |TS| (using
-:c:func:`TSHttpTxnIsInternal`). These transactions are not initiated by
+:func:`TSHttpTxnIsInternal`). These transactions are not initiated by
 external client requests, but are triggered (often by plugins) entirely within
 the |TS| process.
+
+LAST-CAPTURE
+~~~~~~~~~~~~
+::
+
+    cond %{LAST-CAPTURE:<part>} <operand>
+
+If a previous condition has been a regular expression match, and capture groups
+were used in the match, this condition can be used to access the last capture
+group. The ``<part>`` is the index of the capture group, starting at ``0``
+with a max index of ``9``. The index ``0`` is special, just like in PCRE, having
+the value of the entire match.
+
+If there was no regex match in a previous condition, these conditions have the
+implicit value of an empty string. The capture groups are also only available
+within a rule, and not across rules.
+
+This condition may be most useful as a value to an operand, such as::
+
+    cond %{HEADER:X-Foo} /foo-(.*)/
+      set-header X-Foo %{LAST-CAPTURE:1}
+
+It can also be matched against an operand, like any other condition::
+
+    cond %{HEADER:X-Foo} /foo-(.*)/ [AND]
+    cond %{LAST-CAPTURE:1} ("bar","fie")
+      set-header X-Matched "yes"
 
 METHOD
 ~~~~~~~
@@ -421,6 +778,35 @@ METHOD
 The HTTP method (e.g. ``GET``, ``HEAD``, ``POST``, and so on) used by the
 client for this transaction.
 
+NEXT-HOP
+~~~~~~~~
+::
+
+    cond %{NEXT-HOP:<part>} <operand>
+
+Returns next hop current selected parent information.  The following qualifiers
+are supported::
+
+    %{NEXT-HOP:HOST} Name of the current selected parent.
+    %{NEXT-HOP:PORT} Port of the current selected parent.
+    %{NEXT-HOP:STRATEGY} Name of the current strategy (can be "" if not using a strategy)
+
+Note that the ``<part>`` of NEXT-HOP will likely not be available unless
+an origin server connection is attempted at which point it will available
+as part of the ``SEND_REQUEST_HDR_HOOK``.
+
+For example::
+
+    cond %{SEND_REQUEST_HDR_HOOK} [AND]
+    cond %{NEXT-HOP:HOST} =www.firstparent.com
+        set-header Host vhost.firstparent.com
+
+    cond %{SEND_REQUEST_HDR_HOOK} [AND]
+    cond %{NEXT-HOP:HOST} =www.secondparent.com
+        set-header Host vhost.secondparent.com
+
+.. _admin-plugins-header-rewrite-now:
+
 NOW
 ~~~
 ::
@@ -428,7 +814,7 @@ NOW
     cond %{NOW:<part>} <operand>
 
 This is the current time, in the local timezone as set on the machine,
-typically GMC. Without any further qualifiers, this is the time in seconds
+typically GMT. Without any further qualifiers, this is the time in seconds
 since EPOCH aka Unix time. Qualifiers can be used to give various other
 values, such as year, month etc.
 ::
@@ -449,6 +835,73 @@ RANDOM
     cond %{RANDOM:<n>} <operand>
 
 Generates a random integer from ``0`` up to (but not including) ``<n>``. Mathematically, ``[0,n)`` or ``0 <= r < n``.
+
+STATE-FLAG
+~~~~~~~~~~
+::
+
+      cond %{STATE-FLAG:<n>}
+
+This condition allows you to check the state of a flag. The ``<n>`` is the
+number of the flag, from 0 to 15. This condition returns a ``true`` or
+``false`` value, depending on the state of the flag. The default value of
+all flags are ``false``.
+
+STATE-INT8
+~~~~~~~~~~
+::
+
+      cond %{STATE-INT8:<n>}
+
+This condition allows you to check the state of an 8-bit unsigned integer.
+The ``<n>`` is the number of the integer, from 0 to 3. The current value of
+the state integer is returned, while all 4 integers are initialized to 0.
+
+STATE-INT16
+~~~~~~~~~~~
+::
+
+      cond %{STATE-INT16:<0>}
+
+This condition allows you to check the state of an 16-bit unsigned integer.
+There's only one such integer, and its value is returned from this condition.
+As such, the index, ``0``, is optional here. The initialized value of this
+state variable is ``0``.
+
+SESSION-FLAG
+~~~~~~~~~~~~
+::
+
+      cond %{SESSION-FLAG:<n>}
+
+This condition allows you to check the state of a session-scoped flag. The
+``<n>`` is the number of the flag, from 0 to 15. Unlike ``STATE-FLAG`` which
+is scoped to the current transaction, session flags persist across all
+transactions on the same client connection (session). The default value of all
+flags are ``false``.
+
+SESSION-INT8
+~~~~~~~~~~~~
+::
+
+      cond %{SESSION-INT8:<n>}
+
+This condition allows you to check the state of a session-scoped 8-bit unsigned
+integer. The ``<n>`` is the number of the integer, from 0 to 3. The current
+value is returned, and all 4 integers are initialized to 0. Session integers
+persist across all transactions on the same client connection.
+
+SESSION-INT16
+~~~~~~~~~~~~~
+::
+
+      cond %{SESSION-INT16:<0>}
+
+This condition allows you to check the state of a session-scoped 16-bit unsigned
+integer. There's only one such integer, and its value is returned from this
+condition. As such, the index, ``0``, is optional here. The initialized value
+is ``0``. Session integers persist across all transactions on the same client
+connection.
 
 STATUS
 ~~~~~~
@@ -522,7 +975,7 @@ TCP-INFO
     cond %{<name>}
         add-header @PropertyName "%{TCP-INFO}"
 
-This operation records TCP Info struct field values as an Internal remap as well as global header at the event hook specified by the condition. Supported hook conditions include TXN_START_HOOK, SEND_RESPONSE_HEADER_HOOK and TXN_CLOSE_HOOK in the Global plugin and REMAP_PSEUDO_HOOK, SEND_RESPONSE_HEADER_HOOK and TXN_CLOSE_HOOK in the Remap plugin. Conditions supported as request headers include TXN_START_HOOK and REMAP_PSEUDO_HOOK. The other conditions are supported as response headers. TCP Info fields currently recorded include rtt, rto, snd_cwnd and all_retrans. This operation is not supported on transactions originated within Traffic Server (for e.g using the |TS| :c:func:`TSHttpTxnIsInternal`)
+This operation records TCP Info struct field values as an Internal remap as well as global header at the event hook specified by the condition. Supported hook conditions include TXN_START_HOOK, SEND_RESPONSE_HEADER_HOOK and TXN_CLOSE_HOOK in the Global plugin and REMAP_PSEUDO_HOOK, SEND_RESPONSE_HEADER_HOOK and TXN_CLOSE_HOOK in the Remap plugin. Conditions supported as request headers include TXN_START_HOOK and REMAP_PSEUDO_HOOK. The other conditions are supported as response headers. TCP Info fields currently recorded include rtt, rto, snd_cwnd and all_retrans. This operation is not supported on transactions originated within Traffic Server (for e.g using the |TS| :func:`TSHttpTxnIsInternal`)
 
 Condition Operands
 ------------------
@@ -535,7 +988,11 @@ types supported:
 Operand     Description
 =========== ===================================================================
 /regex/     Matches the condition's provided value against the regular
-            expression.
+            expression. Start the regex with (?i) to flag it for a case
+            insensitive match, e.g. /(?i)regex/ will match ReGeX.
+(x,y,z)     Matches the condition's provided value against the list of
+            comma-separated values. The list may be a list of strings, like
+            ``(mp3,m3u,m3u8)``, or a list of integers, like ``(301,302,307,308)``.
 <string     Matches if the value from the condition is lexically less than
             *string*.
 >string     Matches if the value from the condition is lexically greater than
@@ -548,6 +1005,11 @@ The absence of an operand for conditions which accept them simply requires that
 a value exists (e.g. the content of the header is not an empty string) for the
 condition to be considered true.
 
+.. note::
+    Strings within a set can be quoted, but the quotes are not necessary. This
+    can be important if a matching string can include spaces or commas,
+    e.g. ``(foo,"bar,fie",baz)``.
+
 Condition Flags
 ---------------
 
@@ -555,16 +1017,62 @@ The condition flags are optional, and you can combine more than one into
 a comma-separated list of flags. Note that whitespaces are not allowed inside
 the brackets:
 
-====== ========================================================================
-Flag   Description
-====== ========================================================================
-AND    Indicates that both the current condition and the next must be true.
-       This is the default behavior for all conditions when no flags are
-       provided.
-NOT    Inverts the condition.
-OR     Indicates that either the current condition or the next one must be
-       true, as contrasted with the default behavior from ``[AND]``.
-====== ========================================================================
+.. table:: Condition Flags
+   :widths: 15 85
+
+   ====== ========================================================================
+   Flag   Description
+   ====== ========================================================================
+   AND    Indicates that both the current condition and the next must be true.
+          This is the default behavior for all conditions when no flags are
+          provided.
+   NOT    Inverts the condition.
+   OR     Indicates that either the current condition or the next one must be
+          true, as contrasted with the default behavior from ``[AND]``.
+   NOCASE Indicates that the string comparison, or regular expression, should be
+          case-insensitive. The default is to be case-sensitive.
+   PRE    Make a prefix match on a string comparison.
+   SUF    Make a suffix match on a string comparison.
+   MID    Make a substring match on a string comparison.
+   EXT    The substring match only applies to the file extension following a dot.
+          This is generally mostly useful for the ``URL:PATH`` part.
+   NORM   Normalize the value before using it, which today means percent-decoding
+          it. Only the value read from the transaction is decoded, not the operand
+          in the rule, and the request itself is left unchanged.
+   ====== ========================================================================
+
+.. note::
+    At most, one of ``[PRE]``, ``[SUF]``, ``[MID]``, or ``[EXT]`` may be
+    used at any time. They can however be used together with ``[NOCASE]`` and the
+    other flags.
+
+Use ``[NORM]`` where a client could otherwise evade a match by escaping the
+pattern, since ``pr%69vate`` is not ``private``. It composes with every
+match type, regular expressions included::
+
+    cond %{CLIENT-URL:PATH} /private-/ [NORM]
+
+It is also the one flag that applies to a ``%{...}`` expansion in an operator
+value, written inside the braces so that it affects only that expansion::
+
+    set-header X-Decoded-Path %{CLIENT-URL:PATH [NORM]}
+
+Decoding happens exactly once, as :rfc:`3986` section 2.4 requires: decoding an
+already decoded string would misread a literal ``%`` in the data as the start of
+an escape. So ``pr%2569vate`` yields ``pr%69vate``, not ``private``, and a value
+that arrives multiply encoded stays partly encoded.
+
+``[NORM]`` therefore does not promise a value free of ``%``. A single decode of
+``50%25-off`` is ``50%-off``, where the ``%`` is data. If a rule needs to care
+about what is left, test for it, which also catches the multiply encoded case::
+
+    cond %{CLIENT-URL:PATH} /%/ [NORM]
+      set-status 400
+
+Escaped control characters (``%00`` to ``%1F``, and ``%7F``) are left encoded
+as well, so an expansion such as the ``set-header`` above can never carry a
+decoded CR or LF into a header. Incomplete or malformed escapes, such as a
+trailing ``%`` or ``%4z``, pass through unchanged.
 
 Operators
 ---------
@@ -626,6 +1134,29 @@ no facility to increment by other amounts, nor is it possible to initialize the
 counter with any value other than ``0``. Additionally, the counter will reset
 whenever |TS| is restarted.
 
+if
+~~
+::
+
+  if
+    <conditions>
+    <operators>
+  endif
+
+This is a pseudo-operator that enables nested conditional blocks within
+the operator section of a rule. While ``else`` and ``elif`` themselves
+cannot be directly nested, you can use ``if``/``endif`` blocks within any
+operator section (including inside ``else`` or ``elif`` blocks) to create
+arbitrary nesting depth for complex conditional logic.
+
+The ``if`` operator must be preceded by conditions and followed by at
+least one condition or operator. Each ``if`` must have a matching
+``endif`` to close the block. Within an ``if``/``endif`` block, you can
+use regular conditions, operators, and even ``else`` and ``elif`` clauses.
+
+For detailed usage and examples, see `Nested Conditionals with if/endif`_
+in the `Advanced Conditionals`_ section.
+
 no-op
 ~~~~~
 ::
@@ -633,6 +1164,24 @@ no-op
   no-op
 
 This operator does nothing, takes no arguments, and has no side effects.
+
+rm-destination
+~~~~~~~~~~~~~~
+::
+
+  rm-destination <part>
+
+Removes individual components of the remapped destination's address. When
+changing the remapped destination, ``<part>`` should be used to indicate the
+component that is being modified (see `URL Parts`_). Currently the only valid
+parts for rm-destination are QUERY, PATH, and PORT.
+
+For the query parameter, this operator takes an optional second argument,
+which is a list of query parameters to remove (or keep with ``[INV]`` modifier).
+
+::
+
+  rm-destination QUERY <comma separate list of query parameter>
 
 rm-header
 ~~~~~~~~~
@@ -650,13 +1199,89 @@ rm-cookie
 
 Removes the cookie ``<name>``.
 
+run-plugin
+~~~~~~~~~~~~~~
+::
+
+  run-plugin <plugin-name>.so "<plugin-argument> ..."
+
+This allows to run an existing remap plugin, conditionally, from within a
+header rewrite rule.
+
+.. note::
+    ``<plugin-argument>`` is fixed when the rule is loaded (or reloaded);
+    it behaves the same as a plugin argument in ``remap.config``. It is
+    not re-evaluated per request, so variable interpolation (e.g.
+    ``%{HEADER:bar}``) does not work here.
+
 set-body
 ~~~~~~~~
 ::
 
-  set-body <text>
+  set-body <text> [<content-type>]
 
-Sets the body to ``<text>``. Can also be used to delete a body with ``""``
+Sets the body to ``<text>``. If ``<content-type>`` is supplied, it is used for
+the response instead of the default ``text/html``. Can also be used to delete
+a body with ``""``. This is only useful when overriding the origin status,
+i.e. intercepting/pre-empting a request so that you can override the body from
+the body-factory with your own.
+
+Quoted values support escaped quotes and the ``\n``, ``\r``, and ``\t``
+control characters. For example, a JSON error response can be configured as::
+
+   cond %{REMAP_PSEUDO_HOOK}
+      set-status 400
+      set-body "{\"error\": \"bad request\"}\n" "application/problem+json"
+
+set-body-from
+~~~~~~~~~~~~~
+::
+
+  set-body-from <URL> [<content-type>]
+
+Will call ``<URL>`` (see URL in `URL Parts`_) to retrieve a custom error response
+and set the body with the result. Triggering this rule on an OK transaction will
+send a 500 status code to the client with the desired response. If this is triggered
+on any error status code, that original status code will be sent to the client.
+By default, the fetched response's ``Content-Type`` is also used. The optional
+``<content-type>`` overrides that value.
+
+.. note::
+    This operator is supported only with ``READ_RESPONSE_HDR_HOOK`` because
+    its fetch suspends an active transaction. To generate a literal response
+    at remap time, use ``set-body`` instead.
+
+An example config would look like::
+
+   cond %{READ_RESPONSE_HDR_HOOK}
+      set-body-from http://www.example.com/second
+
+Where ``http://www.example.com/second`` is the destination to retrieve the custom response from.
+This can be enabled per-mapping or globally.
+Ensure there is a remap rule for the second endpoint as well!
+An example remap config would look like::
+
+   map /first http://www.example.com/first @plugin=header_rewrite.so @pparam=cond1.conf
+   map /second http://www.example.com/second
+
+set-body-from-file
+~~~~~~~~~~~~~~~~~~
+::
+
+  set-body-from-file <path> [<content-type>]
+
+Loads the file at ``<path>`` when the rule configuration is loaded and uses
+its exact contents as the response body. Relative paths are resolved from the
+directory containing the rule file. If ``<content-type>`` is omitted, the
+default ``text/html`` is used. Reload the header rewrite configuration after
+changing the body file. The rule configuration is rejected if the file cannot
+be loaded or exceeds :ts:cv:`proxy.config.body_factory.response_max_size`.
+
+For example::
+
+   cond %{REMAP_PSEUDO_HOOK}
+      set-status 403
+      set-body-from-file errors/forbidden.json "application/json"
 
 set-config
 ~~~~~~~~~~
@@ -667,7 +1292,7 @@ set-config
 Allows you to override the value of a |TS| configuration variable for the
 current connection. The variables specified by ``<name>`` must be overridable.
 For details on available |TS| configuration variables, consult the
-documentation for :file:`records.config`. You can read more about overridable
+documentation for :file:`records.yaml`. You can read more about overridable
 configuration variables in the developer's documentation for
 :ref:`ts-overridable-config`.
 
@@ -698,13 +1323,14 @@ set-debug
   set-debug
 
 When invoked, this operator enables the internal transaction debugging flag
-(via :c:func:`TSHttpTxnDebugSet`), which causes debug messages to be printed to
+(via :func:`TSHttpTxnDebugSet`), which causes debug messages to be printed to
 the appropriate logs even when the debug tag has not been enabled. For
 additional information on |TS| debugging statements, refer to
 :ref:`developer-debug-tags` in the developer's documentation.
 
-+**Note**: This operator is deprecated, use the ``set-http-cntl`` operator instead,
-+with the ``TXN_DEBUG`` control.
+.. note::
+    This operator is deprecated, use the `set-http-cntl`_ operator instead,
+    with the ``TXN_DEBUG`` control.
 
 set-destination
 ~~~~~~~~~~~~~~~
@@ -719,18 +1345,6 @@ used as its replacement. You must supply a non-zero length value, otherwise
 this operator will be an effective no-op (though a warning will be emitted to
 the logs if debugging is enabled).
 
-rm-destination
-~~~~~~~~~~~~~~
-::
-
-  rm-destination <part>
-
-Removes individual components of the remapped destination's address. When
-changing the remapped destination, ``<part>`` should be used to indicate the
-component that is being modified (see `URL Parts`_). Currently the only valid
-parts for rm-destination are QUERY, PATH, and PORT.
-
-
 set-header
 ~~~~~~~~~~
 ::
@@ -743,6 +1357,18 @@ if necessary.
 The header's ``<value>`` may be a literal string, or take advantage of
 `String concatenations`_ to calculate a dynamic value for the header.
 
+set-next-hop-strategy
+~~~~~~~~~~~~~~~~~~~~~
+::
+
+  set-next-hop-strategy <name>
+
+Replaces/Sets the current next hop parent selection strategy with
+the matching strategy specified in `strategies.yaml`
+
+Setting to "null" removes the current strategy which will fall back
+to other methods (ie: parent.config or remap to url).
+
 set-redirect
 ~~~~~~~~~~~~
 ::
@@ -752,8 +1378,78 @@ set-redirect
 When invoked, sends a redirect response to the client, with HTTP status
 ``<code>``, and a new location of ``<destination>``. If the ``QSA`` flag is
 enabled, the original query string will be preserved and added to the new
-location automatically. This operator supports
-`String concatenations`_ for ``<destination>``.
+location automatically. This operator supports `String concatenations`_ for
+``<destination>``.  This operator can only execute on the
+``READ_RESPONSE_HDR_HOOK`` (the default when the plugin is global), the
+``SEND_RESPONSE_HDR_HOOK``, or the ``REMAP_PSEUDO_HOOK``.
+
+set-state-flag
+~~~~~~~~~~~~~~
+::
+
+  set-state-flag <n> <value>
+
+This operator allows you to set the state of a flag. The ``<n>`` is the
+number of the flag, from 0 to 15. The ``<value>`` is either ``true`` or ``false``,
+turning the flag on or off.
+
+set-state-int8
+~~~~~~~~~~~~~~
+::
+
+   set-state-int8 <n> <value>
+
+This operator allows you to set the state of an 8-bit unsigned integer.
+The ``<n>`` is the number of the integer, from 0 to 3. The ``<value>`` is an
+unsigned 8-bit integer, 0-255. It can also be a condition, in which case the
+value of the condition is used.
+
+set-state-int16
+~~~~~~~~~~~~~~~
+::
+
+   set-state-int16 0 <value>
+
+This operator allows you to set the state of a 16-bit unsigned integer.
+The ``<value>`` is an unsigned 16-bit integer as well, 0-65535. It can also
+be a condition, in which case thevalue of the condition is used. The index,
+0, is always required eventhough there is only one 16-bit integer state variable.
+
+set-session-flag
+~~~~~~~~~~~~~~~~
+::
+
+  set-session-flag <n> <value>
+
+This operator allows you to set the state of a session-scoped flag. The ``<n>``
+is the number of the flag, from 0 to 15. The ``<value>`` is either ``true`` or
+``false``, turning the flag on or off. Unlike ``set-state-flag``, session flags
+persist across all transactions on the same client connection.
+
+set-session-int8
+~~~~~~~~~~~~~~~~
+::
+
+   set-session-int8 <n> <value>
+
+This operator allows you to set the state of a session-scoped 8-bit unsigned
+integer. The ``<n>`` is the number of the integer, from 0 to 3. The ``<value>``
+is an unsigned 8-bit integer, 0-255. It can also be a condition, in which case
+the value of the condition is used. Session integers persist across all
+transactions on the same client connection.
+
+set-session-int16
+~~~~~~~~~~~~~~~~~
+::
+
+   set-session-int16 0 <value>
+
+This operator allows you to set the state of a session-scoped 16-bit unsigned
+integer. The ``<value>`` is an unsigned 16-bit integer, 0-65535. It can also
+be a condition, in which case the value of the condition is used. The index,
+0, is always required even though there is only one 16-bit session integer
+state variable. Session integers persist across all transactions on the same
+client connection.
 
 set-status
 ~~~~~~~~~~
@@ -797,8 +1493,9 @@ When invoked, and when ``<value>`` is any of ``1``, ``true``, or ``TRUE``, this
 operator causes |TS| to abort further request remapping. Any other value and
 the operator will effectively be a no-op.
 
-**Note**: This operator is deprecated, use the ``set-http-cntl`` operator instead,
-with the ``SKIP_REMAP`` control.
+.. note::
+    This operator is deprecated, use the `set-http-cntl`_ operator instead,
+    with the ``SKIP_REMAP`` control.
 
 set-cookie
 ~~~~~~~~~~
@@ -809,9 +1506,11 @@ set-cookie
 Replaces the value of cookie ``<name>`` with ``<value>``, creating the cookie
 if necessary.
 
+.. _admin-plugins-header-rewrite-set-http-cntl:
+
 set-http-cntl
 ~~~~~~~~~~~~~
-;;
+::
 
   set-http-cntl <controller> <flag>
 
@@ -822,7 +1521,7 @@ The available controllers are:
 ================ ====================================================================
 Controller       Description
 ================ ====================================================================
-LOGGING          Turns off logging for the transction (default: ``on``)
+LOGGING          Turns off logging for the transaction (default: ``on``)
 INTERCEPT_RETRY  Allow intercepts to be retried (default: ``off``)
 RESP_CACHEABLE   Force the response to be cacheable (default: ``off``)
 REQ_CACHEABLE    Force the request to be cacheable (default: ``off``)
@@ -830,6 +1529,65 @@ SERVER_NO_STORE  Don't allow the response to be written to cache (default: ``off
 TXN_DEBUG        Enable transaction debugging (default: ``off``)
 SKIP_REMAP       Don't require a remap match for the transaction (default: ``off``)
 ================ ====================================================================
+
+.. _admin-plugins-header-rewrite-plugin-cntl:
+
+set-plugin-cntl
+~~~~~~~~~~~~~~~
+::
+
+  set-plugin-cntl <controller> <value>
+
+This operator lets you control the fundamental behavior of this plugin for a particular transaction.
+The available controllers are:
+
+================== ============================================ =======================
+Controller         Operators/Conditions                         Available values
+================== ============================================ =======================
+TIMEZONE           ``NOW``                                      ``GMT``, or ``LOCAL``
+INBOUND_IP_SOURCE  ``IP``, ``INBOUND``, ``CIDR``, and ``GEO``   ``PEER``, or ``PROXY``
+================== ============================================ =======================
+
+TIMEZONE
+""""""""
+
+This controller selects the timezone to use for ``NOW`` condition.
+If ``GMT`` is set, GMT will be used regardles of the timezone setting on your system. The default value is ``LOCAL``.
+
+INBOUND_IP_SOURCE
+"""""""""""""""""
+This controller selects which IP address to use for the conditions on the table above.
+The default value is ``PEER`` and the IP address of the peer will be used.
+If ``PROXY`` is set, and PROXY protocol is used, the source IP address provided by PROXY protocol will be used.
+
+.. note::
+    The conditions return an empty string if the source is set to ``PROXY`` but PROXY protocol header does not present.
+
+set-effective-address
+~~~~~~~~~~~~~~~~~~~~~
+::
+
+  set-effective-address <address>
+
+This operator allows you to set client's effective address for a transaction. The address will be used on other conditions and
+operators that use client's IP address.
+
+.. note::
+    This operator also changes `INBOUND_IP_SOURCE` to `PLUGIN` to make the address available for other conditions and operators.
+    See `set-plugin-cntl`_ for the detail.
+
+set-cc-alg
+~~~~~~~~~~
+::
+
+  set-cc-alg <value>
+
+This operator lets you set the congestion control algorithm for a particular transaction.
+This will only work if your os supports TCP_CONGESTION at the protocol level IPPROTO_TCP.
+Supported algorithms are operating system dependent. Common algorithms include reno and cubic.
+
+
+.......
 
 Operator Flags
 --------------
@@ -846,6 +1604,7 @@ The flags currently supported are:
 Flag   Description
 ====== ========================================================================
 L      Last rule, do not continue.
+I      Invert the semantics of the rules parameters
 QSA    Append the results of the rule to the query string.
 ====== ========================================================================
 
@@ -874,6 +1633,8 @@ Old expansion variable   Condition variable to use with concatenations
 %<cquup>                 %{CLIENT-URL:PATH}
 ======================== ==========================================================================
 
+.. _admin-plugins-header-rewrite-url-parts:
+
 URL Parts
 ---------
 
@@ -886,32 +1647,86 @@ parameters by writing it as::
 
 The URL part names which may be used for these conditions and actions are:
 
-======== ======================================================================
-Part     Description
-======== ======================================================================
-HOST     Full hostname.
+.. graphviz::
+   :alt: URL Parts Diagram
+   :align: center
 
-PATH     URL substring beginning with (but not including) the first ``/`` after
-         the hostname up to, but not including, the query string. **Note**: previous
-         versions of ATS had a `%{PATH}` directive, this will no longer work. Instead,
-         you want to use `%{CLIENT-URL:PATH}`.
+   digraph url_parts {
+     node [shape=none, fontname="Courier"];
 
-PORT     Port number.
+     url_diagram [label=<
+       <TABLE BORDER="1" CELLBORDER="1" CELLSPACING="0">
+         <TR><TD COLSPAN="9" ALIGN="CENTER" BGCOLOR="lightgray"><B>URL</B></TD></TR>
+         <TR>
+           <TD BORDER="0" BGCOLOR="lightyellow">https</TD>
+           <TD BORDER="0" BGCOLOR="lightyellow">://</TD>
+           <TD BORDER="0" BGCOLOR="lightyellow">docs.trafficserver.apache.org</TD>
+           <TD BORDER="0" BGCOLOR="lightyellow">:</TD>
+           <TD BORDER="0" BGCOLOR="lightyellow">443</TD>
+           <TD BORDER="0" BGCOLOR="lightyellow">/en/latest/search.html</TD>
+           <TD BORDER="0" BGCOLOR="lightyellow">?p=hrw&amp;v=1</TD>
+         </TR>
+         <TR>
+           <TD ALIGN="CENTER"><FONT POINT-SIZE="8">│</FONT></TD>
+           <TD BORDER="0"></TD>
+           <TD ALIGN="CENTER"><FONT POINT-SIZE="8">│</FONT></TD>
+           <TD BORDER="0"></TD>
+           <TD ALIGN="CENTER"><FONT POINT-SIZE="8">│</FONT></TD>
+           <TD ALIGN="CENTER"><FONT POINT-SIZE="8">│</FONT></TD>
+           <TD ALIGN="CENTER"><FONT POINT-SIZE="8">│</FONT></TD>
+         </TR>
+         <TR>
+           <TD ALIGN="CENTER" BGCOLOR="lightblue">SCHEME</TD>
+           <TD BORDER="0"></TD>
+           <TD ALIGN="CENTER" BGCOLOR="palegreen">HOST</TD>
+           <TD BORDER="0"></TD>
+           <TD ALIGN="CENTER" BGCOLOR="lightcyan">PORT</TD>
+           <TD ALIGN="CENTER" BGCOLOR="wheat">PATH</TD>
+           <TD ALIGN="CENTER" BGCOLOR="lavender">QUERY</TD>
+         </TR>
+       </TABLE>
+     >];
+   }
 
-QUERY    URL substring from the ``?``, signifying the beginning of the query
-         parameters, until the end of the URL. Empty string if there were no
-         query parameters.
+.. table:: URL Part Descriptions
+   :widths: 10 90
 
-SCHEME   URL scheme in use (e.g. ``http`` and ``https``).
+   ========== ======================================================================
+   Part       Description and value for the URL above
+   ========== ======================================================================
+   SCHEME     URL scheme in use (e.g. ``http`` and ``https``). ``Value`` = `https`
 
-URL      The complete URL.
-======== ======================================================================
+   HOST       Full hostname. ``Value`` = `docs.trafficserver.apache.org`
+
+   PORT       Port number. (Regardless if directly specified in the URL). ``Value`` = `443`
+
+   PATH       URL substring beginning with (but not including) the first ``/`` after
+              the hostname up to, but not including, the query string. **Note**: previous
+              versions of ATS had a `%{PATH}` directive, this will no longer work. Instead,
+              you want to use `%{CLIENT-URL:PATH}`. ``Value`` = `en/latest/search.html`
+
+   QUERY      URL substring from the ``?``, signifying the beginning of the query
+              parameters, until the end of the URL. Empty string if there were no
+              query parameters. ``Value`` = `p=hrw&v=1`
+
+              A specific query parameter value can be extracted using the sub-key
+              syntax ``QUERY:<param_name>``. For example, ``%{CLIENT-URL:QUERY:p}``
+              would return ``hrw`` for the URL above. If there are duplicate query
+              parameter names, the first value listed wins.
+
+              .. note::
+                 Query parameter names and values are matched as-is without URL
+                 decoding. For example, ``%{CLIENT-URL:QUERY:my%20param}`` matches
+                 the literal parameter name ``my%20param``, not ``my param``.
+
+   URL        The complete URL.  ``Value`` = `https://docs.trafficserver.apache.org/...`
+   ========== ======================================================================
 
 As another example, a remap rule might use the `set-destination`_ operator to
 change just the hostname via::
 
   cond %{HEADER:X-Mobile} = "foo"
-  set-destination HOST foo.mobile.bar.com [L]
+     set-destination HOST foo.mobile.bar.com
 
 Requests vs. Responses
 ======================
@@ -923,6 +1738,8 @@ tell which is which, and how do you indicate to |TS| that the condition is
 specifically and exclusively for a request header or just for a response
 header? And how do you ensure that a header rewrite occurs against a request
 before it is proxied?
+
+.. _hook_conditions:
 
 Hook Conditions
 ---------------
@@ -992,6 +1809,22 @@ Because this hook is valid only within a remapping context, for configuration
 files shared by both the global :file:`plugin.config` and individual remapping
 entries in :file:`remap.config`, this hook condition will force the subsequent
 ruleset(s) to be valid only for remapped transactions.
+
+POST_REMAP_HOOK
+~~~~~~~~~~~~~~~
+
+Forces evaluation of the ruleset immediately after remapping has completed, but
+before |TS| looks the request up in the cache. There is no response data yet, so
+context-adapting conditions and operators match against the request, which at
+this point is the remapped request.
+
+For rulesets in :file:`remap.config`, `REMAP_PSEUDO_HOOK`_ already covers this
+window. This hook exists for globally-configured rulesets, which otherwise have
+no hook that sees the remapped request before the cache lookup:
+`READ_REQUEST_HDR_HOOK`_ and `READ_REQUEST_PRE_REMAP_HOOK`_ run before
+remapping, and `SEND_REQUEST_HDR_HOOK`_ runs after the lookup, only when the
+request is forwarded to an origin. Anything that has to influence the lookup
+itself belongs at this hook.
 
 SEND_REQUEST_HDR_HOOK
 ~~~~~~~~~~~~~~~~~~~~~
@@ -1114,11 +1947,11 @@ Remove Origin Authentication Headers
 The following ruleset removes any authentication headers from the origin
 response before caching it or returning it to the client. This is accomplished
 by setting the hook context and then removing the cookie and basic
-authentication headers.::
+authentication headers. ::
 
    cond %{READ_RESPONSE_HDR_HOOK}
-   rm-header Set-Cookie
-   rm-header WWW-Authenticate
+     rm-header Set-Cookie
+     rm-header WWW-Authenticate
 
 Count Teapots
 -------------
@@ -1126,8 +1959,9 @@ Count Teapots
 Maintains a counter statistic, which is incremented every time an origin server
 has decided to be funny by returning HTTP 418::
 
+   cond %{READ_RESPONSE_HDR_HOOK}
    cond %{STATUS} =418
-   counter plugin.header_rewrite.teapots
+     counter plugin.header_rewrite.teapots
 
 Normalize Statuses
 ------------------
@@ -1140,7 +1974,7 @@ the origin server with ``404``::
    cond %{SEND_RESPONSE_HDR_HOOK}
    cond %{STATUS} >399
    cond %{STATUS} <500
-   set-status 404
+     set-status 404
 
 Remove Cache Control to Origins
 -------------------------------
@@ -1149,8 +1983,8 @@ Removes cache control related headers from requests before sending them to an
 origin server::
 
    cond %{SEND_REQUEST_HDR_HOOK}
-   rm-header Cache-Control
-   rm-header Pragma
+     rm-header Cache-Control
+     rm-header Pragma
 
 Enable Debugging Per-Request
 ----------------------------
@@ -1160,7 +1994,7 @@ header is present in the client request::
 
    cond %{READ_REQUEST_HDR_HOOK}
    cond %{CLIENT-HEADER:X-Debug} =supersekret
-   set-debug
+      set-http-cntl TXN_DEBUG on
 
 Remove Internal Headers
 -----------------------
@@ -1169,8 +2003,8 @@ Removes special internal/development headers from origin responses, unless the
 client request included a special debug header::
 
    cond %{CLIENT-HEADER:X-Debug} =keep [NOT]
-   rm-header X-Debug-Foo
-   rm-header X-Debug-Bar
+      rm-header X-Debug-Foo
+      rm-header X-Debug-Bar
 
 Return Original Method in Response Header
 -----------------------------------------
@@ -1179,7 +2013,7 @@ This rule copies the original HTTP method that was used by the client into a
 custom response header::
 
    cond %{SEND_RESPONSE_HDR_HOOK}
-   set-header X-Original-Method %{METHOD}
+      set-header X-Original-Method %{METHOD}
 
 Useless Example From Purpose
 ----------------------------
@@ -1187,26 +2021,27 @@ Useless Example From Purpose
 Even that useless example from `Purpose`_ in the beginning of this document is
 possible to accomplish::
 
+   cond %{READ_RESPONSE_HDR_HOOK}
    cond %{INBOUND:LOCAL-PORT} =8090
    cond %{METHOD} =HEAD
    cond %{CLIENT-HEADER:Accept-Language} /es-py/ [NOT]
    cond %{STATUS} =304 [OR]
    cond %{RANDOM:500} >290
-   set-status 403
+      set-status 403
 
-Add Cache Control Headers Based on Origin Path
-----------------------------------------------
+Add Cache Control Headers Based on URL Path
+-------------------------------------------
 
-This rule adds cache control headers to CDN responses based matching the origin
+This rule adds cache control headers to CDN responses based matching the
 path.  One provides a max age and the other provides a "no-cache" statement to
 two different file paths. ::
 
    cond %{SEND_RESPONSE_HDR_HOOK}
    cond %{CLIENT-URL:PATH} /examplepath1/
-   add-header Cache-Control "max-age=3600" [L]
+      add-header Cache-Control "max-age=3600"
    cond %{SEND_RESPONSE_HDR_HOOK}
    cond %{CLIENT-URL:PATH} /examplepath2\/examplepath3\/.*/
-   add-header Cache-Control "no-cache" [L]
+      add-header Cache-Control "no-cache"
 
 Redirect when the Origin Server Times Out
 -----------------------------------------
@@ -1217,7 +2052,7 @@ Query string when the Origin server times out or the connection is refused::
    cond %{SEND_RESPONSE_HDR_HOOK}
    cond %{STATUS} =502 [OR]
    cond %{STATUS} =504
-   set-redirect 302 http://different_origin.example.com/%{CLIENT-URL:PATH} [QSA]
+      set-redirect 302 http://different_origin.example.com/%{CLIENT-URL:PATH} [QSA]
 
 Check for existence of a header
 -------------------------------
@@ -1229,7 +2064,16 @@ already set to some value, and the status code is a 2xx::
    cond %{HEADER:Cache-Control} ="" [AND]
    cond %{STATUS} >199 [AND]
    cond %{STATUS} <300
-   set-header Cache-Control "max-age=600, public"
+      set-header Cache-Control "max-age=600, public"
+
+Add a response header for certain status codes
+----------------------------------------------
+
+This rule will set a header ``X-Redirect-Status`` but only for a set of status codes::
+
+   cond %{SEND_RESPONSE_HDR_HOOK} [AND]
+   cond %{STATUS} (301,302,307,308)
+      set-header X-Redirect-Status %{STATUS}
 
 Add HSTS
 --------
@@ -1238,8 +2082,8 @@ Add the HTTP Strict Transport Security (HSTS) header if it does not exist and th
 
    cond %{READ_RESPONSE_HDR_HOOK} [AND]
    cond %{HEADER:Strict-Transport-Security} ="" [AND]
-   cond %{INBOUND:TLS} /./
-   set-header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+   cond %{INBOUND:TLS} ="" [NOT]
+      set-header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
 
 This is mostly used by being attached to a remap rule that maps to a host known to support TLS. If
 the parallel `OUTBOUND` supported is added then this could be done by checking for inbound TLS both
@@ -1254,54 +2098,125 @@ add a ``Connection: close`` header to have clients drop their connection,
 allowing the server to drain. Although Connection header is only available on
 HTTP/1.1 in terms of protocols, but this also works for HTTP/2 connections
 because the header triggers HTTP/2 graceful shutdown. This should be a global
-configuration.::
+configuration. ::
 
    cond %{SEND_RESPONSE_HDR_HOOK}
    cond %{ACCESS:/path/to/the/healthcheck/file.txt}    [NOT,OR]
-   set-header Connection "close"
+      set-header Connection "close"
 
 Use Internal header to pass data
 --------------------------------
 
 In |TS|, a header that begins with ``@`` does not leave |TS|. Thus, you can use
 this to pass data to different |TS| systems. For instance, a series of remap rules
-could each be tagged with a consistent name to make finding logs easier.::
+could each be tagged with a consistent name to make finding logs easier. ::
 
    cond %{REMAP_PSEUDO_HOOK}
-   set-header @PropertyName "someproperty"
+      set-header @PropertyName "someproperty"
 
 (Then in :file:`logging.yaml`, log ``%<{@PropertyName}cqh>``)
+
+.. note::
+    With the new ``state-flag``, ``state-int8`` and ``state-int16`` operators, you can
+    sometimes avoid setting internal ``@`` headers for passing information between hooks.
+    These internal state variables are much more efficient than setting and reading headers.
 
 Remove Client Query Parameters
 ------------------------------------
 
-The following ruleset removes any query parameters set by the client.::
+The following ruleset removes any query parameters set by the client. ::
 
    cond %{REMAP_PSEUDO_HOOK}
-   rm-destination QUERY
+      rm-destination QUERY
+
+Remove only a few select query parameters::
+
+   cond %{REMAP_PSEUDO_HOOK}
+      rm-destination QUERY foo,bar
+
+Keep only a few select query parameters -- removing the rest::
+
+   cond %{REMAP_PSEUDO_HOOK}
+      rm-destination QUERY foo,bar [I]
 
 Mimic X-Debug Plugin's X-Cache Header
 -------------------------------------
 
 This rule can mimic X-Debug plugin's ``X-Cache`` header by accumulating
-the ``CACHE`` condition results to a header.::
+the ``CACHE`` condition results to a header. ::
 
    cond %{SEND_RESPONSE_HDR_HOOK} [AND]
    cond %{HEADER:All-Cache} ="" [NOT]
-   set-header All-Cache "%{HEADER:All-Cache}, %{CACHE}"
+      set-header All-Cache "%{HEADER:All-Cache}, %{CACHE}"
 
    cond %{SEND_RESPONSE_HDR_HOOK} [AND]
    cond %{HEADER:All-Cache} =""
-   set-header All-Cache %{CACHE}
+      set-header All-Cache %{CACHE}
 
 Add Identifier from Server with Data
 ------------------------------------
 
 This rule adds an unique identifier from the server if the data is fresh from
 the cache or if the identifier has not been generated yet. This will inform
-the client where the requested data was served from.::
+the client where the requested data was served from. ::
 
    cond %{SEND_RESPONSE_HDR_HOOK} [AND]
    cond %{HEADER:ATS-SRVR-UUID} ="" [OR]
    cond %{CACHE} ="hit-fresh"
-   set-header ATS-SRVR-UUID %{ID:UNIQUE}
+      set-header ATS-SRVR-UUID %{ID:UNIQUE}
+
+Apply rate limiting for some select requests
+--------------------------------------------
+
+This rule will conditiionally, based on the client request headers, apply rate
+limiting to the request. ::
+
+   cond %{REMAP_PSEUDO_HOOK} [AND]
+   cond %{CLIENT-HEADER:Some-Special-Header} ="yes"
+      run-plugin rate_limit.so "--limit=300 --error=429"
+
+Check the ``PATH`` file extension
+---------------------------------
+
+This rule will deny all requests for URIs with the ``.php`` file extension::
+
+   cond %{REMAP_PSEUDO_HOOK} [AND]
+   cond %{CLIENT-URL:PATH} ="php" [EXT,NOCASE]
+      set-status 403
+
+Use GMT regardless of system timezone setting
+---------------------------------------------
+
+This rule will change the behavior of %{NOW}. It will always return time in GMT. ::
+
+   cond %{READ_REQUEST_HDR_HOOK}
+      set-plugin-cntl TIMEZONE GMT
+
+   cond %{SEND_RESPONSE_HDR_HOOK}
+     set-header hour %{NOW:HOUR}
+
+Use IP address provided by PROXY protocol
+-----------------------------------------
+
+This rule will change the behavior of all header_rewrite conditions which use the client's IP address on a connection.
+Those will pick the address provided by PROXY protocol, instead of the peer's address. ::
+
+   cond %{READ_REQUEST_HDR_HOOK}
+      set-plugin-cntl INBOUND_IP_SOURCE PROXY
+
+   cond %{SEND_RESPONSE_HDR_HOOK}
+      set-header real-ip %{INBOUND:REMOTE-ADDR}
+
+Route Based on Query Parameter Value
+------------------------------------
+
+This rule extracts a specific query parameter value and uses it to set a custom
+header or make routing decisions. The ``QUERY:<param_name>`` sub-key syntax
+allows extracting individual query parameter values::
+
+   cond %{REMAP_PSEUDO_HOOK} [AND]
+   cond %{CLIENT-URL:QUERY:version} ="v2"
+      set-destination HOST api-v2.example.com
+
+   cond %{SEND_RESPONSE_HDR_HOOK}
+      set-header X-API-Version %{CLIENT-URL:QUERY:version}

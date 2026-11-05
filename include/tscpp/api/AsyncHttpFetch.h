@@ -20,6 +20,8 @@
  * @file AsyncHttpFetch.h
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include <string>
@@ -127,7 +129,7 @@ protected:
   ~AsyncHttpFetch() override;
 
 private:
-  AsyncHttpFetchState *state_;
+  std::unique_ptr<AsyncHttpFetchState> state_;
   void init(const std::string &url_str, HttpMethod http_method, const std::string &request_body, StreamingFlag streaming_flag);
   friend class utils::internal;
 };

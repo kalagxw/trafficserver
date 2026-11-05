@@ -1,0 +1,421 @@
+/** @file
+
+  Code for class to manage configuration updates
+
+  @par License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+#include "mgmt/config/FileManager.h"
+
+#include <vector>
+#include <algorithm>
+
+#include "tscore/ink_platform.h"
+#include "tscore/ink_file.h"
+#include "../../records/P_RecCore.h"
+#include "tscore/Diags.h"
+#include "tscore/Filenames.h"
+#include "tscore/Layout.h"
+#include "mgmt/config/ConfigRegistry.h"
+
+#if HAVE_STRUCT_STAT_ST_MTIMESPEC_TV_NSEC
+#define TS_ARCHIVE_STAT_MTIME(t) ((t).st_mtime * 1000000000 + (t).st_mtimespec.tv_nsec)
+#elif HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC
+#define TS_ARCHIVE_STAT_MTIME(t) ((t).st_mtime * 1000000000 + (t).st_mtim.tv_nsec)
+#else
+#define TS_ARCHIVE_STAT_MTIME(t) ((t).st_mtime * 1000000000)
+#endif
+
+namespace
+{
+DbgCtl dbg_ctl{"filemanager"};
+
+swoc::Errata
+process_config_update(std::string const &fileName, std::string const &configName)
+{
+  Dbg(dbg_ctl, "Config update requested for '%s'. [%s]", fileName.empty() ? "Unknown" : fileName.c_str(),
+      configName.empty() ? "No config record associated" : configName.c_str());
+  swoc::Errata ret;
+  // records.yaml reload is now handled by its ConfigRegistry handler
+  // (registered in register_config_files() in traffic_server.cc).
+  // Delegate to ConfigRegistry::execute_reload("records") so the reload
+  // is traced and status-reported like every other config.
+  if (fileName == ts::filename::RECORDS) {
+    config::ConfigRegistry::Get_Instance().execute_reload("records");
+  } else if (!configName.empty()) { // Could be the case we have a child file to reload with no related config record.
+    RecT rec_type;
+    if (auto r = RecGetRecordType(configName.c_str(), &rec_type); r == REC_ERR_OKAY && rec_type == RECT_CONFIG) {
+      RecSetSyncRequired(configName.c_str());
+    } else if (config::ConfigRegistry::Get_Instance().is_reloadable(configName)) {
+      Dbg(dbg_ctl, "Config '%s' is a reloadable registry key, scheduling reload directly", configName.c_str());
+      config::ConfigRegistry::Get_Instance().schedule_reload(configName);
+    } else {
+      // Either not a config record, or a catalog-only registry entry with no
+      // handler (e.g. "storage"/"plugin"). Nothing to reload - avoid routing it
+      // into schedule_reload(), which would hit a handler-less entry.
+      Dbg(dbg_ctl, "No reload handler/record for '%s' - ignoring change (RecGetRecordType ret = %d)", configName.c_str(), r);
+    }
+  }
+
+  return ret;
+}
+
+// JSONRPC endpoint defs.
+constexpr const char *CONFIG_REGISTRY_KEY_STR{"config_registry"};
+constexpr const char *FILE_PATH_KEY_STR{"file_path"};
+constexpr const char *RECORD_NAME_KEY_STR{"config_record_name"};
+constexpr const char *PARENT_CONFIG_KEY_STR{"parent_config"};
+constexpr const char *ROOT_ACCESS_NEEDED_KEY_STR{"root_access_needed"};
+constexpr const char *IS_REQUIRED_KEY_STR{"is_required"};
+constexpr const char *NA_STR{"N/A"};
+
+} // namespace
+
+FileManager::FileManager()
+{
+  ink_mutex_init(&accessLock);
+  this->registerCallback(&process_config_update);
+
+  // Register the files registry jsonrpc endpoint
+  rpc::add_method_handler("filemanager.get_files_registry",
+                          [this](std::string_view const &id, const YAML::Node &req) -> swoc::Rv<YAML::Node> {
+                            return get_files_registry_rpc_endpoint(id, req);
+                          },
+                          &rpc::core_ats_rpc_service_provider_handle, {{rpc::NON_RESTRICTED_API}});
+}
+
+// FileManager::~FileManager
+//
+//  There is only FileManager object in the process and it
+//     should never need to be destructed except at
+//     program exit
+//
+FileManager::~FileManager()
+{
+  // Let other operations finish and do not start any new ones
+
+  ink_mutex_destroy(&accessLock);
+}
+
+// void FileManager::addFile(char* fileName, const configFileInfo* file_info,
+//  ConfigManager* parentConfig)
+//
+//  for the baseFile, creates a ConfigManager object for it
+//
+//  if file_info is not null, a WebFileEdit object is also created for
+//    the file
+//
+//  Pointers to the new objects are stored in the bindings hashtable
+//
+void
+FileManager::addFile(const char *fileName, const char *configName, bool root_access_needed, bool isRequired,
+                     ConfigManager *parentConfig)
+{
+  ink_mutex_acquire(&accessLock);
+  addFileHelper(fileName, configName, root_access_needed, isRequired, parentConfig);
+  ink_mutex_release(&accessLock);
+}
+
+// caller must hold the lock
+void
+FileManager::addFileHelper(const char *fileName, const char *configName, bool root_access_needed, bool isRequired,
+                           ConfigManager *parentConfig)
+{
+  ink_assert(fileName != nullptr);
+  auto configManager = std::make_unique<ConfigManager>(fileName, configName, root_access_needed, isRequired, parentConfig);
+  bindings.emplace(configManager->getFileName(), std::move(configManager));
+}
+
+swoc::Errata
+FileManager::fileChanged(std::string const &fileName, std::string const &configName)
+{
+  swoc::Errata ret;
+
+  std::lock_guard<std::mutex> guard(_callbacksMutex);
+  for (auto const &call : _configCallbacks) {
+    if (auto const &r = call(fileName, configName); !r) {
+      Dbg(dbg_ctl, "Something came back from the callback associated with %s", fileName.c_str());
+      ret.note(r);
+    }
+  }
+
+  return ret;
+}
+
+void
+FileManager::registerConfigPluginCallbacks(std::function<void()> cb)
+{
+  _pluginCallback = std::move(cb);
+}
+
+void
+FileManager::invokeConfigPluginCallbacks()
+{
+  Dbg(dbg_ctl, "invoke plugin callbacks");
+  if (_pluginCallback) {
+    _pluginCallback();
+  }
+}
+
+// void FileManger::rereadConfig()
+//
+//   Iterates through the list of managed files and
+//     calls ConfigManager::checkForUserUpdate on them
+//
+//   although it is tempting, DO NOT CALL FROM SIGNAL HANDLERS
+//      This function is not Async-Signal Safe.  It
+//      is thread safe
+swoc::Errata
+FileManager::rereadConfig()
+{
+  swoc::Errata ret;
+
+  ConfigManager               *rb;
+  std::vector<ConfigManager *> changedFiles;
+  std::vector<ConfigManager *> parentFileNeedChange;
+  size_t                       n;
+  ink_mutex_acquire(&accessLock);
+  for (auto &&it : bindings) {
+    rb = it.second.get();
+    // ToDo: rb->isVersions() was always true before, because numberBackups was always >= 1. So ROLLBACK_CHECK_ONLY could not
+    // happen at all...
+    if (rb->checkForUserUpdate(FileManager::ROLLBACK_CHECK_AND_UPDATE)) {
+      Dbg(dbg_ctl, "File %s changed. Has a parent=%s, ", it.first.c_str(),
+          rb->getParentConfig() ? rb->getParentConfig()->getFileName() : "none");
+      if (auto const &r = fileChanged(rb->getFileName(), rb->getConfigName()); !r) {
+        ret.note(r);
+      }
+
+      changedFiles.push_back(rb);
+      if (rb->isChildManaged()) {
+        if (std::find(parentFileNeedChange.begin(), parentFileNeedChange.end(), rb->getParentConfig()) ==
+            parentFileNeedChange.end()) {
+          parentFileNeedChange.push_back(rb->getParentConfig());
+        }
+      }
+    }
+  }
+
+  std::vector<ConfigManager *> childFileNeedDelete;
+  n = changedFiles.size();
+  for (size_t i = 0; i < n; i++) {
+    if (changedFiles[i]->isChildManaged()) {
+      continue;
+    }
+    // for each parent file, if it is changed, then delete all its children
+    for (auto &&it : bindings) {
+      rb = it.second.get();
+      if (rb->getParentConfig() == changedFiles[i]) {
+        if (std::find(childFileNeedDelete.begin(), childFileNeedDelete.end(), rb) == childFileNeedDelete.end()) {
+          childFileNeedDelete.push_back(rb);
+        }
+      }
+    }
+  }
+  n = childFileNeedDelete.size();
+  for (size_t i = 0; i < n; i++) {
+    bindings.erase(childFileNeedDelete[i]->getFileName());
+  }
+  ink_mutex_release(&accessLock);
+
+  n = parentFileNeedChange.size();
+  for (size_t i = 0; i < n; i++) {
+    if (std::find(changedFiles.begin(), changedFiles.end(), parentFileNeedChange[i]) == changedFiles.end()) {
+      if (auto const &r = fileChanged(parentFileNeedChange[i]->getFileName(), parentFileNeedChange[i]->getConfigName()); !r) {
+        ret.note(r);
+      }
+    }
+  }
+  // INKqa11910
+  // need to first check that enable_customizations is enabled
+  auto enabled{RecGetRecordInt("proxy.config.body_factory.enable_customizations")};
+  auto found{enabled.has_value()};
+
+  if (found && enabled.value()) {
+    if (auto const &r = fileChanged("proxy.config.body_factory.template_sets_dir", "proxy.config.body_factory.template_sets_dir");
+        !r) {
+      ret.note(r);
+    }
+  }
+
+  if (auto const &r = fileChanged("proxy.config.ssl.server.ticket_key.filename", "proxy.config.ssl.server.ticket_key.filename");
+      !r) {
+    ret.note(r);
+  }
+
+  if (auto const &r = fileChanged("proxy.config.quic.server.token_key.filename", "proxy.config.quic.server.token_key.filename");
+      !r) {
+    ret.note(r);
+  }
+
+  return ret;
+}
+
+bool
+FileManager::isConfigStale()
+{
+  ConfigManager *rb;
+  bool           stale = false;
+
+  ink_mutex_acquire(&accessLock);
+  for (auto &&it : bindings) {
+    rb = it.second.get();
+    if (rb->checkForUserUpdate(FileManager::ROLLBACK_CHECK_ONLY)) {
+      stale = true;
+      break;
+    }
+  }
+
+  ink_mutex_release(&accessLock);
+  return stale;
+}
+
+// void configFileChild(const char *parent, const char *child)
+//
+// Add child to the bindings with parentConfig
+void
+FileManager::configFileChild(const char *parent, const char *child)
+{
+  ConfigManager *parentConfig = nullptr;
+  ink_mutex_acquire(&accessLock);
+  if (auto it = bindings.find(parent); it != bindings.end()) {
+    Dbg(dbg_ctl, "Adding child file %s to %s parent", child, parent);
+    parentConfig = it->second.get();
+    addFileHelper(child, "", parentConfig->rootAccessNeeded(), parentConfig->getIsRequired(), parentConfig);
+  }
+  ink_mutex_release(&accessLock);
+}
+
+auto
+FileManager::get_files_registry_rpc_endpoint(std::string_view const & /* id ATS_UNUSED */,
+                                             YAML::Node const & /* params ATS_UNUSED */) -> swoc::Rv<YAML::Node>
+{
+  // If any error, the rpc manager will catch it and respond with it.
+  YAML::Node configs{YAML::NodeType::Sequence};
+  {
+    ink_scoped_mutex_lock lock(accessLock);
+    for (auto &&it : bindings) {
+      if (ConfigManager *cm = it.second.get(); cm) {
+        YAML::Node  element{YAML::NodeType::Map};
+        std::string sysconfdir(RecConfigReadConfigDir());
+        element[FILE_PATH_KEY_STR]          = Layout::get()->relative_to(sysconfdir, cm->getFileName());
+        element[RECORD_NAME_KEY_STR]        = cm->getConfigName();
+        element[PARENT_CONFIG_KEY_STR]      = (cm->isChildManaged() ? cm->getParentConfig()->getFileName() : NA_STR);
+        element[ROOT_ACCESS_NEEDED_KEY_STR] = cm->rootAccessNeeded();
+        element[IS_REQUIRED_KEY_STR]        = cm->getIsRequired();
+        configs.push_back(element);
+      }
+    }
+  }
+
+  YAML::Node registry;
+  registry[CONFIG_REGISTRY_KEY_STR] = configs;
+  return registry;
+}
+
+/// ConfigFile
+
+FileManager::ConfigManager::ConfigManager(const char *fileName_, const char *configName_, bool root_access_needed_,
+                                          bool isRequired_, ConfigManager *parentConfig_)
+  : root_access_needed(root_access_needed_), isRequired(isRequired_), parentConfig(parentConfig_)
+{
+  // ExpandingArray existVer(25, true); // Existing versions
+  struct stat fileInfo;
+  ink_assert(fileName_ != nullptr);
+
+  // parent must not also have a parent
+  if (parentConfig) {
+    ink_assert(parentConfig->parentConfig == nullptr);
+  }
+
+  // Copy the file name.
+  fileName   = std::string(fileName_);
+  configName = std::string(configName_);
+
+  ink_mutex_init(&fileAccessLock);
+  // Check to make sure that our configuration file exists
+  //
+  if (statFile(&fileInfo) < 0) {
+    Dbg(dbg_ctl, "%s  Unable to load: %s", fileName.c_str(), strerror(errno));
+
+    if (isRequired) {
+      Dbg(dbg_ctl, " Unable to open required configuration file %s\n\t failed :%s", fileName.c_str(), strerror(errno));
+    }
+  } else {
+    fileLastModified = TS_ARCHIVE_STAT_MTIME(fileInfo);
+  }
+}
+
+//
+//
+// int ConfigManager::statFile()
+//
+//  A wrapper for stat()
+//
+int
+FileManager::ConfigManager::statFile(struct stat *buf)
+{
+  int         statResult;
+  std::string sysconfdir(RecConfigReadConfigDir());
+  std::string filePath = Layout::get()->relative_to(sysconfdir, fileName);
+
+  statResult = root_access_needed ? elevating_stat(filePath.c_str(), buf) : stat(filePath.c_str(), buf);
+
+  return statResult;
+}
+
+// bool ConfigManager::checkForUserUpdate(RollBackCheckType how)
+//
+//  Called to check if the file has been changed  by the user.
+//  Timestamps are compared to see if a change occurred
+bool
+FileManager::ConfigManager::checkForUserUpdate(FileManager::RollBackCheckType how)
+{
+  struct stat fileInfo;
+  bool        result;
+
+  ink_mutex_acquire(&fileAccessLock);
+
+  if (this->statFile(&fileInfo) < 0) {
+    // File doesn't exist. If it previously existed (fileLastModified > 0),
+    // treat the deletion as a change so the reload handler can fall back
+    // to an alternative config file (e.g. remap.yaml -> remap.config).
+    if (fileLastModified > 0) {
+      if (how == FileManager::ROLLBACK_CHECK_AND_UPDATE) {
+        fileLastModified = 0;
+      }
+      ink_mutex_release(&fileAccessLock);
+      return true;
+    }
+    ink_mutex_release(&fileAccessLock);
+    return false;
+  }
+
+  if (fileLastModified < TS_ARCHIVE_STAT_MTIME(fileInfo)) {
+    if (how == FileManager::ROLLBACK_CHECK_AND_UPDATE) {
+      fileLastModified = TS_ARCHIVE_STAT_MTIME(fileInfo);
+      // TODO: syslog????
+    }
+    result = true;
+  } else {
+    result = false;
+  }
+
+  ink_mutex_release(&fileAccessLock);
+  return result;
+}

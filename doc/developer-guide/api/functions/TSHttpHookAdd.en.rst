@@ -17,7 +17,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSHttpHookAdd
 *************
@@ -44,11 +44,13 @@ function for callback amounts to adding the function to a hook. You
 can register your plugin to be called back for every single
 transaction, or for specific transactions only.
 
-HTTP :term:`transaction` hooks are set on a global basis using the function
-:func:`TSHttpHookAdd`. This means that the continuation specified
-as the parameter to :func:`TSHttpHookAdd` is called for every
-transaction. :func:`TSHttpHookAdd` must only be called from
-:func:`TSPluginInit` or :func:`TSRemapInit`.
+HTTP :term:`transaction` and :term:`session` hooks are set on a
+global basis using the function :func:`TSHttpHookAdd`. This means
+that the continuation specified as the parameter to :func:`TSHttpHookAdd`
+is called for every transaction. :func:`TSHttpHookAdd` must only be called from
+:func:`TSPluginInit` or :func:`TSRemapInit`.  Continuations set on a
+global hook will run before any continuations set on the session/transaction
+hook with the same hook ID.
 
 :func:`TSHttpSsnHookAdd` adds :arg:`contp` to
 the end of the list of HTTP :term:`session` hooks specified by :arg:`id`.
@@ -56,14 +58,20 @@ This means that :arg:`contp` is called back for every transaction
 within the session, at the point specified by the hook ID. Since
 :arg:`contp` is added to a session, it is not possible to call
 :func:`TSHttpSsnHookAdd` from the plugin initialization routine;
-the plugin needs a handle to an HTTP session.
+the plugin needs a handle to an HTTP session.  Continuations set on a
+session hook will run before any continuations set on the transaction
+hook with the same hook ID.  This fucnction can be called from handler
+functions of continuations on a global per-session hook, including for
+the session hook with the same ID.
 
 :func:`TSHttpTxnHookAdd` adds :arg:`contp`
 to the end of the list of HTTP transaction hooks specified by
 :arg:`id`. Since :arg:`contp` is added to a transaction, it is
 not possible to call :func:`TSHttpTxnHookAdd` from the plugin
 initialization routine but only when the plugin has a handle to an
-HTTP transaction.
+HTTP transaction.  This fucnction can be called from handler
+functions of continuations on a global or session per-transaction
+hook, including the for transaction hook with the same ID.
 
 A single continuation can be attached to multiple hooks at the same time.
 It is good practice to conserve resources by reusing hooks in this way
@@ -74,7 +82,7 @@ the continuation function depends on the name of the hook.  The naming
 convention is that, for hook TS_xxx_HOOK, the event passed to the continuation
 function will be TS_EVENT_xxx.  For example, when a continuation attached to
 TS_HTTP_READ_REQUEST_HDR_HOOK is triggered, the event passed to the continuation
-function will be TS_EVENT_HTTP_READ_REQUEST_HDR.
+function will be :enumerator:`TS_EVENT_HTTP_READ_REQUEST_HDR`.
 
 When a continuation is triggered by a hook, the actual type of the event data
 (the void pointer passed as the third parameter to the continuation function) is
@@ -133,12 +141,12 @@ transaction hooks::
     TSPluginInit (int argc, const char *argv[])
     {
         TSCont contp;
-        contp = TSContCreate(handler, NULL);
+        contp = TSContCreate(handler, nullptr);
         TSHttpHookAdd(TS_HTTP_SSN_START_HOOK, contp);
     }
 
-For more example code using hooks, see the test_hooks plugin in tests/tools/plugins (used by the test_hooks.test.py
-Gold test).
+For more example code using hooks, see the test_hooks plugin in tests/tools/plugins (used by the
+tests/uranium_tests/pluginTest/test_hooks/test_api_hooks.py Uranium test).
 
 See Also
 ========

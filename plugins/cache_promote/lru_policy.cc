@@ -27,10 +27,10 @@ static LRUEntry NULL_LRU_ENTRY; // Used to create an "empty" new LRUEntry
 bool
 LRUHash::initFromUrl(TSHttpTxn txnp)
 {
-  bool ret     = false;
-  TSMLoc c_url = TS_NULL_MLOC;
+  bool      ret   = false;
+  TSMLoc    c_url = TS_NULL_MLOC;
   TSMBuffer reqp;
-  TSMLoc req_hdr;
+  TSMLoc    req_hdr;
 
   if (TS_SUCCESS != TSHttpTxnClientReqGet(txnp, &reqp, &req_hdr)) {
     return false;
@@ -38,8 +38,8 @@ LRUHash::initFromUrl(TSHttpTxn txnp)
 
   if (TS_SUCCESS == TSUrlCreate(reqp, &c_url)) {
     if (TS_SUCCESS == TSHttpTxnCacheLookupUrlGet(txnp, reqp, c_url)) {
-      int url_len = 0;
-      char *url   = TSUrlStringGet(reqp, c_url, &url_len);
+      int   url_len = 0;
+      char *url     = TSUrlStringGet(reqp, c_url, &url_len);
 
       if (url && url_len > 0) {
         // SHA1() is deprecated on OpenSSL 3, but it's faster than its replacement.
@@ -55,7 +55,7 @@ LRUHash::initFromUrl(TSHttpTxn txnp)
 #else
         EVP_Digest(url, url_len, _hash, nullptr, EVP_sha1(), nullptr);
 #endif
-        TSDebug(PLUGIN_NAME, "LRUHash::initFromUrl(%.*s%s)", url_len > 100 ? 100 : url_len, url, url_len > 100 ? "..." : "");
+        DBG("LRUHash::initFromUrl(%.*s%s)", url_len > 100 ? 100 : url_len, url, url_len > 100 ? "..." : "");
         TSfree(url);
         ret = true;
       }
@@ -69,7 +69,7 @@ LRUHash::initFromUrl(TSHttpTxn txnp)
 
 LRUPolicy::~LRUPolicy()
 {
-  TSDebug(PLUGIN_NAME, "LRUPolicy DTOR");
+  DBG("LRUPolicy DTOR");
   TSMutexLock(_lock);
 
   _map.clear();
@@ -90,7 +90,7 @@ LRUPolicy::parseOption(int opt, char *optarg)
     _buckets = static_cast<unsigned>(strtol(optarg, nullptr, 10));
     if (_buckets < MINIMUM_BUCKET_SIZE) {
       TSError("%s: Enforcing minimum LRU bucket size of %d", PLUGIN_NAME, MINIMUM_BUCKET_SIZE);
-      TSDebug(PLUGIN_NAME, "enforcing minimum bucket size of %d", MINIMUM_BUCKET_SIZE);
+      DBG("enforcing minimum bucket size of %d", MINIMUM_BUCKET_SIZE);
       _buckets = MINIMUM_BUCKET_SIZE;
     }
     break;
@@ -118,9 +118,9 @@ LRUPolicy::parseOption(int opt, char *optarg)
 bool
 LRUPolicy::doPromote(TSHttpTxn txnp)
 {
-  LRUHash hash;
+  LRUHash          hash;
   LRUMap::iterator map_it;
-  bool ret = false;
+  bool             ret = false;
 
   if (!hash.initFromUrl(txnp)) {
     return false;
@@ -133,9 +133,9 @@ LRUPolicy::doPromote(TSHttpTxn txnp)
   if (_map.end() != map_it) {
     auto &[map_key, map_val]             = *map_it;
     auto &[val_key, val_hits, val_bytes] = *(map_it->second);
-    bool cacheable                       = false;
+    bool      cacheable                  = false;
     TSMBuffer request;
-    TSMLoc req_hdr;
+    TSMLoc    req_hdr;
 
     // This is because compilers before gcc 8 aren't smart enough to ignore the unused structured bindings
     (void)val_key;
@@ -143,8 +143,8 @@ LRUPolicy::doPromote(TSHttpTxn txnp)
     // We check that the request is cacheable, we will still count the request, but if not cacheable, we
     // leave it in the LRU such that a subsequent request that is cacheable can properly promote.
     if (TS_SUCCESS == TSHttpTxnClientReqGet(txnp, &request, &req_hdr)) {
-      int method_len     = 0;
-      const char *method = TSHttpHdrMethodGet(request, req_hdr, &method_len);
+      int         method_len = 0;
+      const char *method     = TSHttpHdrMethodGet(request, req_hdr, &method_len);
 
       if (TS_HTTP_METHOD_GET == method) { // Only allow GET requests (for now) to actually do the promotion
         TSMLoc range = TSMimeHdrFieldFind(request, req_hdr, TS_MIME_FIELD_RANGE, TS_MIME_LEN_RANGE);
@@ -155,7 +155,7 @@ LRUPolicy::doPromote(TSHttpTxn txnp)
           cacheable = true;
         }
       }
-      TSDebug(PLUGIN_NAME, "The request is %s", cacheable ? "cacheable" : "not cacheable");
+      DBG("The request is %s", cacheable ? "cacheable" : "not cacheable");
       TSHandleMLocRelease(request, TS_NULL_MLOC, req_hdr);
     }
 
@@ -165,7 +165,7 @@ LRUPolicy::doPromote(TSHttpTxn txnp)
     ++val_hits; // Increment hits, bytes are incremented elsewhere
     if (cacheable && (val_hits >= _hits || (_bytes > 0 && val_bytes > _bytes))) {
       // Promoted! Cleanup the LRU, and signal success. Save the promoted entry on the freelist.
-      TSDebug(PLUGIN_NAME, "saving the LRUEntry to the freelist");
+      DBG("saving the LRUEntry to the freelist");
       _freelist.splice(_freelist.begin(), _list, map_val);
       ++_freelist_size;
       --_list_size;
@@ -176,26 +176,26 @@ LRUPolicy::doPromote(TSHttpTxn txnp)
       ret = true;
     } else {
       // It's still not promoted, make sure it's moved to the front of the list
-      TSDebug(PLUGIN_NAME, "still not promoted, got %d hits so far and %" PRId64 " bytes", val_hits, val_bytes);
+      DBG("still not promoted, got %d hits so far and %" PRId64 " bytes", val_hits, val_bytes);
       _list.splice(_list.begin(), _list, map_val);
     }
   } else {
     // New LRU entry for the URL, try to repurpose the list entry as much as possible
     incrementStat(_lru_miss_id, 1);
     if (_list_size >= _buckets) {
-      TSDebug(PLUGIN_NAME, "repurposing last LRUHash entry");
+      DBG("repurposing last LRUHash entry");
       _list.splice(_list.begin(), _list, --_list.end());
       _map.erase(&(std::get<0>(*_list.begin()))); // Get the hash from the first list element
       incrementStat(_lru_vacated_id, 1);
     } else if (_freelist_size > 0) {
-      TSDebug(PLUGIN_NAME, "reusing LRUEntry from freelist");
+      DBG("reusing LRUEntry from freelist");
       _list.splice(_list.begin(), _freelist, _freelist.begin());
       --_freelist_size;
       ++_list_size;
       incrementStat(_lru_size_id, 1);
       decrementStat(_freelist_size_id, 1);
     } else {
-      TSDebug(PLUGIN_NAME, "creating new LRUEntry");
+      DBG("creating new LRUEntry");
       _list.push_front(NULL_LRU_ENTRY);
       ++_list_size;
       incrementStat(_lru_size_id, 1);
@@ -230,7 +230,7 @@ LRUPolicy::addBytes(TSHttpTxn txnp)
     map_it = _map.find(hash);
     if (_map.end() != map_it) {
       TSMBuffer resp;
-      TSMLoc resp_hdr;
+      TSMLoc    resp_hdr;
 
       if (TS_SUCCESS == TSHttpTxnServerRespGet(txnp, &resp, &resp_hdr)) {
         TSMLoc field_loc = TSMimeHdrFieldFind(resp, resp_hdr, TS_MIME_FIELD_CONTENT_LENGTH, TS_MIME_LEN_CONTENT_LENGTH);
@@ -243,7 +243,7 @@ LRUPolicy::addBytes(TSHttpTxn txnp)
           (void)val_key, (void)val_hits;
 
           val_bytes += cl;
-          TSDebug(PLUGIN_NAME, "Added %" PRId64 " bytes for LRU entry", cl);
+          DBG("Added %" PRId64 " bytes for LRU entry", cl);
           TSHandleMLocRelease(resp, resp_hdr, field_loc);
         }
         TSHandleMLocRelease(resp, TS_NULL_MLOC, resp_hdr);
@@ -257,12 +257,16 @@ bool
 LRUPolicy::stats_add(const char *remap_id)
 
 {
-  std::string_view remap_identifier                 = remap_id;
-  const std::tuple<std::string_view, int *> stats[] = {
-    {"cache_hits", &_cache_hits_id}, {"freelist_size", &_freelist_size_id},
-    {"lru_size", &_lru_size_id},     {"lru_hit", &_lru_hit_id},
-    {"lru_miss", &_lru_miss_id},     {"lru_vacated", &_lru_vacated_id},
-    {"promoted", &_promoted_id},     {"total_requests", &_total_requests_id},
+  std::string_view                          remap_identifier = remap_id;
+  const std::tuple<std::string_view, int *> stats[]          = {
+    {"cache_hits",     &_cache_hits_id    },
+    {"freelist_size",  &_freelist_size_id },
+    {"lru_size",       &_lru_size_id      },
+    {"lru_hit",        &_lru_hit_id       },
+    {"lru_miss",       &_lru_miss_id      },
+    {"lru_vacated",    &_lru_vacated_id   },
+    {"promoted",       &_promoted_id      },
+    {"total_requests", &_total_requests_id},
   };
 
   if (nullptr == remap_id) {
@@ -272,7 +276,7 @@ LRUPolicy::stats_add(const char *remap_id)
 
   for (const auto &stat : stats) {
     std::string_view name = std::get<0>(stat);
-    int *id               = std::get<1>(stat);
+    int             *id   = std::get<1>(stat);
     if ((*(id) = create_stat(name, remap_identifier)) == TS_ERROR) {
       return false;
     }

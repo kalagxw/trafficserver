@@ -35,6 +35,12 @@
 #error Please define a PLUGIN_TAG before including this file.
 #endif
 
+namespace inliner_ns
+{
+DbgCtl dbg_ctl{PLUGIN_TAG};
+}
+using namespace inliner_ns;
+
 // disable timeout for now
 const size_t timeout = 0;
 
@@ -98,7 +104,7 @@ int
 inliner_transform(TSCont c, TSEvent e, void *)
 {
   if (TSVConnClosedGet(c)) {
-    TSDebug(PLUGIN_TAG, "connection closed");
+    Dbg(dbg_ctl, "connection closed");
     MyData *const data = static_cast<MyData *>(TSContDataGet(c));
     if (data != nullptr) {
       TSContDataSet(c, nullptr);
@@ -130,9 +136,9 @@ inliner_transform(TSCont c, TSEvent e, void *)
 bool
 transformable(TSHttpTxn txnp)
 {
-  bool returnValue;
+  bool      returnValue;
   TSMBuffer buffer;
-  TSMLoc location;
+  TSMLoc    location;
   CHECK(TSHttpTxnServerRespGet(txnp, &buffer, &location));
   assert(buffer != nullptr);
   assert(location != nullptr);
@@ -144,7 +150,7 @@ transformable(TSHttpTxn txnp)
     const TSMLoc field = TSMimeHdrFieldFind(buffer, location, TS_MIME_FIELD_CONTENT_TYPE, TS_MIME_LEN_CONTENT_TYPE);
 
     if (field != TS_NULL_MLOC) {
-      int length                = 0;
+      int               length  = 0;
       const char *const content = TSMimeHdrFieldValueStringGet(buffer, location, field, 0, &length);
 
       if (content != nullptr && length > 0) {

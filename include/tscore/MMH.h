@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -30,10 +30,10 @@
 extern uint64_t MMH_x[MMH_X_SIZE + 8];
 
 struct MMH_CTX {
-  uint64_t state[4];
+  uint64_t      state[4];
   unsigned char buffer[32];
-  int buffer_size;
-  int blocks;
+  int           buffer_size;
+  int           blocks;
 };
 
 // signed-unsigned-const gratuitous differences brought
@@ -50,7 +50,7 @@ int ink_code_MMH(unsigned char *input, int len, unsigned char *sixteen_byte_hash
   cost.
 
 */
-class MMHContext : public ats::CryptoContextBase
+class MMHContext : public ts::CryptoContext::Hasher
 {
 protected:
   MMH_CTX _ctx;

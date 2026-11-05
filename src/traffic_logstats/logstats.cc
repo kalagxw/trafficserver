@@ -3,7 +3,7 @@
   This is a command line tool that reads an ATS log in the squid
   binary log format, and produces meaningful metrics per property.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -22,27 +22,25 @@
   limitations under the License.
  */
 
+#include <cstdio>
+
 #include "tscore/ink_platform.h"
 #include "tscore/ink_file.h"
-#include "tscore/I_Layout.h"
-#include "tscore/I_Version.h"
+#include "tscore/Layout.h"
+#include "tscore/Version.h"
 #include "tscore/HashFNV.h"
 #include "tscore/ink_args.h"
+#include "tscore/Demangle.h"
 #include "tscore/MatcherUtils.h"
 #include "tscore/runroot.h"
 
 // Includes and namespaces etc.
-#include "LogStandalone.cc"
+#include "../proxy/logging/LogStandalone.cc"
 
-#include "LogObject.h"
-#include "hdrs/HTTP.h"
+#include "proxy/logging/LogObject.h"
+#include "proxy/hdrs/HTTP.h"
 
 #include <sys/utsname.h>
-#if defined(solaris)
-#include <sys/types.h>
-#include <unistd.h>
-#endif
-
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -58,19 +56,22 @@
 #include <unordered_set>
 #include <string_view>
 
+using namespace std;
+
+namespace
+{
+
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 600
 #endif
 
-using namespace std;
-
 // Constants, please update the VERSION number when you make a new build!!!
 #define PROGRAM_NAME "traffic_logstats"
 
-const int MAX_LOGBUFFER_SIZE = 65536;
-const int DEFAULT_LINE_LEN   = 78;
-const double LOG10_1024      = 3.0102999566398116;
-const int MAX_ORIG_STRING    = 4096;
+const int    MAX_LOGBUFFER_SIZE = 65536;
+const int    DEFAULT_LINE_LEN   = 78;
+const double LOG10_1024         = 3.0102999566398116;
+const int    MAX_ORIG_STRING    = 4096;
 
 // Optimizations for "strcmp()", treat some fixed length (3 or 4 bytes) strings
 // as integers.
@@ -98,12 +99,16 @@ const int PLAI_AS_INT = 1767992432; // For "plain"
 const int IMAG_AS_INT = 1734438249; // For "image"
 const int HTTP_AS_INT = 1886680168; // For "http" followed by "s://" or "://"
 
+DbgCtl dbg_ctl_logstats{"logstats"};
+DbgCtl dbg_ctl_logstats_partial_read{"logstats_partial_read"};
+DbgCtl dbg_ctl_logstats_failed_retries{"logstats_failed_retries"};
+
 // Store our "state" (position in log file etc.)
 struct LastState {
   off_t offset;
   ino_t st_ino;
 };
-static LastState last_state;
+LastState last_state;
 
 // Store the collected counters and stats, per Origin Server, URL or total
 struct StatsCounter {
@@ -112,14 +117,14 @@ struct StatsCounter {
 };
 
 struct ElapsedStats {
-  int min;
-  int max;
+  int   min;
+  int   max;
   float avg;
   float stddev;
 };
 
 struct OriginStats {
-  const char *server;
+  const char  *server;
   StatsCounter total;
 
   struct {
@@ -207,6 +212,7 @@ struct OriginStats {
     StatsCounter c_415;
     StatsCounter c_416;
     StatsCounter c_417;
+    StatsCounter c_429;
     StatsCounter c_4xx;
     StatsCounter c_500;
     StatsCounter c_501;
@@ -300,17 +306,17 @@ struct UrlStats {
     return req.count > rhs.req.count;
   } // Reverse order
 
-  const char *url;
+  const char  *url;
   StatsCounter req;
   ElapsedStats time;
-  int64_t c_000;
-  int64_t c_2xx;
-  int64_t c_3xx;
-  int64_t c_4xx;
-  int64_t c_5xx;
-  int64_t hits;
-  int64_t misses;
-  int64_t errors;
+  int64_t      c_000;
+  int64_t      c_2xx;
+  int64_t      c_3xx;
+  int64_t      c_4xx;
+  int64_t      c_5xx;
+  int64_t      hits;
+  int64_t      misses;
+  int64_t      errors;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -420,34 +426,37 @@ public:
         ++(l->c_2xx);
       }
 
-      switch (result) {
-      case SQUID_LOG_TCP_HIT:
-      case SQUID_LOG_TCP_IMS_HIT:
-      case SQUID_LOG_TCP_REFRESH_HIT:
-      case SQUID_LOG_TCP_DISK_HIT:
-      case SQUID_LOG_TCP_MEM_HIT:
-      case SQUID_LOG_TCP_CF_HIT:
-      case SQUID_LOG_TCP_REF_FAIL_HIT:
-      case SQUID_LOG_UDP_HIT:
-      case SQUID_LOG_UDP_WEAK_HIT:
-      case SQUID_LOG_UDP_HIT_OBJ:
+      switch (static_cast<SquidLogCode>(result)) {
+      case SquidLogCode::TCP_HIT:
+      case SquidLogCode::TCP_IMS_HIT:
+      case SquidLogCode::TCP_REFRESH_HIT:
+      case SquidLogCode::TCP_DISK_HIT:
+      case SquidLogCode::TCP_MEM_HIT:
+      case SquidLogCode::TCP_CF_HIT:
+      case SquidLogCode::TCP_REF_FAIL_HIT:
+      case SquidLogCode::UDP_HIT:
+      case SquidLogCode::UDP_WEAK_HIT:
+      case SquidLogCode::UDP_HIT_OBJ:
         ++(l->hits);
         break;
-      case SQUID_LOG_TCP_MISS:
-      case SQUID_LOG_TCP_IMS_MISS:
-      case SQUID_LOG_TCP_REFRESH_MISS:
-      case SQUID_LOG_TCP_EXPIRED_MISS:
-      case SQUID_LOG_TCP_WEBFETCH_MISS:
-      case SQUID_LOG_UDP_MISS:
+      case SquidLogCode::TCP_MISS:
+      case SquidLogCode::TCP_IMS_MISS:
+      case SquidLogCode::TCP_REFRESH_MISS:
+      case SquidLogCode::TCP_EXPIRED_MISS:
+      case SquidLogCode::TCP_WEBFETCH_MISS:
+      case SquidLogCode::UDP_MISS:
         ++(l->misses);
         break;
-      case SQUID_LOG_ERR_CLIENT_ABORT:
-      case SQUID_LOG_ERR_CLIENT_READ_ERROR:
-      case SQUID_LOG_ERR_CONNECT_FAIL:
-      case SQUID_LOG_ERR_INVALID_REQ:
-      case SQUID_LOG_ERR_UNKNOWN:
-      case SQUID_LOG_ERR_READ_TIMEOUT:
+      case SquidLogCode::ERR_CLIENT_ABORT:
+      case SquidLogCode::ERR_CLIENT_READ_ERROR:
+      case SquidLogCode::ERR_CONNECT_FAIL:
+      case SquidLogCode::ERR_INVALID_REQ:
+      case SquidLogCode::ERR_UNKNOWN:
+      case SquidLogCode::ERR_READ_TIMEOUT:
+      case SquidLogCode::ERR_TUN_ACTIVE_TIMEOUT:
         ++(l->errors);
+        break;
+      default:
         break;
       }
 
@@ -457,7 +466,7 @@ public:
         _stack.splice(_stack.begin(), _stack, l);
       }
     } else {                                  // "new" URL
-      const char *u        = ats_strdup(url); // We own it.
+      const char        *u = ats_strdup(url); // We own it.
       LruStack::iterator l = _stack.end();
 
       if (_size > 0) {
@@ -495,34 +504,37 @@ public:
         l->c_2xx = 1;
       }
 
-      switch (result) {
-      case SQUID_LOG_TCP_HIT:
-      case SQUID_LOG_TCP_IMS_HIT:
-      case SQUID_LOG_TCP_REFRESH_HIT:
-      case SQUID_LOG_TCP_DISK_HIT:
-      case SQUID_LOG_TCP_MEM_HIT:
-      case SQUID_LOG_TCP_CF_HIT:
-      case SQUID_LOG_TCP_REF_FAIL_HIT:
-      case SQUID_LOG_UDP_HIT:
-      case SQUID_LOG_UDP_WEAK_HIT:
-      case SQUID_LOG_UDP_HIT_OBJ:
+      switch (static_cast<SquidLogCode>(result)) {
+      case SquidLogCode::TCP_HIT:
+      case SquidLogCode::TCP_IMS_HIT:
+      case SquidLogCode::TCP_REFRESH_HIT:
+      case SquidLogCode::TCP_DISK_HIT:
+      case SquidLogCode::TCP_MEM_HIT:
+      case SquidLogCode::TCP_CF_HIT:
+      case SquidLogCode::TCP_REF_FAIL_HIT:
+      case SquidLogCode::UDP_HIT:
+      case SquidLogCode::UDP_WEAK_HIT:
+      case SquidLogCode::UDP_HIT_OBJ:
         l->hits = 1;
         break;
-      case SQUID_LOG_TCP_MISS:
-      case SQUID_LOG_TCP_IMS_MISS:
-      case SQUID_LOG_TCP_REFRESH_MISS:
-      case SQUID_LOG_TCP_EXPIRED_MISS:
-      case SQUID_LOG_TCP_WEBFETCH_MISS:
-      case SQUID_LOG_UDP_MISS:
+      case SquidLogCode::TCP_MISS:
+      case SquidLogCode::TCP_IMS_MISS:
+      case SquidLogCode::TCP_REFRESH_MISS:
+      case SquidLogCode::TCP_EXPIRED_MISS:
+      case SquidLogCode::TCP_WEBFETCH_MISS:
+      case SquidLogCode::UDP_MISS:
         l->misses = 1;
         break;
-      case SQUID_LOG_ERR_CLIENT_ABORT:
-      case SQUID_LOG_ERR_CLIENT_READ_ERROR:
-      case SQUID_LOG_ERR_CONNECT_FAIL:
-      case SQUID_LOG_ERR_INVALID_REQ:
-      case SQUID_LOG_ERR_UNKNOWN:
-      case SQUID_LOG_ERR_READ_TIMEOUT:
+      case SquidLogCode::ERR_CLIENT_ABORT:
+      case SquidLogCode::ERR_CLIENT_READ_ERROR:
+      case SquidLogCode::ERR_CONNECT_FAIL:
+      case SquidLogCode::ERR_INVALID_REQ:
+      case SquidLogCode::ERR_UNKNOWN:
+      case SquidLogCode::ERR_READ_TIMEOUT:
+      case SquidLogCode::ERR_TUN_ACTIVE_TIMEOUT:
         l->errors = 1;
+        break;
+      default:
         break;
       }
 
@@ -584,41 +596,40 @@ private:
     }
   }
 
-  LruHash _hash;
-  LruStack _stack;
-  int _size, _show_urls;
+  LruHash            _hash;
+  LruStack           _stack;
+  int                _size, _show_urls;
   LruStack::iterator _cur;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 // Globals, holding the accumulated stats (ok, I'm lazy ...)
-static OriginStats totals;
-static OriginStorage origins;
-static OriginSet *origin_set;
-static UrlLru *urls;
-static int parse_errors;
+OriginStats   totals;
+OriginStorage origins;
+OriginSet    *origin_set;
+UrlLru       *urls;
 
 // Command line arguments (parsing)
 struct CommandLineArgs {
-  char log_file[1024];
-  char origin_file[1024];
-  char origin_list[MAX_ORIG_STRING];
-  int max_origins = 0;
-  char state_tag[1024];
+  char    log_file[1024];
+  char    origin_file[1024];
+  char    origin_list[MAX_ORIG_STRING];
+  int     max_origins = 0;
+  char    state_tag[1024];
   int64_t min_hits = 0;
-  int max_age      = 0;
-  int line_len;
-  int incremental     = 0; // Do an incremental run
-  int tail            = 0; // Tail the log file
-  int summary         = 0; // Summary only
-  int json            = 0; // JSON output
-  int cgi             = 0; // CGI output (typically with json)
-  int urls            = 0; // Produce JSON output of URL stats, arg is LRU size
-  int show_urls       = 0; // Max URLs to show
-  int as_object       = 0; // Show the URL stats as a single JSON object (not array)
-  int concise         = 0; // Eliminate metrics that can be inferred by other values
-  int report_per_user = 0; // A flag to aggregate and report stats per user instead of per host if 'true' (default 'false')
-  int no_format_check = 0; // A flag to skip the log format check if any of the fields is not a standard squid log format field.
+  int     max_age  = 0;
+  int     line_len;
+  int     incremental     = 0; // Do an incremental run
+  int     tail            = 0; // Tail the log file
+  int     summary         = 0; // Summary only
+  int     json            = 0; // JSON output
+  int     cgi             = 0; // CGI output (typically with json)
+  int     urls            = 0; // Produce JSON output of URL stats, arg is LRU size
+  int     show_urls       = 0; // Max URLs to show
+  int     as_object       = 0; // Show the URL stats as a single JSON object (not array)
+  int     concise         = 0; // Eliminate metrics that can be inferred by other values
+  int     report_per_user = 0; // A flag to aggregate and report stats per user instead of per host if 'true' (default 'false')
+  int     no_format_check = 0; // A flag to skip the log format check if any of the fields is not a standard squid log format field.
 
   CommandLineArgs() : line_len(DEFAULT_LINE_LEN)
 
@@ -632,40 +643,41 @@ struct CommandLineArgs {
   void parse_arguments(const char **argv);
 };
 
-static CommandLineArgs cl;
+CommandLineArgs cl;
 
-static ArgumentDescription argument_descriptions[] = {
-  {"log_file", 'f', "Specific logfile to parse", "S1023", cl.log_file, nullptr, nullptr},
-  {"origin_list", 'o', "Only show stats for listed Origins", "S4095", cl.origin_list, nullptr, nullptr},
-  {"origin_file", 'O', "File listing Origins to show", "S1023", cl.origin_file, nullptr, nullptr},
-  {"max_origins", 'M', "Max number of Origins to show", "I", &cl.max_origins, nullptr, nullptr},
-  {"urls", 'u', "Produce JSON stats for URLs, argument is LRU size", "I", &cl.urls, nullptr, nullptr},
-  {"show_urls", 'U', "Only show max this number of URLs", "I", &cl.show_urls, nullptr, nullptr},
-  {"as_object", 'A', "Produce URL stats as a JSON object instead of array", "T", &cl.as_object, nullptr, nullptr},
-  {"concise", 'C', "Eliminate metrics that can be inferred from other values", "T", &cl.concise, nullptr, nullptr},
-  {"incremental", 'i', "Incremental log parsing", "T", &cl.incremental, nullptr, nullptr},
-  {"statetag", 'S', "Name of the state file to use", "S1023", cl.state_tag, nullptr, nullptr},
-  {"tail", 't', "Parse the last <sec> seconds of log", "I", &cl.tail, nullptr, nullptr},
-  {"summary", 's', "Only produce the summary", "T", &cl.summary, nullptr, nullptr},
-  {"json", 'j', "Produce JSON formatted output", "T", &cl.json, nullptr, nullptr},
-  {"cgi", 'c', "Produce HTTP headers suitable as a CGI", "T", &cl.cgi, nullptr, nullptr},
-  {"min_hits", 'm', "Minimum total hits for an Origin", "L", &cl.min_hits, nullptr, nullptr},
-  {"max_age", 'a', "Max age for log entries to be considered", "I", &cl.max_age, nullptr, nullptr},
-  {"line_len", 'l', "Output line length", "I", &cl.line_len, nullptr, nullptr},
-  {"debug_tags", 'T', "Colon-Separated Debug Tags", "S1023", &error_tags, nullptr, nullptr},
-  {"report_per_user", 'r', "Report stats per user instead of host", "T", &cl.report_per_user, nullptr, nullptr},
-  {"no_format_check", 'n', "Don't validate the log format field names", "T", &cl.no_format_check, nullptr, nullptr},
+ArgumentDescription argument_descriptions[] = {
+  {"log_file",        'f', "Specific logfile to parse",                                "S1023", cl.log_file,         nullptr, nullptr},
+  {"origin_list",     'o', "Only show stats for listed Origins",                       "S4095", cl.origin_list,      nullptr, nullptr},
+  {"origin_file",     'O', "File listing Origins to show",                             "S1023", cl.origin_file,      nullptr, nullptr},
+  {"max_origins",     'M', "Max number of Origins to show",                            "I",     &cl.max_origins,     nullptr, nullptr},
+  {"urls",            'u', "Produce JSON stats for URLs, argument is LRU size",        "I",     &cl.urls,            nullptr, nullptr},
+  {"show_urls",       'U', "Only show max this number of URLs",                        "I",     &cl.show_urls,       nullptr, nullptr},
+  {"as_object",       'A', "Produce URL stats as a JSON object instead of array",      "T",     &cl.as_object,       nullptr, nullptr},
+  {"concise",         'C', "Eliminate metrics that can be inferred from other values", "T",     &cl.concise,         nullptr, nullptr},
+  {"incremental",     'i', "Incremental log parsing",                                  "T",     &cl.incremental,     nullptr, nullptr},
+  {"statetag",        'S', "Name of the state file to use",                            "S1023", cl.state_tag,        nullptr, nullptr},
+  {"tail",            't', "Parse the last <sec> seconds of log",                      "I",     &cl.tail,            nullptr, nullptr},
+  {"summary",         's', "Only produce the summary",                                 "T",     &cl.summary,         nullptr, nullptr},
+  {"json",            'j', "Produce JSON formatted output",                            "T",     &cl.json,            nullptr, nullptr},
+  {"cgi",             'c', "Produce HTTP headers suitable as a CGI",                   "T",     &cl.cgi,             nullptr, nullptr},
+  {"min_hits",        'm', "Minimum total hits for an Origin",                         "L",     &cl.min_hits,        nullptr, nullptr},
+  {"max_age",         'a', "Max age for log entries to be considered",                 "I",     &cl.max_age,         nullptr, nullptr},
+  {"line_len",        'l', "Output line length",                                       "I",     &cl.line_len,        nullptr, nullptr},
+  {"debug_tags",      'T', "Colon-Separated Debug Tags",                               "S1023", &error_tags,         nullptr, nullptr},
+  {"report_per_user", 'r', "Report stats per user instead of host",                    "T",     &cl.report_per_user, nullptr, nullptr},
+  {"no_format_check", 'n', "Don't validate the log format field names",                "T",     &cl.no_format_check, nullptr, nullptr},
   HELP_ARGUMENT_DESCRIPTION(),
   VERSION_ARGUMENT_DESCRIPTION(),
-  RUNROOT_ARGUMENT_DESCRIPTION()};
+  RUNROOT_ARGUMENT_DESCRIPTION()
+};
 
-static const char *USAGE_LINE = "Usage: " PROGRAM_NAME " [-f logfile] [-o origin[,...]] [-O originfile] [-m minhits] [-binshv]";
+const char *USAGE_LINE = "Usage: " PROGRAM_NAME " [-f logfile] [-o origin[,...]] [-O originfile] [-m minhits] [-binshv]";
 
 void
 CommandLineArgs::parse_arguments(const char **argv)
 {
   // process command-line arguments
-  process_args(&appVersionInfo, argument_descriptions, countof(argument_descriptions), argv, USAGE_LINE);
+  process_args(&AppVersionInfo::get_version(), argument_descriptions, countof(argument_descriptions), argv, USAGE_LINE);
 
   // Process as "CGI" ?
   if (strstr(argv[0], ".cgi") || cgi) {
@@ -675,7 +687,7 @@ CommandLineArgs::parse_arguments(const char **argv)
     cgi  = 1;
 
     if (nullptr != (query = getenv("QUERY_STRING"))) {
-      char buffer[MAX_ORIG_STRING];
+      char  buffer[MAX_ORIG_STRING];
       char *tok, *sep_ptr, *val;
 
       ink_strlcpy(buffer, query, sizeof(buffer));
@@ -722,7 +734,7 @@ enum ExitLevel {
 
 struct ExitStatus {
   ExitLevel level = EXIT_OK;
-  char notice[1024];
+  char      notice[1024];
 
   ExitStatus() { memset(notice, 0, sizeof(notice)); }
   void
@@ -818,7 +830,7 @@ update_counter(StatsCounter &counter, int size)
 inline void
 update_elapsed(ElapsedStats &stat, const int elapsed, const StatsCounter &counter)
 {
-  int newcount, oldcount;
+  int   newcount, oldcount;
   float oldavg, newavg, sum_of_squares;
 
   // Skip all the "0" values.
@@ -866,96 +878,96 @@ update_elapsed(ElapsedStats &stat, const int elapsed, const StatsCounter &counte
 inline void
 update_results_elapsed(OriginStats *stat, int result, int elapsed, int size)
 {
-  switch (result) {
-  case SQUID_LOG_TCP_HIT:
+  switch (static_cast<SquidLogCode>(result)) {
+  case SquidLogCode::TCP_HIT:
     update_counter(stat->results.hits.hit, size);
     update_counter(stat->results.hits.total, size);
     update_elapsed(stat->elapsed.hits.hit, elapsed, stat->results.hits.hit);
     update_elapsed(stat->elapsed.hits.total, elapsed, stat->results.hits.total);
     break;
-  case SQUID_LOG_TCP_MEM_HIT:
+  case SquidLogCode::TCP_MEM_HIT:
     update_counter(stat->results.hits.hit_ram, size);
     update_counter(stat->results.hits.total, size);
     update_elapsed(stat->elapsed.hits.hit_ram, elapsed, stat->results.hits.hit_ram);
     update_elapsed(stat->elapsed.hits.total, elapsed, stat->results.hits.total);
     break;
-  case SQUID_LOG_TCP_CF_HIT:
+  case SquidLogCode::TCP_CF_HIT:
     update_counter(stat->results.hits.hit_rww, size);
     update_counter(stat->results.hits.total, size);
     update_elapsed(stat->elapsed.hits.hit_rww, elapsed, stat->results.hits.hit_rww);
     update_elapsed(stat->elapsed.hits.total, elapsed, stat->results.hits.total);
     break;
-  case SQUID_LOG_TCP_MISS:
+  case SquidLogCode::TCP_MISS:
     update_counter(stat->results.misses.miss, size);
     update_counter(stat->results.misses.total, size);
     update_elapsed(stat->elapsed.misses.miss, elapsed, stat->results.misses.miss);
     update_elapsed(stat->elapsed.misses.total, elapsed, stat->results.misses.total);
     break;
-  case SQUID_LOG_TCP_IMS_HIT:
+  case SquidLogCode::TCP_IMS_HIT:
     update_counter(stat->results.hits.ims, size);
     update_counter(stat->results.hits.total, size);
     update_elapsed(stat->elapsed.hits.ims, elapsed, stat->results.hits.ims);
     update_elapsed(stat->elapsed.hits.total, elapsed, stat->results.hits.total);
     break;
-  case SQUID_LOG_TCP_IMS_MISS:
+  case SquidLogCode::TCP_IMS_MISS:
     update_counter(stat->results.misses.ims, size);
     update_counter(stat->results.misses.total, size);
     update_elapsed(stat->elapsed.misses.ims, elapsed, stat->results.misses.ims);
     update_elapsed(stat->elapsed.misses.total, elapsed, stat->results.misses.total);
     break;
-  case SQUID_LOG_TCP_REFRESH_HIT:
+  case SquidLogCode::TCP_REFRESH_HIT:
     update_counter(stat->results.hits.refresh, size);
     update_counter(stat->results.hits.total, size);
     update_elapsed(stat->elapsed.hits.refresh, elapsed, stat->results.hits.refresh);
     update_elapsed(stat->elapsed.hits.total, elapsed, stat->results.hits.total);
     break;
-  case SQUID_LOG_TCP_REFRESH_MISS:
+  case SquidLogCode::TCP_REFRESH_MISS:
     update_counter(stat->results.misses.refresh, size);
     update_counter(stat->results.misses.total, size);
     update_elapsed(stat->elapsed.misses.refresh, elapsed, stat->results.misses.refresh);
     update_elapsed(stat->elapsed.misses.total, elapsed, stat->results.misses.total);
     break;
-  case SQUID_LOG_TCP_DISK_HIT:
-  case SQUID_LOG_TCP_REF_FAIL_HIT:
-  case SQUID_LOG_UDP_HIT:
-  case SQUID_LOG_UDP_WEAK_HIT:
-  case SQUID_LOG_UDP_HIT_OBJ:
+  case SquidLogCode::TCP_DISK_HIT:
+  case SquidLogCode::TCP_REF_FAIL_HIT:
+  case SquidLogCode::UDP_HIT:
+  case SquidLogCode::UDP_WEAK_HIT:
+  case SquidLogCode::UDP_HIT_OBJ:
     update_counter(stat->results.hits.other, size);
     update_counter(stat->results.hits.total, size);
     update_elapsed(stat->elapsed.hits.other, elapsed, stat->results.hits.other);
     update_elapsed(stat->elapsed.hits.total, elapsed, stat->results.hits.total);
     break;
-  case SQUID_LOG_TCP_EXPIRED_MISS:
-  case SQUID_LOG_TCP_WEBFETCH_MISS:
-  case SQUID_LOG_UDP_MISS:
+  case SquidLogCode::TCP_EXPIRED_MISS:
+  case SquidLogCode::TCP_WEBFETCH_MISS:
+  case SquidLogCode::UDP_MISS:
     update_counter(stat->results.misses.other, size);
     update_counter(stat->results.misses.total, size);
     update_elapsed(stat->elapsed.misses.other, elapsed, stat->results.misses.other);
     update_elapsed(stat->elapsed.misses.total, elapsed, stat->results.misses.total);
     break;
-  case SQUID_LOG_ERR_CLIENT_ABORT:
+  case SquidLogCode::ERR_CLIENT_ABORT:
     update_counter(stat->results.errors.client_abort, size);
     update_counter(stat->results.errors.total, size);
     break;
-  case SQUID_LOG_ERR_CLIENT_READ_ERROR:
+  case SquidLogCode::ERR_CLIENT_READ_ERROR:
     update_counter(stat->results.errors.client_read_error, size);
     update_counter(stat->results.errors.total, size);
     break;
-  case SQUID_LOG_ERR_CONNECT_FAIL:
+  case SquidLogCode::ERR_CONNECT_FAIL:
     update_counter(stat->results.errors.connect_fail, size);
     update_counter(stat->results.errors.total, size);
     break;
-  case SQUID_LOG_ERR_INVALID_REQ:
+  case SquidLogCode::ERR_INVALID_REQ:
     update_counter(stat->results.errors.invalid_req, size);
     update_counter(stat->results.errors.total, size);
     break;
-  case SQUID_LOG_ERR_UNKNOWN:
+  case SquidLogCode::ERR_UNKNOWN:
     update_counter(stat->results.errors.unknown, size);
     update_counter(stat->results.errors.total, size);
     break;
   default:
     // This depends on all errors being at the end of the enum ... Which is the case right now.
-    if (result < SQUID_LOG_ERR_READ_TIMEOUT) {
+    if (result < static_cast<int>(SquidLogCode::ERR_READ_TIMEOUT)) {
       update_counter(stat->results.other, size);
     } else {
       update_counter(stat->results.errors.other, size);
@@ -1075,6 +1087,9 @@ update_codes(OriginStats *stat, int code, int size)
     break;
   case 417:
     update_counter(stat->codes.c_417, size);
+    break;
+  case 429:
+    update_counter(stat->codes.c_429, size);
     break;
 
   // 500's
@@ -1199,9 +1214,9 @@ update_protocols(OriginStats *stat, bool ipv6, int size)
 OriginStats *
 find_or_create_stats(const char *key)
 {
-  OriginStats *o_stats = nullptr;
+  OriginStats            *o_stats = nullptr;
   OriginStorage::iterator o_iter;
-  char *o_server = nullptr;
+  char                   *o_server = nullptr;
 
   // TODO: If we save state (struct) for a run, we probably need to always
   // update the origin data, no matter what the origin_set is.
@@ -1226,8 +1241,8 @@ find_or_create_stats(const char *key)
 ///////////////////////////////////////////////////////////////////////////////
 // Update the stats
 void
-update_stats(OriginStats *o_stats, const HTTPMethod method, URLScheme scheme, int http_code, int size, int result, int hier,
-             int elapsed, bool ipv6)
+update_stats(OriginStats *o_stats, const HTTPMethod method, URLScheme scheme, int http_code, int size, int result,
+             [[maybe_unused]] int hier, int elapsed, bool ipv6)
 {
   update_results_elapsed(&totals, result, elapsed, size);
   update_codes(&totals, http_code, size);
@@ -1252,23 +1267,23 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
 {
   static LogFieldList *fieldlist = nullptr;
 
-  LogEntryHeader *entry;
+  LogEntryHeader   *entry;
   LogBufferIterator buf_iter(buf_header);
-  LogField *field = nullptr;
-  ParseStates state;
+  LogField         *field = nullptr;
+  ParseStates       state;
 
   char *read_from;
   char *tok;
   char *ptr;
-  int tok_len;
-  int flag = 0; // Flag used in state machine to carry "state" forward
+  int   tok_len;
+  int   flag = 0; // Flag used in state machine to carry "state" forward
 
   // Parsed results
-  int http_code = 0, size = 0, result = 0, hier = 0, elapsed = 0;
-  bool ipv6 = false;
+  int          http_code = 0, size = 0, result = 0, hier = 0, elapsed = 0;
+  bool         ipv6 = false;
   OriginStats *o_stats;
-  HTTPMethod method;
-  URLScheme scheme;
+  HTTPMethod   method;
+  URLScheme    scheme;
 
   if (!fieldlist) {
     fieldlist = new LogFieldList;
@@ -1280,8 +1295,8 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
   if (!cl.no_format_check) {
     // Validate the fieldlist
     field                                = fieldlist->first();
-    const std::string_view test_fields[] = {"cqtq", "ttms", "chi", "crc", "pssc", "psql", "cqhm", "cquc", "caun", "phr", "shn"};
-    for (auto i : test_fields) {
+    const std::string_view test_fields[] = {"cqtq", "ttms", "chi", "crc", "pssc", "psql", "cqhm", "pquc", "caun", "phr", "shn"};
+    for (auto &i : test_fields) {
       if (i != field->symbol()) {
         cerr << "Error parsing log file - expected field: " << i << ", but read field: " << field->symbol() << endl;
         return 1;
@@ -1308,8 +1323,8 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
     while ((field = fieldlist->next(field))) {
       switch (state) {
       case P_STATE_ELAPSED:
-        state   = P_STATE_IP;
-        elapsed = *((int64_t *)(read_from));
+        state      = P_STATE_IP;
+        elapsed    = *((int64_t *)(read_from));
         read_from += INK_MIN_ALIGN;
         break;
 
@@ -1317,8 +1332,8 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
         state = P_STATE_RESULT;
         // Just skip the IP, we no longer assume it's always the same.
         {
-          LogFieldIp *ip = reinterpret_cast<LogFieldIp *>(read_from);
-          int len        = sizeof(LogFieldIp);
+          LogFieldIp *ip  = reinterpret_cast<LogFieldIp *>(read_from);
+          int         len = sizeof(LogFieldIp);
           if (AF_INET == ip->_family) {
             ipv6 = false;
             len  = sizeof(LogFieldIp4);
@@ -1331,8 +1346,8 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
         break;
 
       case P_STATE_RESULT:
-        state  = P_STATE_CODE;
-        result = *((int64_t *)(read_from));
+        state      = P_STATE_CODE;
+        result     = *((int64_t *)(read_from));
         read_from += INK_MIN_ALIGN;
         if ((result < 32) || (result > 255)) {
           flag  = 1;
@@ -1341,8 +1356,8 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
         break;
 
       case P_STATE_CODE:
-        state     = P_STATE_SIZE;
-        http_code = *((int64_t *)(read_from));
+        state      = P_STATE_SIZE;
+        http_code  = *((int64_t *)(read_from));
         read_from += INK_MIN_ALIGN;
         if ((http_code < 0) || (http_code > 999)) {
           flag  = 1;
@@ -1353,8 +1368,8 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
       case P_STATE_SIZE:
         // Warning: This is not 64-bit safe, when converting the log format,
         // this needs to be fixed as well.
-        state = P_STATE_METHOD;
-        size  = *((int64_t *)(read_from));
+        state      = P_STATE_METHOD;
+        size       = *((int64_t *)(read_from));
         read_from += INK_MIN_ALIGN;
         break;
 
@@ -1365,20 +1380,20 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
         // Small optimization for common (3-4 char) cases
         switch (*reinterpret_cast<int *>(read_from)) {
         case GET_AS_INT:
-          method = METHOD_GET;
-          read_from += LogAccess::round_strlen(3 + 1);
+          method     = METHOD_GET;
+          read_from += LogAccess::padded_length(3 + 1);
           break;
         case PUT_AS_INT:
-          method = METHOD_PUT;
-          read_from += LogAccess::round_strlen(3 + 1);
+          method     = METHOD_PUT;
+          read_from += LogAccess::padded_length(3 + 1);
           break;
         case HEAD_AS_INT:
-          method = METHOD_HEAD;
-          read_from += LogAccess::round_strlen(4 + 1);
+          method     = METHOD_HEAD;
+          read_from += LogAccess::padded_length(4 + 1);
           break;
         case POST_AS_INT:
-          method = METHOD_POST;
-          read_from += LogAccess::round_strlen(4 + 1);
+          method     = METHOD_POST;
+          read_from += LogAccess::padded_length(4 + 1);
           break;
         default:
           tok_len = strlen(read_from);
@@ -1401,7 +1416,7 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
               flag = 1;
             }
           }
-          read_from += LogAccess::round_strlen(tok_len + 1);
+          read_from += LogAccess::padded_length(tok_len + 1);
           break;
         }
         break;
@@ -1418,13 +1433,13 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
           if (HTTP_AS_INT == *reinterpret_cast<int *>(tok)) {
             tok += 4;
             if (':' == *tok) {
-              scheme = SCHEME_HTTP;
-              tok += 3;
-              tok_len = strlen(tok) + 7;
+              scheme   = SCHEME_HTTP;
+              tok     += 3;
+              tok_len  = strlen(tok) + 7;
             } else if ('s' == *tok) {
-              scheme = SCHEME_HTTPS;
-              tok += 4;
-              tok_len = strlen(tok) + 8;
+              scheme   = SCHEME_HTTPS;
+              tok     += 4;
+              tok_len  = strlen(tok) + 8;
             } else {
               tok_len = strlen(tok) + 4;
             }
@@ -1451,7 +1466,7 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
           }
           tok_len = strlen(read_from);
         }
-        read_from += LogAccess::round_strlen(tok_len + 1);
+        read_from += LogAccess::padded_length(tok_len + 1);
         if (!aggregate_per_userid) {
           update_stats(o_stats, method, scheme, http_code, size, result, hier, elapsed, ipv6);
         }
@@ -1468,48 +1483,49 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
         }
 
         if ('-' == *read_from) {
-          read_from += LogAccess::round_strlen(1 + 1);
+          read_from += LogAccess::padded_length(1 + 1);
         } else {
-          read_from += LogAccess::strlen(read_from);
+          read_from += LogAccess::padded_strlen(read_from);
         }
         break;
 
       case P_STATE_HIERARCHY:
         state = P_STATE_PEER;
         hier  = *((int64_t *)(read_from));
-        switch (hier) {
-        case SQUID_HIER_NONE:
+        switch (static_cast<SquidHierarchyCode>(hier)) {
+        case SquidHierarchyCode::NONE:
           update_counter(totals.hierarchies.none, size);
           if (o_stats != nullptr) {
             update_counter(o_stats->hierarchies.none, size);
           }
           break;
-        case SQUID_HIER_DIRECT:
+        case SquidHierarchyCode::DIRECT:
           update_counter(totals.hierarchies.direct, size);
           if (o_stats != nullptr) {
             update_counter(o_stats->hierarchies.direct, size);
           }
           break;
-        case SQUID_HIER_SIBLING_HIT:
+        case SquidHierarchyCode::SIBLING_HIT:
           update_counter(totals.hierarchies.sibling, size);
           if (o_stats != nullptr) {
             update_counter(o_stats->hierarchies.sibling, size);
           }
           break;
-        case SQUID_HIER_PARENT_HIT:
+        case SquidHierarchyCode::PARENT_HIT:
           update_counter(totals.hierarchies.parent, size);
           if (o_stats != nullptr) {
             update_counter(o_stats->hierarchies.direct, size);
           }
           break;
-        case SQUID_HIER_EMPTY:
+        case SquidHierarchyCode::EMPTY:
           update_counter(totals.hierarchies.empty, size);
           if (o_stats != nullptr) {
             update_counter(o_stats->hierarchies.empty, size);
           }
           break;
         default:
-          if ((hier >= SQUID_HIER_EMPTY) && (hier < SQUID_HIER_INVALID_ASSIGNED_CODE)) {
+          if ((hier >= static_cast<int64_t>(SquidHierarchyCode::EMPTY)) &&
+              (hier < static_cast<int64_t>(SquidHierarchyCode::INVALID_ASSIGNED_CODE))) {
             update_counter(totals.hierarchies.other, size);
             if (o_stats != nullptr) {
               update_counter(o_stats->hierarchies.other, size);
@@ -1528,9 +1544,9 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
       case P_STATE_PEER:
         state = P_STATE_TYPE;
         if ('-' == *read_from) {
-          read_from += LogAccess::round_strlen(1 + 1);
+          read_from += LogAccess::padded_length(1 + 1);
         } else {
-          read_from += LogAccess::strlen(read_from);
+          read_from += LogAccess::padded_strlen(read_from);
         }
         break;
 
@@ -1743,15 +1759,12 @@ parse_log_buff(LogBufferHeader *buf_header, bool summary = false, bool aggregate
             update_counter(o_stats->content.other, size);
           }
         }
-        read_from += LogAccess::round_strlen(tok_len + 1);
-        flag = 0; // We exited this state without errors
+        read_from += LogAccess::padded_length(tok_len + 1);
+        flag       = 0; // We exited this state without errors
         break;
 
       case P_STATE_END:
         // Nothing to do really
-        if (flag) {
-          parse_errors++;
-        }
         break;
       }
     }
@@ -1766,24 +1779,24 @@ int
 process_file(int in_fd, off_t offset, unsigned max_age)
 {
   char buffer[MAX_LOGBUFFER_SIZE];
-  int nread, buffer_bytes;
+  int  nread, buffer_bytes;
 
-  Debug("logstats", "Processing file [offset=%" PRId64 "].", (int64_t)offset);
+  Dbg(dbg_ctl_logstats, "Processing file [offset=%" PRId64 "].", (int64_t)offset);
   while (true) {
-    Debug("logstats", "Reading initial header.");
+    Dbg(dbg_ctl_logstats, "Reading initial header.");
     buffer[0] = '\0';
 
-    unsigned first_read_size = sizeof(uint32_t) + sizeof(uint32_t);
-    LogBufferHeader *header  = (LogBufferHeader *)&buffer[0];
+    unsigned         first_read_size = sizeof(uint32_t) + sizeof(uint32_t);
+    LogBufferHeader *header          = (LogBufferHeader *)&buffer[0];
 
     // Find the next log header, aligning us properly. This is not
     // particularly optimal, but we should only have to do this
     // once, and hopefully we'll be aligned immediately.
     if (offset > 0) {
-      Debug("logstats", "Re-aligning file read.");
+      Dbg(dbg_ctl_logstats, "Re-aligning file read.");
       while (true) {
         if (lseek(in_fd, offset, SEEK_SET) < 0) {
-          Debug("logstats", "Internal seek failed (offset=%" PRId64 ").", (int64_t)offset);
+          Dbg(dbg_ctl_logstats, "Internal seek failed (offset=%" PRId64 ").", (int64_t)offset);
           return 1;
         }
 
@@ -1794,7 +1807,7 @@ process_file(int in_fd, off_t offset, unsigned max_age)
           return 0;
         }
         // ensure that this is a valid logbuffer header
-        if (header->cookie && (LOG_SEGMENT_COOKIE == header->cookie)) {
+        if (LOG_SEGMENT_COOKIE == header->cookie) {
           offset = 0;
           break;
         }
@@ -1811,45 +1824,55 @@ process_file(int in_fd, off_t offset, unsigned max_age)
 
       // ensure that this is a valid logbuffer header
       if (header->cookie != LOG_SEGMENT_COOKIE) {
-        Debug("logstats", "Invalid segment cookie (expected %d, got %d)", LOG_SEGMENT_COOKIE, header->cookie);
+        Dbg(dbg_ctl_logstats, "Invalid segment cookie (expected %d, got %d)", LOG_SEGMENT_COOKIE, header->cookie);
         return 1;
       }
     }
 
-    Debug("logstats", "LogBuffer version %d, current = %d", header->version, LOG_SEGMENT_VERSION);
-    if (header->version != LOG_SEGMENT_VERSION) {
+    Dbg(dbg_ctl_logstats, "LogBuffer version %d, current = %d", header->version, LOG_SEGMENT_VERSION);
+    size_t header_size = log_buffer_header_size(header->version);
+    if (header_size == 0) {
+      Dbg(dbg_ctl_logstats, "Unsupported LogBuffer version %d (supported %d-%d)", header->version,
+          LOG_SEGMENT_VERSION_MIN_SUPPORTED, LOG_SEGMENT_VERSION);
       return 1;
     }
 
-    // read the rest of the header
-    unsigned second_read_size = sizeof(LogBufferHeader) - first_read_size;
+    // read the rest of the header (sized to the on-disk version, not sizeof)
+    unsigned second_read_size = header_size - first_read_size;
     nread                     = read(in_fd, &buffer[first_read_size], second_read_size);
     if (!nread || EOF == nread) {
-      Debug("logstats", "Second read of header failed (attempted %d bytes at offset %d, got nothing), errno=%d.", second_read_size,
-            first_read_size, errno);
+      Dbg(dbg_ctl_logstats, "Second read of header failed (attempted %d bytes at offset %d, got nothing), errno=%d.",
+          second_read_size, first_read_size, errno);
       return 1;
     }
 
     // read the rest of the buffer
     if (header->byte_count > sizeof(buffer)) {
-      Debug("logstats", "Header byte count [%d] > expected [%zu]", header->byte_count, sizeof(buffer));
+      Dbg(dbg_ctl_logstats, "Header byte count [%d] > expected [%zu]", header->byte_count, sizeof(buffer));
       return 1;
     }
 
-    buffer_bytes = header->byte_count - sizeof(LogBufferHeader);
-    if (buffer_bytes <= 0 || (unsigned int)buffer_bytes > (sizeof(buffer) - sizeof(LogBufferHeader))) {
-      Debug("logstats", "Buffer payload [%d] is wrong.", buffer_bytes);
+    // Guard the unsigned subtraction: a corrupt segment whose byte_count is
+    // smaller than its own header would otherwise wrap to a huge payload size.
+    if (header->byte_count < header_size) {
+      Dbg(dbg_ctl_logstats, "Header byte count [%d] < header size [%zu]", header->byte_count, header_size);
       return 1;
     }
 
-    const int MAX_READ_TRIES = 5;
-    int total_read           = 0;
-    int read_tries_remaining = MAX_READ_TRIES; // since the data will be old anyway, let's only try a few times.
+    buffer_bytes = header->byte_count - header_size;
+    if (buffer_bytes <= 0 || (unsigned int)buffer_bytes > (sizeof(buffer) - header_size)) {
+      Dbg(dbg_ctl_logstats, "Buffer payload [%d] is wrong.", buffer_bytes);
+      return 1;
+    }
+
+    const int MAX_READ_TRIES       = 5;
+    int       total_read           = 0;
+    int       read_tries_remaining = MAX_READ_TRIES; // since the data will be old anyway, let's only try a few times.
     do {
-      nread = read(in_fd, &buffer[sizeof(LogBufferHeader) + total_read], buffer_bytes - total_read);
+      nread = read(in_fd, &buffer[header_size + total_read], buffer_bytes - total_read);
       if (EOF == nread || !nread) { // just bail on error
-        Debug("logstats", "Read failed while reading log buffer, wanted %d bytes, nread=%d, errno=%d", buffer_bytes - total_read,
-              nread, errno);
+        Dbg(dbg_ctl_logstats, "Read failed while reading log buffer, wanted %d bytes, nread=%d, errno=%d",
+            buffer_bytes - total_read, nread, errno);
         return 1;
       } else {
         total_read += nread;
@@ -1857,14 +1880,14 @@ process_file(int in_fd, off_t offset, unsigned max_age)
 
       if (total_read < buffer_bytes) {
         if (--read_tries_remaining <= 0) {
-          Debug("logstats_failed_retries", "Unable to read after %d tries, total_read=%d, buffer_bytes=%d", MAX_READ_TRIES,
-                total_read, buffer_bytes);
+          Dbg(dbg_ctl_logstats_failed_retries, "Unable to read after %d tries, total_read=%d, buffer_bytes=%d", MAX_READ_TRIES,
+              total_read, buffer_bytes);
           return 1;
         }
         // let's wait until we get more data on this file descriptor
-        Debug("logstats_partial_read",
-              "Failed to read buffer payload [%d bytes], total_read=%d, buffer_bytes=%d, tries_remaining=%d",
-              buffer_bytes - total_read, total_read, buffer_bytes, read_tries_remaining);
+        Dbg(dbg_ctl_logstats_partial_read,
+            "Failed to read buffer payload [%d bytes], total_read=%d, buffer_bytes=%d, tries_remaining=%d",
+            buffer_bytes - total_read, total_read, buffer_bytes, read_tries_remaining);
         usleep(50 * 1000); // wait 50ms
       }
     } while (total_read < buffer_bytes);
@@ -1872,11 +1895,11 @@ process_file(int in_fd, off_t offset, unsigned max_age)
     // Possibly skip too old entries (the entire buffer is skipped)
     if (header->high_timestamp >= max_age) {
       if (parse_log_buff(header, cl.summary != 0, cl.report_per_user != 0) != 0) {
-        Debug("logstats", "Failed to parse log buffer.");
+        Dbg(dbg_ctl_logstats, "Failed to parse log buffer.");
         return 1;
       }
     } else {
-      Debug("logstats", "Skipping old buffer (age=%d, max=%d)", header->high_timestamp, max_age);
+      Dbg(dbg_ctl_logstats, "Skipping old buffer (age=%d, max=%d)", header->high_timestamp, max_age);
     }
   }
 
@@ -1938,8 +1961,7 @@ inline void
 format_elapsed_line(const char *desc, const ElapsedStats &stat, bool json, bool concise)
 {
   if (json) {
-    std::cout << "    " << '"' << desc << "\" : "
-              << "{ ";
+    std::cout << "    " << '"' << desc << "\" : " << "{ ";
     std::cout << R"("min": ")" << stat.min << "\", ";
     std::cout << R"("max": ")" << stat.max << "\"";
     if (!concise) {
@@ -1961,7 +1983,7 @@ format_elapsed_line(const char *desc, const ElapsedStats &stat, bool json, bool 
 }
 
 void
-format_detail_header(const char *desc, bool concise = false)
+format_detail_header(const char *desc, [[maybe_unused]] bool concise = false)
 {
   std::cout << std::left << std::setw(29) << desc;
   std::cout << std::right << std::setw(15) << "Count" << std::setw(11) << "Percent";
@@ -1974,11 +1996,10 @@ format_line(const char *desc, const StatsCounter &stat, const StatsCounter &tota
 {
   static char metrics[] = "KKMGTP";
   static char buf[64];
-  int ix = (stat.bytes > 1024 ? static_cast<int>(log10(static_cast<double>(stat.bytes)) / LOG10_1024) : 1);
+  int         ix = (stat.bytes > 1024 ? static_cast<int>(log10(static_cast<double>(stat.bytes)) / LOG10_1024) : 1);
 
   if (json) {
-    std::cout << "    " << '"' << desc << "\" : "
-              << "{ ";
+    std::cout << "    " << '"' << desc << "\" : " << "{ ";
     std::cout << R"("req": ")" << stat.count << "\", ";
     if (!concise) {
       std::cout << "\"req_pct\": \"" << std::setiosflags(ios::fixed) << std::setprecision(2)
@@ -2110,6 +2131,7 @@ print_detail_stats(const OriginStats *stat, bool json, bool concise)
   format_line(json ? "status.415" : "415 Unsupported Media Type", stat->codes.c_415, stat->total, json, concise);
   format_line(json ? "status.416" : "416 Req Range Not Satisfiable", stat->codes.c_416, stat->total, json, concise);
   format_line(json ? "status.417" : "417 Expectation Failed", stat->codes.c_417, stat->total, json, concise);
+  format_line(json ? "status.429" : "429 Too Many Requests", stat->codes.c_429, stat->total, json, concise);
   format_line(json ? "status.4xx" : "4xx Total", stat->codes.c_4xx, stat->total, json, concise);
 
   if (!json) {
@@ -2283,8 +2305,8 @@ void
 my_exit(const ExitStatus &status)
 {
   vector<OriginPair> vec;
-  bool first = true;
-  int max_origins;
+  bool               first = true;
+  int                max_origins;
 
   // Special case for URLs output.
   if (urls) {
@@ -2398,8 +2420,8 @@ int
 open_main_log(ExitStatus &status)
 {
   std::string logfile(Layout::get()->logdir);
-  int cnt = 3;
-  int main_fd;
+  int         cnt = 3;
+  int         main_fd;
 
   logfile.append("/squid.blog");
   while (((main_fd = open(logfile.c_str(), O_RDONLY)) < 0) && --cnt) {
@@ -2426,19 +2448,21 @@ open_main_log(ExitStatus &status)
   return main_fd;
 }
 
+} // end anonymous namespace
+
 ///////////////////////////////////////////////////////////////////////////////
 // main
 int
 main(int /* argc ATS_UNUSED */, const char *argv[])
-{
-  ExitStatus exit_status;
-  int res, cnt;
-  int main_fd;
-  unsigned max_age;
+try {
+  ExitStatus   exit_status;
+  int          res, cnt;
+  int          main_fd;
+  unsigned     max_age;
   struct flock lck;
 
   // build the application information structure
-  appVersionInfo.setup(PACKAGE_NAME, PROGRAM_NAME, PACKAGE_VERSION, __DATE__, __TIME__, BUILD_MACHINE, BUILD_PERSON, "");
+  AppVersionInfo::setup_version(PROGRAM_NAME);
 
   runroot_handler(argv);
   // Before accessing file system initialize Layout engine
@@ -2447,8 +2471,7 @@ main(int /* argc ATS_UNUSED */, const char *argv[])
   memset(&totals, 0, sizeof(totals));
   init_elapsed(&totals);
 
-  origin_set   = new OriginSet;
-  parse_errors = 0;
+  origin_set = new OriginSet;
 
   // Command line parsing
   cl.parse_arguments(argv);
@@ -2465,7 +2488,7 @@ main(int /* argc ATS_UNUSED */, const char *argv[])
 
   // initialize this application for standalone logging operation
   init_log_standalone_basic(PROGRAM_NAME);
-  Log::init(Log::NO_REMOTE_MANAGEMENT | Log::LOGCAT);
+  Log::init(Log::LOGCAT);
 
   // Do we have a list of Origins on the command line?
   if (cl.origin_list[0] != '\0') {
@@ -2489,7 +2512,7 @@ main(int /* argc ATS_UNUSED */, const char *argv[])
     }
 
     while (!fs.eof()) {
-      std::string line;
+      std::string            line;
       std::string::size_type start, end;
 
       getline(fs, line);
@@ -2539,7 +2562,7 @@ main(int /* argc ATS_UNUSED */, const char *argv[])
 
     std::string sf_name(Layout::get()->logdir);
     struct stat stat_buf;
-    int state_fd;
+    int         state_fd;
     sf_name.append("/logstats.state");
 
     if (cl.state_tag[0] != '\0') {
@@ -2626,9 +2649,9 @@ main(int /* argc ATS_UNUSED */, const char *argv[])
     // Check if the main log file was rotated, and if so, locate
     // the old file first, and parse the remaining log data.
     if (stat_buf.st_ino != last_state.st_ino) {
-      DIR *dirp         = nullptr;
-      struct dirent *dp = nullptr;
-      ino_t old_inode   = last_state.st_ino;
+      DIR           *dirp      = nullptr;
+      struct dirent *dp        = nullptr;
+      ino_t          old_inode = last_state.st_ino;
 
       // Save the current log-file's I-Node number.
       last_state.st_ino = stat_buf.st_ino;
@@ -2729,4 +2752,9 @@ main(int /* argc ATS_UNUSED */, const char *argv[])
     exit_status.append(" OK");
   }
   my_exit(exit_status);
+} catch (...) {
+  // EXIT_UNKNOWN, not 1: 1 is EXIT_WARNING here, and an unhandled exception is
+  // not a warning. Nagios-style wrappers read stdout, so the status goes there.
+  printf("unknown: traffic_logstats terminating on an unhandled %s\n", ts::describe_current_exception().c_str());
+  return EXIT_UNKNOWN;
 }

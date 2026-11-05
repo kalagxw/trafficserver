@@ -167,14 +167,13 @@ To build |TS| from a Git clone (the method we will be using in this guide), you
 will also need the following:
 
 - git
-- autoconf
-- automake
+- cmake
+- ninja
 
 In this guide, |TS| will be built to use the default ``nobody`` user and group
 and will be installed to ``/opt/ts``. It is assumed that all of the dependencies
 are located in standard paths. If this is not the case, you may need to use the
-appropriate ``--with-<package>`` options as detailed in the output of
-``./configure --help``.
+appropriate ``-D<package>_ROOT`` variables.
 
 #. Clone the repository (you may skip this if you have downloaded an archive of
    the source code to build a specific official release of |TS| instead of the
@@ -186,23 +185,18 @@ appropriate ``--with-<package>`` options as detailed in the output of
 
     cd trafficserver/
 
-#. If you have cloned the repository from Git, you will need to generate the
-   ``configure`` script before proceeding::
-
-    autoreconf -if
-
 #. Configure the source tree::
 
-    ./configure --prefix=/opt/ts
+    cmake -B build -DCMAKE_INSTALL_PREFIX=/opt/ts
 
-#. Build |TS| with the generated Makefiles, and test the results::
+#. Build |TS| with the generated build, and test the results::
 
-    make
-    make check
+    cmake --build build
+    cmake --build build -t test
 
 #. Install |TS| to the configured location::
 
-    sudo make install
+    sudo cmake --install build
 
 #. Optionally, you may find it prudent to run the regression tests on your newly
    installed |TS|::
@@ -242,14 +236,22 @@ networks, as long as |TS| is able to reach the origin host.
 Enable Reverse Proxying
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-Within the :file:`records.config` configuration file, ensure that the following
-settings have been configured as shown below::
+Within the :file:`records.yaml` configuration file, ensure that the following
+settings have been configured as shown below:
 
-    CONFIG proxy.config.http.cache.http INT 1
-    CONFIG proxy.config.reverse_proxy.enabled INT 1
-    CONFIG proxy.config.url_remap.remap_required INT 1
-    CONFIG proxy.config.url_remap.pristine_host_hdr INT 1
-    CONFIG proxy.config.http.server_ports STRING 8080 8080:ipv6
+.. code-block:: yaml
+
+  records:
+    http:
+      cache:
+        http: 1
+      server_ports: 8080 8080:ipv6
+    reverse_proxy:
+      enabled: 1
+    url_remap:
+      pristine_host_hdr: 1
+      remap_required: 1
+
 
 :ts:cv:`proxy.config.http.cache.http`
     Enables caching of proxied HTTP requests.
@@ -340,11 +342,15 @@ rules like::
     map https://www.acme.com/ http://localhost:8080/
     map https://static.acme.com/ https://origin-static.acme.com/
 
-This will require installing a certificate, and adding a line to
-:file:`ssl_multicert.config`. Assuming the cert has the static.acme.com alternate
-name, and that cert should be presented by default::
+This will require installing a certificate, and adding an entry to
+:file:`ssl_multicert.yaml`. Assuming the cert has the static.acme.com alternate
+name, and that cert should be presented by default:
 
-    dest_ip=* ssl_cert_name=/path/to/secret/privatekey/acme.rsa
+.. code-block:: yaml
+
+    ssl_multicert:
+      - ssl_cert_name: /path/to/secret/privatekey/acme.rsa
+        dest_ip: "*"
 
 Further information about configuring |TS| for TLS can be found :ref:`admin-ssl-termination`
 section of the documentation.
@@ -355,12 +361,18 @@ Adjust Cache Parameters
 The default |TS| configuration will provide a 256 MB disk cache, located in
 ``var/trafficserver/`` underneath your install prefix. You may wish to adjust
 either or both of the size and location of this cache. This is done with the
-:file:`storage.config` configuration file. In our example, |AW| has dedicated
+:file:`storage.yaml` configuration file. In our example, |AW| has dedicated
 a large storage pool on their cache server which is mounted at ``/cache``. To
 use this, and to disable the default cache storage setting, the following will
-be the sole entry in :file:`storage.config`::
+be the sole entry in :file:`storage.yaml`:
 
-    /cache/trafficserver 500G
+.. code-block:: yaml
+
+    cache:
+      spans:
+        - name: cache
+          path: /cache/trafficserver
+          size: 500G
 
 .. note:: Changes to the cache configuration require a restart of |TS|.
 
@@ -374,13 +386,21 @@ Final Configurations
 Once completed, the following configuration files for |AW| contain the following
 entries:
 
-:file:`records.config`::
+:file:`records.yaml`:
 
-    CONFIG proxy.config.http.cache.http INT 1
-    CONFIG proxy.config.reverse_proxy.enabled INT 1
-    CONFIG proxy.config.url_remap.remap_required INT 1
-    CONFIG proxy.config.url_remap.pristine_host_hdr INT 1
-    CONFIG proxy.config.http.server_ports STRING 80 80:ipv6
+.. code-block:: yaml
+
+  records:
+    http:
+      cache:
+        http: 1
+      server_ports: 8080 8080:ipv6
+    reverse_proxy:
+      enabled: 1
+    url_remap:
+      pristine_host_hdr: 1
+      remap_required: 1
+
 
 :file:`remap.config`::
 
@@ -391,13 +411,22 @@ entries:
     map http://static.acme.com/ http://origin-static.acme.com/
     map https://static.acme.com/ https://origin-static.acme.com/
 
-:file:`storage.config`::
+:file:`storage.yaml`:
 
-    /cache/trafficserver 500G
+.. code-block:: yaml
 
-:file:`ssl_multicert.config`::
+    cache:
+      spans:
+        - name: cache
+          path: /cache/trafficserver
+          size: 500G
 
-    ssl_cert_name=/path/to/secret/acme.rsa
+:file:`ssl_multicert.yaml`:
+
+.. code-block:: yaml
+
+    ssl_multicert:
+      - ssl_cert_name: /path/to/secret/acme.rsa
 
 Configuring A Forward Proxy
 ---------------------------
@@ -416,11 +445,18 @@ Enable Forward Proxying
 Contrary to a reverse proxy, where you have a defined list of origin servers for
 which you wish to proxy (and optionally cache), a forward proxy is used to
 proxy (and optionally cache) for arbitrary remote hosts. As such, the following
-settings in :file:`records.config` are the base configuration for a minimal
-forward proxy::
+settings in :file:`records.yaml` are the base configuration for a minimal
+forward proxy:
 
-    CONFIG proxy.config.url_remap.remap_required INT 0
-    CONFIG proxy.config.http.cache.http INT 1
+.. code-block:: yaml
+
+   records:
+     http:
+       cache:
+         http: 1
+     url_remap:
+       remap_required: 0
+
 
 :ts:cv:`proxy.config.url_remap.remap_required`
     Disables the requirement for a remap rule to exist and match the incoming
@@ -430,9 +466,13 @@ forward proxy::
     Enables caching of proxied HTTP requests.
 
 If your installation will be strictly a forwarding proxy, then reverse proxying
-should be explicitly disabled::
+should be explicitly disabled:
 
-    CONFIG proxy.config.reverse_proxy.enabled INT 0
+.. code-block:: yaml
+
+   records:
+     reverse_proxy:
+       enabled: 0
 
 Explicit Versus Transparent
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~

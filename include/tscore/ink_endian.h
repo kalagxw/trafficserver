@@ -2,7 +2,7 @@
  *
  *  Endian conversion routines
  *
- *  @section license License
+ *  @par License
  *
  *  Licensed to the Apache Software Foundation (ASF) under one
  *  or more contributor license agreements.  See the NOTICE file
@@ -25,16 +25,9 @@
 
 #include "tscore/ink_config.h"
 
-#ifdef HAVE_SYS_ENDIAN_H
-#include <sys/endian.h>
-#endif
-#ifdef HAVE_MACHINE_ENDIAN_H
-#include <machine/endian.h>
-#endif
-#ifdef HAVE_ENDIAN_H
-#include <endian.h>
-#endif
-#ifdef HAVE_SYS_BYTEORDER_H
+#include <sys/types.h>
+
+#if __has_include(<sys/byteorder.h>)
 #include <sys/byteorder.h>
 #endif
 

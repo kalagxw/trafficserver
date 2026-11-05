@@ -14,9 +14,9 @@
   limitations under the License.
 */
 
-#include <ctype.h>
-#include <stdio.h>
-#include <string.h>
+#include <cctype>
+#include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <vector>
 #include <string_view>
@@ -27,6 +27,7 @@
 #include "ts/ts.h"
 
 #define PLUGIN_NAME "otel_tracer"
+DbgCtl dbg_ctl{PLUGIN_NAME};
 
 constexpr std::string_view ua_key     = {"User-Agent"};
 constexpr std::string_view host_key   = {"Host"};
@@ -41,11 +42,11 @@ constexpr std::string_view b3_s_key   = {"X-B3-Sampled"};
 static int
 close_txn(TSCont contp, TSEvent event, void *edata)
 {
-  int retval = 0;
+  int       retval = 0;
   TSMBuffer buf;
-  TSMLoc hdr_loc;
+  TSMLoc    hdr_loc;
 
-  TSDebug(PLUGIN_NAME, "[%s] Retrieving status code to add to span attributes", __FUNCTION__);
+  Dbg(dbg_ctl, "[%s] Retrieving status code to add to span attributes", __FUNCTION__);
   auto req_data = static_cast<ExtraRequestData *>(TSContDataGet(contp));
 
   TSHttpTxn txnp = static_cast<TSHttpTxn>(edata);
@@ -68,7 +69,7 @@ close_txn(TSCont contp, TSEvent event, void *edata)
   retval = 1;
 
 lReturn:
-  TSDebug(PLUGIN_NAME, "[%s] Cleaning up after close hook handler", __FUNCTION__);
+  Dbg(dbg_ctl, "[%s] Cleaning up after close hook handler", __FUNCTION__);
   req_data->Destruct(req_data);
   delete req_data;
 
@@ -112,12 +113,12 @@ set_request_header(TSMBuffer buf, TSMLoc hdr_loc, const char *key, int key_len, 
 }
 
 static void
-read_request(TSHttpTxn txnp, TSCont contp)
+read_request(TSHttpTxn txnp, TSCont /* contp ATS_UNUSED */)
 {
   TSMBuffer buf;
-  TSMLoc hdr_loc;
+  TSMLoc    hdr_loc;
 
-  TSDebug(PLUGIN_NAME, "[%s] Reading information from request", __FUNCTION__);
+  Dbg(dbg_ctl, "[%s] Reading information from request", __FUNCTION__);
   if (TSHttpTxnClientReqGet(txnp, &buf, &hdr_loc) != TS_SUCCESS) {
     TSError("[otel_tracer][%s] cannot retrieve client request", __FUNCTION__);
     TSHttpTxnReenable(txnp, TS_EVENT_HTTP_CONTINUE);
@@ -135,15 +136,15 @@ read_request(TSHttpTxn txnp, TSCont contp)
 
   std::string path_str = "/";
   const char *path     = nullptr;
-  int path_len         = 0;
+  int         path_len = 0;
   path                 = TSUrlPathGet(buf, url_loc, &path_len);
   path_str.append(std::string_view(path, path_len));
 
-  TSMLoc host_field_loc   = TS_NULL_MLOC;
-  TSMLoc l_host_field_loc = TS_NULL_MLOC;
-  const char *host        = nullptr;
-  int host_len            = 0;
-  host                    = TSUrlHostGet(buf, url_loc, &host_len);
+  TSMLoc      host_field_loc   = TS_NULL_MLOC;
+  TSMLoc      l_host_field_loc = TS_NULL_MLOC;
+  const char *host             = nullptr;
+  int         host_len         = 0;
+  host                         = TSUrlHostGet(buf, url_loc, &host_len);
   if (host_len == 0) {
     host_field_loc = TSMimeHdrFieldFind(buf, hdr_loc, host_key.data(), host_key.length());
     if (host_field_loc != TS_NULL_MLOC) {
@@ -159,18 +160,18 @@ read_request(TSHttpTxn txnp, TSCont contp)
   }
   std::string_view host_str(host, host_len);
 
-  const char *scheme = nullptr;
-  int scheme_len     = 0;
-  scheme             = TSUrlSchemeGet(buf, url_loc, &scheme_len);
+  const char *scheme     = nullptr;
+  int         scheme_len = 0;
+  scheme                 = TSUrlSchemeGet(buf, url_loc, &scheme_len);
   std::string_view scheme_str(scheme, scheme_len);
 
   int port;
   port = TSUrlPortGet(buf, url_loc);
 
   // method
-  const char *method = nullptr;
-  int method_len     = 0;
-  method             = TSHttpHdrMethodGet(buf, hdr_loc, &method_len);
+  const char *method     = nullptr;
+  int         method_len = 0;
+  method                 = TSHttpHdrMethodGet(buf, hdr_loc, &method_len);
   std::string_view method_str(method, method_len);
 
   // TO-DO: add http flavor as attribute
@@ -179,48 +180,48 @@ read_request(TSHttpTxn txnp, TSCont contp)
   // const char *h11_tag = TSHttpTxnClientProtocolStackContains(txnp, "http/1.1");
 
   // target
-  char *target   = nullptr;
-  int target_len = 0;
-  target         = TSHttpTxnEffectiveUrlStringGet(txnp, &target_len);
+  char *target     = nullptr;
+  int   target_len = 0;
+  target           = TSHttpTxnEffectiveUrlStringGet(txnp, &target_len);
   std::string_view target_str(target, target_len);
 
   // user-agent
-  TSMLoc ua_field_loc = TSMimeHdrFieldFind(buf, hdr_loc, ua_key.data(), ua_key.length());
-  const char *ua      = nullptr;
-  int ua_len          = 0;
+  TSMLoc      ua_field_loc = TSMimeHdrFieldFind(buf, hdr_loc, ua_key.data(), ua_key.length());
+  const char *ua           = nullptr;
+  int         ua_len       = 0;
   if (ua_field_loc) {
     ua = TSMimeHdrFieldValueStringGet(buf, hdr_loc, ua_field_loc, -1, &ua_len);
   }
   std::string_view ua_str(ua, ua_len);
 
   // B3 headers
-  TSMLoc b3_field_loc = TSMimeHdrFieldFind(buf, hdr_loc, b3_key.data(), b3_key.length());
-  const char *b3      = nullptr;
-  int b3_len          = 0;
+  TSMLoc      b3_field_loc = TSMimeHdrFieldFind(buf, hdr_loc, b3_key.data(), b3_key.length());
+  const char *b3           = nullptr;
+  int         b3_len       = 0;
   if (b3_field_loc) {
     b3 = TSMimeHdrFieldValueStringGet(buf, hdr_loc, b3_field_loc, -1, &b3_len);
   }
   std::string_view b3_str(b3, b3_len);
 
-  TSMLoc b3_tid_field_loc = TSMimeHdrFieldFind(buf, hdr_loc, b3_tid_key.data(), b3_tid_key.length());
-  const char *b3_tid      = nullptr;
-  int b3_tid_len          = 0;
+  TSMLoc      b3_tid_field_loc = TSMimeHdrFieldFind(buf, hdr_loc, b3_tid_key.data(), b3_tid_key.length());
+  const char *b3_tid           = nullptr;
+  int         b3_tid_len       = 0;
   if (b3_tid_field_loc) {
     b3_tid = TSMimeHdrFieldValueStringGet(buf, hdr_loc, b3_tid_field_loc, -1, &b3_tid_len);
   }
   std::string_view b3_tid_str(b3_tid, b3_tid_len);
 
-  TSMLoc b3_sid_field_loc = TSMimeHdrFieldFind(buf, hdr_loc, b3_sid_key.data(), b3_sid_key.length());
-  const char *b3_sid      = nullptr;
-  int b3_sid_len          = 0;
+  TSMLoc      b3_sid_field_loc = TSMimeHdrFieldFind(buf, hdr_loc, b3_sid_key.data(), b3_sid_key.length());
+  const char *b3_sid           = nullptr;
+  int         b3_sid_len       = 0;
   if (b3_sid_field_loc) {
     b3_sid = TSMimeHdrFieldValueStringGet(buf, hdr_loc, b3_sid_field_loc, -1, &b3_sid_len);
   }
   std::string_view b3_sid_str(b3_sid, b3_sid_len);
 
-  TSMLoc b3_s_field_loc = TSMimeHdrFieldFind(buf, hdr_loc, b3_s_key.data(), b3_s_key.length());
-  const char *b3_s      = nullptr;
-  int b3_s_len          = 0;
+  TSMLoc      b3_s_field_loc = TSMimeHdrFieldFind(buf, hdr_loc, b3_s_key.data(), b3_s_key.length());
+  const char *b3_s           = nullptr;
+  int         b3_s_len       = 0;
   if (b3_s_field_loc) {
     b3_s = TSMimeHdrFieldValueStringGet(buf, hdr_loc, b3_s_field_loc, -1, &b3_s_len);
   }
@@ -229,7 +230,7 @@ read_request(TSHttpTxn txnp, TSCont contp)
   // TODO: add remote ip, port to attributes
 
   // create parent context
-  TSDebug(PLUGIN_NAME, "[%s] Creating parent context from incoming request headers", __FUNCTION__);
+  Dbg(dbg_ctl, "[%s] Creating parent context from incoming request headers", __FUNCTION__);
   std::map<std::string, std::string> parent_headers;
   if (b3_len != 0) {
     parent_headers[std::string{b3_key}] = b3_str;
@@ -245,7 +246,7 @@ read_request(TSHttpTxn txnp, TSCont contp)
   }
 
   // create trace span and activate
-  TSDebug(PLUGIN_NAME, "[%s] Create span with a name, attributes, parent context and activate it", __FUNCTION__);
+  Dbg(dbg_ctl, "[%s] Create span with a name, attributes, parent context and activate it", __FUNCTION__);
   auto span = get_tracer("ats")->StartSpan(
     get_span_name(path_str), get_span_attributes(method_str, target_str, path_str, host_str, ua_str, port, scheme_str),
     get_span_options(parent_headers));
@@ -254,13 +255,13 @@ read_request(TSHttpTxn txnp, TSCont contp)
 
   std::map<std::string, std::string> trace_headers = get_trace_headers();
   // insert headers to request
-  TSDebug(PLUGIN_NAME, "[%s] Insert trace headers to upstream request", __FUNCTION__);
+  Dbg(dbg_ctl, "[%s] Insert trace headers to upstream request", __FUNCTION__);
   for (auto &p : trace_headers) {
     set_request_header(buf, hdr_loc, p.first.c_str(), p.first.size(), p.second.c_str(), p.second.size());
   }
 
   // pass the span
-  TSDebug(PLUGIN_NAME, "[%s] Add close hook to add status code to span attribute", __FUNCTION__);
+  Dbg(dbg_ctl, "[%s] Add close hook to add status code to span attribute", __FUNCTION__);
   TSCont close_txn_contp = TSContCreate(close_txn, nullptr);
   if (!close_txn_contp) {
     TSError("[otel_tracer][%s] Could not create continuation", __FUNCTION__);
@@ -272,7 +273,7 @@ read_request(TSHttpTxn txnp, TSCont contp)
   }
 
   // clean up
-  TSDebug(PLUGIN_NAME, "[%s] Cleanig up", __FUNCTION__);
+  Dbg(dbg_ctl, "[%s] Cleanig up", __FUNCTION__);
   if (target != nullptr) {
     TSfree(target);
   }
@@ -308,7 +309,7 @@ read_request(TSHttpTxn txnp, TSCont contp)
 static int
 plugin_handler(TSCont contp, TSEvent event, void *edata)
 {
-  TSHttpTxn txnp = (TSHttpTxn)edata;
+  TSHttpTxn txnp = static_cast<TSHttpTxn>(edata);
 
   switch (event) {
   case TS_EVENT_HTTP_READ_REQUEST_HDR:
@@ -332,18 +333,24 @@ TSPluginInit(int argc, const char *argv[])
   // Get parameter: service name, sampling rate,
   std::string url          = "";
   std::string service_name = "otel_tracer";
-  double rate              = 1.0;
+  double      rate         = 1.0;
+  int         qsize        = 25;
+  int         delay        = 3000;
+  int         bsize        = 10;
   if (argc > 1) {
-    int c;
+    int                        c;
     static const struct option longopts[] = {
-      {const_cast<char *>("url"), required_argument, nullptr, 'u'},
-      {const_cast<char *>("service-name"), required_argument, nullptr, 's'},
+      {const_cast<char *>("url"),           required_argument, nullptr, 'u'},
+      {const_cast<char *>("service-name"),  required_argument, nullptr, 's'},
       {const_cast<char *>("sampling-rate"), required_argument, nullptr, 'r'},
-      {nullptr, 0, nullptr, 0},
+      {const_cast<char *>("queue-size"),    required_argument, nullptr, 'q'},
+      {const_cast<char *>("delay"),         required_argument, nullptr, 'd'},
+      {const_cast<char *>("batch-size"),    required_argument, nullptr, 'b'},
+      {nullptr,                             0,                 nullptr, 0  },
     };
 
     int longindex = 0;
-    while ((c = getopt_long(argc, const_cast<char *const *>(argv), "u:s:r:", longopts, &longindex)) != -1) {
+    while ((c = getopt_long(argc, const_cast<char *const *>(argv), "u:s:r:q:d:b:", longopts, &longindex)) != -1) {
       switch (c) {
       case 'u':
         url = optarg;
@@ -353,13 +360,34 @@ TSPluginInit(int argc, const char *argv[])
         break;
       case 'r':
         rate = atof(optarg);
+        if (rate < 0) {
+          TSEmergency("[otel_tracer][%s] Invalid rate parameter", __FUNCTION__);
+        }
+        break;
+      case 'q':
+        qsize = atoi(optarg);
+        if (qsize < 0) {
+          TSEmergency("[otel_tracer][%s] Invalid queue size parameter", __FUNCTION__);
+        }
+        break;
+      case 'd':
+        delay = atoi(optarg);
+        if (delay < 0) {
+          TSEmergency("[otel_tracer][%s] Invalid delay parameter", __FUNCTION__);
+        }
+        break;
+      case 'b':
+        bsize = atoi(optarg);
+        if (bsize < 0) {
+          TSEmergency("[otel_tracer][%s] Invalid batch size parameter", __FUNCTION__);
+        }
         break;
       default:
         break;
       }
     }
   }
-  InitTracer(url, service_name, rate);
+  InitTracer(url, service_name, rate, qsize, delay, bsize);
 
   if (TSPluginRegister(&info) != TS_SUCCESS) {
     TSError("[%s] Plugin registration failed", PLUGIN_NAME);
@@ -373,6 +401,6 @@ error:
   TSError("[%s] Plugin not initialized", PLUGIN_NAME);
 
 done:
-  TSDebug(PLUGIN_NAME, "Plugin initialized");
+  Dbg(dbg_ctl, "Plugin initialized");
   return;
 }

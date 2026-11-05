@@ -16,7 +16,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSVConnClose
 ************
@@ -28,7 +28,7 @@ Synopsis
 
     #include <ts/ts.h>
 
-.. function:: void TSVConnClose(TSVConn connp)
+.. function:: void TSVConnClose(TSVConn connp) noexcept
 
 Description
 ===========

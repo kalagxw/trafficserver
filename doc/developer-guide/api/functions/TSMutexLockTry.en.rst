@@ -16,7 +16,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSMutexLockTry
 **************
@@ -28,7 +28,7 @@ Synopsis
 
     #include <ts/ts.h>
 
-.. function:: TSReturnCode TSMutexLockTry(TSMutex mutexp)
+.. function:: TSReturnCode TSMutexLockTry(TSMutex mutexp) noexcept
 
 Description
 ===========

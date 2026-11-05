@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -109,9 +109,9 @@ convert_tm(const struct tm *tp)
   static const int days[12] = {305, 336, -1, 30, 60, 91, 121, 152, 183, 213, 244, 274};
 
   ink_time_t t;
-  int year;
-  int month;
-  int mday;
+  int        year;
+  int        month;
+  int        mday;
 
   year  = tp->tm_year;
   month = tp->tm_mon;

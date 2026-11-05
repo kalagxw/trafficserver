@@ -16,6 +16,7 @@
    under the License.
 
 .. include:: ../../../common.defs
+.. default-domain:: cpp
 
 .. _developer-plugins-management-settings-and-statistics:
 
@@ -24,36 +25,36 @@ Settings and Statistics
 
 Your plugin might need to know information about Traffic Server's
 current configuration and performance. The functions described in this
-section read this information from the Traffic Server :file:`records.config`
+section read this information from the Traffic Server :file:`records.yaml`
 file. Configuration settings are stored in ``CONFIG`` variables and
 statistics are stored in ``PROCESS`` variables.
 
 .. caution::
 
-   Not all ``CONFIG`` and ``PROCESS`` variables in :file:`records.config` are
+   Not all ``CONFIG`` and ``PROCESS`` variables in :file:`records.yaml` are
    relevant to Traffic Server's configuration and statistics. Therefore,
-   retrieve only the :file:`records.config` variables that are documented in
+   retrieve only the :file:`records.yaml` variables that are documented in
    the :ref:`admin-guide`.
 
 To retrieve a variable, you need to know its type (``int``, ``counter``,
-``float``, or ``string``). Plugins store the :file:`records.config` values
+``float``, or ``string``). Plugins store the :file:`records.yaml` values
 as an ``TSMgmtInt``, ``TSMgmtCounter``, ``TSMgmtFloat``, or
-``TSMgmtString``. You can look up :file:`records.config` variable types in
+``TSMgmtString``. You can look up :file:`records.yaml` variable types in
 the :ref:`admin-guide`.
 
 Depending on the result type, you'll use ``TSMgmtIntGet``,
 ``TSMgmtCounterGet``, ``TSMgmtFloatGet``, or ``TSMgmtStringGet`` to
 obtain the variable value (see the example for
-:c:func:`TSMgmtIntGet`.
+:func:`TSMgmtIntGet`.
 
 The ``TSMgmt*Get`` functions are:
 
--  :c:func:`TSMgmtCounterGet`
+-  :func:`TSMgmtCounterGet`
 
--  :c:func:`TSMgmtFloatGet`
+-  :func:`TSMgmtFloatGet`
 
--  :c:func:`TSMgmtIntGet`
+-  :func:`TSMgmtIntGet`
 
--  :c:func:`TSMgmtStringGet`
+-  :func:`TSMgmtStringGet`
 
 

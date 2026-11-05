@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -29,9 +29,9 @@
 
 struct ArenaBlock {
   ArenaBlock *next;
-  char *m_heap_end;
-  char *m_water_level;
-  char data[8];
+  char       *m_heap_end;
+  char       *m_water_level;
+  char        data[8];
 };
 
 class Arena
@@ -39,12 +39,12 @@ class Arena
 public:
   Arena() {}
   ~Arena() { reset(); }
-  void *alloc(size_t size, size_t alignment = sizeof(double));
-  void free(void *mem, size_t size);
+  void  *alloc(size_t size, size_t alignment = sizeof(double));
+  void   free(void *mem, size_t size);
   size_t str_length(const char *str);
-  char *str_alloc(size_t len);
-  void str_free(char *str);
-  char *str_store(const char *str, size_t len);
+  char  *str_alloc(size_t len);
+  void   str_free(char *str);
+  char  *str_store(const char *str, size_t len);
 
   void reset();
 
@@ -59,7 +59,7 @@ inline size_t
 Arena::str_length(const char *str)
 {
   unsigned char *s, *e;
-  size_t len;
+  size_t         len;
 
   e = (unsigned char *)str;
   s = e - 1;
@@ -97,30 +97,30 @@ inline char *
 Arena::str_alloc(size_t len)
 {
   unsigned char *mem, *p;
-  size_t size;
-  size_t tmp;
+  size_t         size;
+  size_t         tmp;
 
   size = len + 1 + 1;
   tmp  = len;
 
   while (tmp >= 128) {
     size += 1;
-    tmp /= 128;
+    tmp  /= 128;
   }
 
-  mem = (unsigned char *)alloc(size, 1);
+  mem = static_cast<unsigned char *>(alloc(size, 1));
 
   mem += (size - len - 1);
-  p   = mem - 1;
-  tmp = len;
+  p    = mem - 1;
+  tmp  = len;
 
   while (tmp >= 128) {
-    *p-- = (unsigned char)(255 - (tmp % 128));
-    tmp /= 128;
+    *p--  = static_cast<unsigned char>(255 - (tmp % 128));
+    tmp  /= 128;
   }
-  *p = (unsigned char)tmp;
+  *p = static_cast<unsigned char>(tmp);
 
-  return (char *)mem;
+  return reinterpret_cast<char *>(mem);
 }
 
 /*-------------------------------------------------------------------------
@@ -130,9 +130,9 @@ inline void
 Arena::str_free(char *str)
 {
   unsigned char *p, *s, *e;
-  size_t len;
+  size_t         len;
 
-  e = (unsigned char *)str;
+  e = reinterpret_cast<unsigned char *>(str);
   s = e - 1;
 
   while (*s >= 128) {

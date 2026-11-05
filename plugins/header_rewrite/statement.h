@@ -27,10 +27,34 @@
 #include <vector>
 
 #include "ts/ts.h"
+#include "tsutil/Metrics.h"
 
 #include "resources.h"
 #include "parser.h"
 #include "lulu.h"
+
+// Counters for the number of header_rewrite operators executed and conditions evaluated; the
+// bare hook invocation count cannot tell a small ruleset from a large one. Created once via
+// init_hrw_work_stats(); both are null until then, so increments are guarded.
+extern ts::Metrics::Counter::AtomicType *hrw_stat_operators;
+extern ts::Metrics::Counter::AtomicType *hrw_stat_conditions;
+void                                     init_hrw_work_stats();
+
+namespace header_rewrite_ns
+{
+constexpr int NUM_STATE_FLAGS = 16;
+constexpr int NUM_STATE_INT8S = 4;
+
+constexpr uint64_t STATE_INT8_MASKS[NUM_STATE_INT8S] = {
+  // These would change if the number of flag bits changes
+  0x0000000000FF0000ULL, // Bits 16-23
+  0x00000000FF000000ULL, // Bits 24-31
+  0x000000FF00000000ULL, // Bits 32-39
+  0x0000FF0000000000ULL, // Bits 40-47
+};
+
+constexpr uint64_t STATE_INT16_MASK = 0xFFFF000000000000ULL; // Bits 48-63
+} // namespace header_rewrite_ns
 
 // URL data (both client and server)
 enum UrlQualifiers {
@@ -39,9 +63,15 @@ enum UrlQualifiers {
   URL_QUAL_PORT,
   URL_QUAL_PATH,
   URL_QUAL_QUERY,
-  URL_QUAL_MATRIX,
   URL_QUAL_SCHEME,
-  URL_QUAL_URL
+  URL_QUAL_URL,
+};
+
+enum NextHopQualifiers {
+  NEXT_HOP_NONE,
+  NEXT_HOP_HOST,
+  NEXT_HOP_PORT,
+  NEXT_HOP_STRATEGY,
 };
 
 // NOW data
@@ -53,7 +83,7 @@ enum NowQualifiers {
   NOW_QUAL_HOUR,
   NOW_QUAL_MINUTE,
   NOW_QUAL_WEEKDAY,
-  NOW_QUAL_YEARDAY
+  NOW_QUAL_YEARDAY,
 };
 
 // GEO data
@@ -91,30 +121,39 @@ enum NetworkSessionQualifiers {
   NET_QUAL_IPV6,        ///< 'ipv6' or not.
   NET_QUAL_IP_FAMILY,   ///< IP protocol family.
   NET_QUAL_STACK,       ///< Full protocol stack.
+#if TS_HAS_CRIPTS
+  NET_QUAL_CERT_PEM,        ///< The PEM encoded certificate
+  NET_QUAL_CERT_SIG,        ///< The signature of the certificate
+  NET_QUAL_CERT_SUBJECT,    ///< The subject of the certificate
+  NET_QUAL_CERT_ISSUER,     ///< The issuer of the certificate
+  NET_QUAL_CERT_SERIAL,     ///< The serial number of the certificate
+  NET_QUAL_CERT_NOT_BEFORE, ///< The not before date of the certificate
+  NET_QUAL_CERT_NOT_AFTER,  ///< The not after date of the certificate
+  NET_QUAL_CERT_VERSION,    ///< The version of the certificate
+  NET_QUAL_CERT_SAN_DNS,    ///< The DNS names in the SAN
+  NET_QUAL_CERT_SAN_IP,     ///< The IP addresses in the SAN
+  NET_QUAL_CERT_SAN_EMAIL,  ///< The email addresses in the SAN
+  NET_QUAL_CERT_SAN_URI,    ///< The URIs in the SAN
+#endif
 };
 
 class Statement
 {
 public:
-  Statement() { TSDebug(PLUGIN_NAME_DBG, "Calling CTOR for Statement"); }
+  Statement() { Dbg(dbg_ctl, "Calling CTOR for Statement"); }
 
   virtual ~Statement()
   {
-    TSDebug(PLUGIN_NAME_DBG, "Calling DTOR for Statement");
+    Dbg(dbg_ctl, "Calling DTOR for Statement");
     delete _next;
   }
 
   // noncopyable
-  Statement(const Statement &) = delete;
+  Statement(const Statement &)      = delete;
   void operator=(const Statement &) = delete;
 
-  // Which hook are we adding this statement to?
-  bool set_hook(TSHttpHookID hook);
-  TSHttpHookID
-  get_hook() const
-  {
-    return _hook;
-  }
+  // Validate that this statement is allowed on the given hook. Used during parsing only.
+  bool is_hook_valid(TSHttpHookID hook) const;
 
   // Which hooks are this "statement" applicable for? Used during parsing only.
   void
@@ -128,11 +167,47 @@ public:
 
   ResourceIDs get_resource_ids() const;
 
+  void
+  set_config_location(const char *filename, int lineno)
+  {
+    _config_filename = filename ? filename : "";
+    _config_lineno   = lineno;
+  }
+
+  bool
+  has_config_location() const
+  {
+    return !_config_filename.empty();
+  }
+
+  const std::string &
+  get_config_filename() const
+  {
+    return _config_filename;
+  }
+
+  int
+  get_config_lineno() const
+  {
+    return _config_lineno;
+  }
+
   virtual void
   initialize(Parser &)
   {
     TSReleaseAssert(_initialized == false);
     initialize_hooks();
+
+    if (need_txn_slot()) {
+      _txn_slot = acquire_txn_slot();
+    }
+    if (need_ssn_slot()) {
+      _ssn_slot = acquire_ssn_slot();
+    }
+    if (need_txn_private_slot()) {
+      _txn_private_slot = acquire_txn_private_slot();
+    }
+
     _initialized = true;
   }
 
@@ -142,22 +217,111 @@ public:
     return _initialized;
   }
 
-protected:
-  virtual void initialize_hooks();
-
-  UrlQualifiers parse_url_qualifier(const std::string &q) const;
-
   void
   require_resources(const ResourceIDs ids)
   {
     _rsrc = static_cast<ResourceIDs>(_rsrc | ids);
   }
 
-  Statement *_next = nullptr; // Linked list
+  static int acquire_txn_slot();
+  static int acquire_txn_private_slot();
+  static int acquire_ssn_slot();
+  static int acquire_state_slot(TSUserArgType type);
+
+protected:
+  virtual void initialize_hooks();
+
+  UrlQualifiers     parse_url_qualifier(const std::string &q) const;
+  NextHopQualifiers parse_next_hop_qualifier(const std::string &q) const;
+  TSHttpCntlType    parse_http_cntl_qualifier(const std::string &q) const;
+
+  virtual bool
+  need_txn_slot() const
+  {
+    return false;
+  }
+
+  virtual bool
+  need_txn_private_slot() const
+  {
+    return false;
+  }
+
+  virtual bool
+  need_ssn_slot() const
+  {
+    return false;
+  }
+
+  // Scope-aware state accessors. A null handle (internal txns have no session)
+  // would trip a release assert in TSUserArg*, so treat it as unset.
+  uint64_t
+  _get_state_data(TSUserArgType scope, const Resources &res) const
+  {
+    if (!_check_state_handle(scope, res)) {
+      return 0;
+    }
+    if (scope == TS_USER_ARGS_SSN) {
+      return reinterpret_cast<uint64_t>(TSUserArgGet(res.state.ssnp, _ssn_slot));
+    }
+    return reinterpret_cast<uint64_t>(TSUserArgGet(res.state.txnp, _txn_slot));
+  }
+
+  void
+  _set_state_data(TSUserArgType scope, const Resources &res, uint64_t data) const
+  {
+    if (!_check_state_handle(scope, res)) {
+      return;
+    }
+    if (scope == TS_USER_ARGS_SSN) {
+      TSUserArgSet(res.state.ssnp, _ssn_slot, reinterpret_cast<void *>(data));
+    } else {
+      TSUserArgSet(res.state.txnp, _txn_slot, reinterpret_cast<void *>(data));
+    }
+  }
+
+  bool
+  _check_state_handle(TSUserArgType scope, const Resources &res) const
+  {
+    if (scope == TS_USER_ARGS_SSN) {
+      return res.state.ssnp != nullptr;
+    }
+    return res.state.txnp != nullptr;
+  }
+
+  static const char *
+  _scope_label(TSUserArgType scope)
+  {
+    return (scope == TS_USER_ARGS_SSN) ? "SESSION" : "STATE";
+  }
+
+  Statement *_next             = nullptr; // Linked list
+  int        _txn_slot         = -1;
+  int        _txn_private_slot = -1;
+  int        _ssn_slot         = -1;
 
 private:
-  ResourceIDs _rsrc  = RSRC_NONE;
-  bool _initialized  = false;
-  TSHttpHookID _hook = TS_HTTP_READ_RESPONSE_HDR_HOOK;
+  ResourceIDs               _rsrc = RSRC_NONE;
   std::vector<TSHttpHookID> _allowed_hooks;
+  std::string               _config_filename;
+  int                       _config_lineno = 0;
+  bool                      _initialized   = false;
+};
+
+union PrivateSlotData {
+  uint64_t raw;
+  struct {
+    uint64_t timezone  : 1; // TIMEZONE_LOCAL, or TIMEZONE_GMT
+    uint64_t ip_source : 2; // IP_SRC_PEER, IP_SRC_PROXY, IP_SRC_FORWARDED, or IP_SRC_PLUGIN
+    uint64_t unused    : 61;
+  };
+};
+
+enum { TIMEZONE_LOCAL, TIMEZONE_GMT };
+
+enum {
+  IP_SRC_PEER,   // Immediate connection
+  IP_SRC_PROXY,  // PROXY protocl
+  IP_SRC_PLUGIN, // Plugin
+  // IP_SRC_FORWARDED,  // Forwarded header field (TS core needs to support the header first. It can be done by a plugin as well.)
 };

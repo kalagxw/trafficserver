@@ -1,6 +1,6 @@
 /* http_load - multiprocessing http test client
 **
-** Copyright © 1998,1999,2001 by Jef Poskanzer <jef@mail.acme.com>.
+** Copyright ï¿½ 1998,1999,2001 by Jef Poskanzer <jef@mail.acme.com>.
 ** All rights reserved.
 **
 ** Redistribution and use in source and binary forms, with or without
@@ -71,24 +71,24 @@
 #define RESERVED_FDS 3
 
 typedef struct {
-  char *url_str;
-  int protocol;
-  char *hostname;
+  char          *url_str;
+  int            protocol;
+  char          *hostname;
   unsigned short port;
 #ifdef USE_IPV6
   struct sockaddr_in6 sa;
 #else  /* USE_IPV6 */
   struct sockaddr_in sa;
 #endif /* USE_IPV6 */
-  int sa_len, sock_family, sock_type, sock_protocol;
+  int   sa_len, sock_family, sock_type, sock_protocol;
   char *filename;
-  int got_bytes;
-  long bytes;
-  int got_checksum;
-  long checksum;
+  int   got_bytes;
+  long  bytes;
+  int   got_checksum;
+  long  checksum;
   char *buf;
-  int buf_bytes;
-  int unique_id_offset;
+  int   buf_bytes;
+  int   unique_id_offset;
   struct {
     int completed;
     int max_response;
@@ -97,17 +97,17 @@ typedef struct {
 
 } url;
 static url *urls;
-static int num_urls, max_urls, cur_url;
+static int  num_urls, max_urls, cur_url;
 
 typedef struct {
-  char *str;
+  char              *str;
   struct sockaddr_in sa;
 } sip;
 static sip *sips;
-static int num_sips, max_sips;
+static int  num_sips, max_sips;
 
 /* Protocol symbols. */
-#define PROTO_HTTP 0
+#define PROTO_HTTP  0
 #define PROTO_HTTPS 1
 
 /* Connection states */
@@ -205,28 +205,28 @@ typedef enum {
 } header_states;
 
 typedef struct {
-  int url_num;
+  int                url_num;
   struct sockaddr_in sa;
-  int sa_len;
-  int conn_fd;
-  SSL *ssl;
-  connection_states conn_state;
-  header_states header_state;
-  int did_connect, did_response;
-  struct timeval started_at;
-  struct timeval connect_at;
-  struct timeval request_at;
-  struct timeval response_at;
-  Timer *idle_timer;
-  Timer *wakeup_timer;
-  long content_length;
-  long bytes;
-  long checksum;
-  int http_status;
-  int reusable;
-  int keep_alive;
-  int chunked;
-  unsigned int unique_id;
+  int                sa_len;
+  int                conn_fd;
+  SSL               *ssl;
+  connection_states  conn_state;
+  header_states      header_state;
+  int                did_connect, did_response;
+  struct timeval     started_at;
+  struct timeval     connect_at;
+  struct timeval     request_at;
+  struct timeval     response_at;
+  Timer             *idle_timer;
+  Timer             *wakeup_timer;
+  long               content_length;
+  long               bytes;
+  long               checksum;
+  int                http_status;
+  int                reusable;
+  int                keep_alive;
+  int                chunked;
+  unsigned int       unique_id;
   struct {
     int connections;
     int requests;
@@ -236,86 +236,86 @@ typedef struct {
 } connection;
 
 static connection *connections;
-static int max_connections, num_connections, max_parallel, num_ka_conns;
+static int         max_connections, num_connections, max_parallel, num_ka_conns;
 
-static int http_status_counts[1000]; /* room for all three-digit statuses */
-static char *argv0;
-static int do_checksum, do_throttle, do_verbose, do_jitter, do_proxy;
-static int do_accept_gzip, do_sequential;
-static float throttle;
-static int idle_secs;
-static char *proxy_hostname;
+static int            http_status_counts[1000]; /* room for all three-digit statuses */
+static char          *argv0;
+static int            do_checksum, do_throttle, do_verbose, do_jitter, do_proxy;
+static int            do_accept_gzip, do_sequential;
+static float          throttle;
+static int            idle_secs;
+static char          *proxy_hostname;
 static unsigned short proxy_port;
-static char *user_agent;
-static char *cookie;
-static char *http_version;
-static int is_http_1_1;
-static int ignore_bytes;
-static int keep_alive;
-static char *extra_headers;
-static unsigned int unique_id_counter;
-static int unique_id = 0;
-static int socket_pool;
-static int epfd;
-static int max_connect_failures = 0;
+static char          *user_agent;
+static char          *cookie;
+static char          *http_version;
+static int            is_http_1_1;
+static int            ignore_bytes;
+static int            keep_alive;
+static char          *extra_headers;
+static unsigned int   unique_id_counter;
+static int            unique_id = 0;
+static int            socket_pool;
+static int            epfd;
+static int            max_connect_failures = 0;
 
 static struct timeval start_at;
-static int fetches_started, connects_completed, responses_completed, fetches_completed;
-static long long total_bytes;
-static long long total_connect_usecs, max_connect_usecs, min_connect_usecs;
-static long long total_response_usecs, max_response_usecs, min_response_usecs;
-int total_timeouts, total_badbytes, total_badchecksums;
+static int            fetches_started, connects_completed, responses_completed, fetches_completed;
+static long long      total_bytes;
+static long long      total_connect_usecs, max_connect_usecs, min_connect_usecs;
+static long long      total_response_usecs, max_response_usecs, min_response_usecs;
+int                   total_timeouts, total_badbytes, total_badchecksums;
 
 static long start_interval, low_interval, high_interval, range_interval;
 
 static SSL_CTX *ssl_ctx = (SSL_CTX *)0;
-static char *cipher     = (char *)0;
+static char    *cipher  = (char *)0;
 
 /* Forwards. */
-static void usage(void);
-static void read_url_file(char *url_file);
-static void lookup_address(int url_num);
-static void read_sip_file(char *sip_file);
-static void start_connection(struct timeval *nowP);
-static void start_socket(int url_num, int cnum, struct timeval *nowP);
-static void handle_connect(int cnum, struct timeval *nowP, int double_check);
-static void handle_read(int cnum, struct timeval *nowP);
-static void idle_connection(ClientData client_data, struct timeval *nowP);
-static void wakeup_connection(ClientData client_data, struct timeval *nowP);
-static void close_connection(int cnum);
-static void progress_report(ClientData client_data, struct timeval *nowP);
-static void start_timer(ClientData client_data, struct timeval *nowP);
-static void end_timer(ClientData client_data, struct timeval *nowP);
-static void finish(struct timeval *nowP);
+static void      usage(void);
+static void      read_url_file(char *url_file);
+static void      lookup_address(int url_num);
+static void      read_sip_file(char *sip_file);
+static void      start_connection(struct timeval *nowP);
+static void      start_socket(int url_num, int cnum, struct timeval *nowP);
+static void      handle_connect(int cnum, struct timeval *nowP, int double_check);
+static void      handle_read(int cnum, struct timeval *nowP);
+static void      idle_connection(ClientData client_data, struct timeval *nowP);
+static void      wakeup_connection(ClientData client_data, struct timeval *nowP);
+static void      close_connection(int cnum);
+static void      progress_report(ClientData client_data, struct timeval *nowP);
+static void      start_timer(ClientData client_data, struct timeval *nowP);
+static void      end_timer(ClientData client_data, struct timeval *nowP);
+static void      finish(struct timeval *nowP);
 static long long delta_timeval(struct timeval *start, struct timeval *finish);
-static void *malloc_check(size_t size);
-static void *realloc_check(void *ptr, size_t size);
-static char *strdup_check(char *str);
-static void check(void *ptr);
+static void     *malloc_check(size_t size);
+static void     *realloc_check(void *ptr, size_t size);
+static char     *strdup_check(char *str);
+static void      check(void *ptr);
 
 int
 main(int argc, char **argv)
 {
   int argn;
   int start;
-#define START_NONE 0
+#define START_NONE     0
 #define START_PARALLEL 1
-#define START_RATE 2
+#define START_RATE     2
   int start_parallel = -1, start_rate = -1;
   int end;
-#define END_NONE 0
+#define END_NONE    0
 #define END_FETCHES 1
 #define END_SECONDS 2
-  int end_fetches = -1, end_seconds = -1;
-  int cnum;
+  int   end_fetches = -1, end_seconds = -1;
+  int   cnum;
   char *url_file;
   char *sip_file;
 #ifdef RLIMIT_NOFILE
   struct rlimit limits;
 #endif /* RLIMIT_NOFILE */
   struct epoll_event *events;
-  struct timeval now;
-  int i, r, periodic_tmr;
+  struct timeval      now;
+  int                 i, r, periodic_tmr;
 
   max_connections = 64 - RESERVED_FDS; /* a guess */
 #ifdef RLIMIT_NOFILE
@@ -625,12 +625,12 @@ usage(void)
 static void
 read_url_file(char *url_file)
 {
-  char line[5000], hostname[5000];
-  char *http    = "http://";
-  int http_len  = strlen(http);
-  char *https   = "https://";
-  int https_len = strlen(https);
-  int proto_len, host_len;
+  char  line[5000], hostname[5000];
+  char *http      = "http://";
+  int   http_len  = strlen(http);
+  char *https     = "https://";
+  int   https_len = strlen(https);
+  int   proto_len, host_len;
   char *cp;
 
   FILE *fp = fopen(url_file, "r");
@@ -648,23 +648,48 @@ read_url_file(char *url_file)
      constructed by the URL host and possibly port (if not port 80) */
 
   char hdr_buf[2048];
-  int hdr_bytes = 0;
-  hdr_bytes += snprintf(&hdr_buf[hdr_bytes], sizeof(hdr_buf) - hdr_bytes, "User-Agent: %s\r\n", user_agent);
-  if (cookie)
-    hdr_bytes += snprintf(&hdr_buf[hdr_bytes], sizeof(hdr_buf) - hdr_bytes, "Cookie: %s\r\n", cookie);
-  if (do_accept_gzip)
-    hdr_bytes += snprintf(&hdr_buf[hdr_bytes], sizeof(hdr_buf) - hdr_bytes, "Accept-Encoding: gzip\r\n");
-  /* Add Connection: keep-alive header if keep_alive requested, and version != "1.1" */
-  if ((keep_alive > 0) && !is_http_1_1)
-    hdr_bytes += snprintf(&hdr_buf[hdr_bytes], sizeof(hdr_buf) - hdr_bytes, "Connection: keep-alive\r\n");
-  if (extra_headers != NULL) {
-    hdr_bytes += snprintf(&hdr_buf[hdr_bytes], sizeof(hdr_buf) - hdr_bytes, "%s\r\n", extra_headers);
+  int  hdr_bytes = 0;
+  int  n;
+
+  n = snprintf(&hdr_buf[hdr_bytes], sizeof(hdr_buf) - hdr_bytes, "User-Agent: %s\r\n", user_agent);
+  if (n > 0 && (size_t)n < sizeof(hdr_buf) - hdr_bytes) {
+    hdr_bytes += n;
   }
+
+  if (cookie) {
+    n = snprintf(&hdr_buf[hdr_bytes], sizeof(hdr_buf) - hdr_bytes, "Cookie: %s\r\n", cookie);
+    if (n > 0 && (size_t)n < sizeof(hdr_buf) - hdr_bytes) {
+      hdr_bytes += n;
+    }
+  }
+
+  if (do_accept_gzip) {
+    n = snprintf(&hdr_buf[hdr_bytes], sizeof(hdr_buf) - hdr_bytes, "Accept-Encoding: gzip\r\n");
+    if (n > 0 && (size_t)n < sizeof(hdr_buf) - hdr_bytes) {
+      hdr_bytes += n;
+    }
+  }
+
+  /* Add Connection: keep-alive header if keep_alive requested, and version != "1.1" */
+  if ((keep_alive > 0) && !is_http_1_1) {
+    n = snprintf(&hdr_buf[hdr_bytes], sizeof(hdr_buf) - hdr_bytes, "Connection: keep-alive\r\n");
+    if (n > 0 && (size_t)n < sizeof(hdr_buf) - hdr_bytes) {
+      hdr_bytes += n;
+    }
+  }
+
+  if (extra_headers != NULL) {
+    n = snprintf(&hdr_buf[hdr_bytes], sizeof(hdr_buf) - hdr_bytes, "%s\r\n", extra_headers);
+    if (n > 0 && (size_t)n < sizeof(hdr_buf) - hdr_bytes) {
+      hdr_bytes += n;
+    }
+  }
+
   snprintf(&hdr_buf[hdr_bytes], sizeof(hdr_buf) - hdr_bytes, "\r\n");
 
   while (fgets(line, sizeof(line), fp) != (char *)0) {
     char req_buf[2048];
-    int req_bytes = 0;
+    int  req_bytes = 0;
 
     /* Nuke trailing newline. */
     if (line[strlen(line) - 1] == '\n')
@@ -673,7 +698,7 @@ read_url_file(char *url_file)
     /* Check for room in urls. */
     if (num_urls >= max_urls) {
       max_urls *= 2;
-      urls = (url *)realloc_check((void *)urls, max_urls * sizeof(url));
+      urls      = (url *)realloc_check((void *)urls, max_urls * sizeof(url));
     }
 
     /* Add to table. */
@@ -692,7 +717,7 @@ read_url_file(char *url_file)
     }
     for (cp = line + proto_len; *cp != '\0' && *cp != ':' && *cp != '/'; ++cp)
       ;
-    host_len = cp - line;
+    host_len  = cp - line;
     host_len -= proto_len;
     strncpy(hostname, line + proto_len, host_len);
     hostname[host_len]      = '\0';
@@ -725,20 +750,36 @@ read_url_file(char *url_file)
       req_bytes = snprintf(req_buf, sizeof(req_buf), "GET %.500s HTTP/%s\r\n", urls[num_urls].filename, http_version);
 
     if (extra_headers == NULL || !strstr(extra_headers, "Host:")) {
-      if (urls[num_urls].port != 80)
-        req_bytes += snprintf(&req_buf[req_bytes], sizeof(req_buf) - req_bytes, "Host: %s:%d\r\n", urls[num_urls].hostname,
-                              urls[num_urls].port);
-      else
-        req_bytes += snprintf(&req_buf[req_bytes], sizeof(req_buf) - req_bytes, "Host: %s\r\n", urls[num_urls].hostname);
+      if (urls[num_urls].port != 80) {
+        n = snprintf(&req_buf[req_bytes], sizeof(req_buf) - req_bytes, "Host: %s:%d\r\n", urls[num_urls].hostname,
+                     urls[num_urls].port);
+        if (n > 0 && (size_t)n < sizeof(req_buf) - req_bytes) {
+          req_bytes += n;
+        }
+      } else {
+        n = snprintf(&req_buf[req_bytes], sizeof(req_buf) - req_bytes, "Host: %s\r\n", urls[num_urls].hostname);
+        if (n > 0 && (size_t)n < sizeof(req_buf) - req_bytes) {
+          req_bytes += n;
+        }
+      }
     }
     if (unique_id == 1) {
-      req_bytes += snprintf(&req_buf[req_bytes], sizeof(req_buf) - req_bytes, "X-ID: ");
-      urls[num_urls].unique_id_offset = req_bytes;
-      req_bytes += snprintf(&req_buf[req_bytes], sizeof(req_buf) - req_bytes, "%09u\r\n", 0);
+      n = snprintf(&req_buf[req_bytes], sizeof(req_buf) - req_bytes, "X-ID: ");
+      if (n > 0 && (size_t)n < sizeof(req_buf) - req_bytes) {
+        req_bytes                       += n;
+        urls[num_urls].unique_id_offset  = req_bytes;
+        n                                = snprintf(&req_buf[req_bytes], sizeof(req_buf) - req_bytes, "%09u\r\n", 0);
+        if (n > 0 && (size_t)n < sizeof(req_buf) - req_bytes) {
+          req_bytes += n;
+        }
+      }
     }
 
     // add the common hdr here
-    req_bytes += snprintf(&req_buf[req_bytes], sizeof(req_buf) - req_bytes, hdr_buf, 0);
+    n = snprintf(&req_buf[req_bytes], sizeof(req_buf) - req_bytes, hdr_buf, 0);
+    if (n > 0 && (size_t)n < sizeof(req_buf) - req_bytes) {
+      req_bytes += n;
+    }
 
     urls[num_urls].buf_bytes = req_bytes;
     urls[num_urls].buf       = strdup_check(req_buf);
@@ -759,13 +800,13 @@ lookup_address(int url_num)
     urls[url_num].sa            = urls[url_num - 1].sa;
     return;
   }
-  int i;
-  char *hostname;
+  int            i;
+  char          *hostname;
   unsigned short port;
 #ifdef USE_IPV6
-  struct addrinfo hints;
-  char portstr[10];
-  int gaierr;
+  struct addrinfo  hints;
+  char             portstr[10];
+  int              gaierr;
   struct addrinfo *ai;
   struct addrinfo *ai2;
   struct addrinfo *aiv4;
@@ -880,7 +921,7 @@ static void
 read_sip_file(char *sip_file)
 {
   FILE *fp;
-  char line[5000];
+  char  line[5000];
 
   fp = fopen(sip_file, "r");
   if (fp == (FILE *)0) {
@@ -899,7 +940,7 @@ read_sip_file(char *sip_file)
     /* Check for room in sips. */
     if (num_sips >= max_sips) {
       max_sips *= 2;
-      sips = (sip *)realloc_check((void *)sips, max_sips * sizeof(sip));
+      sips      = (sip *)realloc_check((void *)sips, max_sips * sizeof(sip));
     }
 
     /* Add to table. */
@@ -917,7 +958,7 @@ read_sip_file(char *sip_file)
 static void
 start_connection(struct timeval *nowP)
 {
-  int cnum, url_num;
+  int        cnum, url_num;
   static int cycle_slot = 0;
 
   /* Find an empty connection slot. */
@@ -992,9 +1033,9 @@ static void
 start_socket(int url_num, int cnum, struct timeval *nowP)
 {
   ClientData client_data;
-  int flags;
-  int sip_num;
-  int reusable = connections[cnum].reusable;
+  int        flags;
+  int        sip_num;
+  int        reusable = connections[cnum].reusable;
 
   /* Start filling in the connection slot. */
   connections[cnum].url_num        = url_num;
@@ -1118,9 +1159,9 @@ cert_verify_callback(int ok __attribute__((unused)), X509_STORE_CTX *ctx __attri
 static void
 handle_connect(int cnum, struct timeval *nowP, int double_check)
 {
-  static int connect_failures = 0;
-  int url_num;
-  int r;
+  static int         connect_failures = 0;
+  int                url_num;
+  int                r;
   struct epoll_event ev;
 
 #ifdef DEBUG
@@ -1241,11 +1282,11 @@ handle_connect(int cnum, struct timeval *nowP, int double_check)
 static void
 handle_read(int cnum, struct timeval *nowP)
 {
-  char buf[30000]; /* must be larger than throttle / 2 */
-  int bytes_to_read, bytes_read, bytes_handled;
-  float elapsed;
+  char       buf[30000]; /* must be larger than throttle / 2 */
+  int        bytes_to_read, bytes_read, bytes_handled;
+  float      elapsed;
   ClientData client_data;
-  long checksum;
+  long       checksum;
 
   tmr_reset(nowP, connections[cnum].idle_timer);
 
@@ -2769,10 +2810,10 @@ handle_read(int cnum, struct timeval *nowP)
 static void
 idle_connection(ClientData client_data, struct timeval *nowP __attribute__((unused)))
 {
-  int cnum;
+  int            cnum;
   struct timeval tv;
-  char strTime[32];
-  struct tm localtv;
+  char           strTime[32];
+  struct tm      localtv;
   gettimeofday(&tv, NULL);
   strftime(strTime, 32, "%T", localtime_r(&tv.tv_sec, &localtv));
 
@@ -2835,8 +2876,8 @@ close_connection(int cnum)
                 connect_usecs = max_connect_usecs;
     */
     total_connect_usecs += connect_usecs;
-    max_connect_usecs = max(max_connect_usecs, connect_usecs);
-    min_connect_usecs = min(min_connect_usecs, connect_usecs);
+    max_connect_usecs    = max(max_connect_usecs, connect_usecs);
+    min_connect_usecs    = min(min_connect_usecs, connect_usecs);
     ++connects_completed;
   }
   if (connections[cnum].did_response) {
@@ -2846,8 +2887,8 @@ close_connection(int cnum)
                 response_usecs = max_response_usecs;
     */
     total_response_usecs += response_usecs;
-    max_response_usecs = max(max_response_usecs, response_usecs);
-    min_response_usecs = min(min_response_usecs, response_usecs);
+    max_response_usecs    = max(max_response_usecs, response_usecs);
+    min_response_usecs    = min(min_response_usecs, response_usecs);
     ++responses_completed;
   }
   if (connections[cnum].http_status >= 0 && connections[cnum].http_status <= 999) {
@@ -2914,7 +2955,7 @@ static void
 finish(struct timeval *nowP)
 {
   float elapsed;
-  int i;
+  int   i;
 
   /* Report statistics. */
   elapsed = delta_timeval(&start_at, nowP) / 1000000.0;

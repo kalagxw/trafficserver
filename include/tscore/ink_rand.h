@@ -2,7 +2,7 @@
 
   Mersenne Twister declarations adapted for Traffic Server
 
-  @section license License
+  @par License
 
    A C-program for MT19937-64 (2004/9/29 version).
    Coded by Takuji Nishimura and Makoto Matsumoto.
@@ -68,17 +68,17 @@ class InkRand
 public:
   InkRand(uint64_t d);
 
-  void seed(uint64_t d);
+  void     seed(uint64_t d);
   uint64_t random();
-  double drandom();
+  double   drandom();
 
 private:
   uint64_t mt[312];
-  int mti;
+  int      mti;
 };
 
 inline int
 ink_rand_r(uint32_t *p)
 {
-  return (((*p) = (*p) * 1103515245 + 12345) % ((uint32_t)0x7fffffff + 1));
+  return (((*p) = (*p) * 1103515245 + 12345) % (static_cast<uint32_t>(0x7fffffff) + 1));
 }

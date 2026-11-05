@@ -33,15 +33,15 @@ namespace atscppapi
  */
 struct ResponseState : noncopyable {
   TSMBuffer hdr_buf_ = nullptr;
-  TSMLoc hdr_loc_    = nullptr;
-  Headers headers_;
+  TSMLoc    hdr_loc_ = nullptr;
+  Headers   headers_;
   ResponseState() = default;
 };
 } // namespace atscppapi
 
 Response::Response()
 {
-  state_ = new ResponseState();
+  state_ = std::make_unique<ResponseState>();
   //  state_->headers_.setType(Headers::TYPE_RESPONSE);
 }
 
@@ -105,7 +105,7 @@ Response::getReasonPhrase() const
 {
   string ret_str;
   if (state_->hdr_buf_ && state_->hdr_loc_) {
-    int length;
+    int         length;
     const char *str = TSHttpHdrReasonGet(state_->hdr_buf_, state_->hdr_loc_, &length);
     if (str && length) {
       ret_str.assign(str, length);
@@ -135,7 +135,4 @@ Response::getHeaders() const
   return state_->headers_; // if not initialized, we will just return an empty object
 }
 
-Response::~Response()
-{
-  delete state_;
-}
+Response::~Response() {}

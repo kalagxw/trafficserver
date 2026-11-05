@@ -2,7 +2,7 @@
 
   POSIX Capability related utilities.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -28,8 +28,10 @@
 
 #include "tscore/ink_mutex.h"
 
+class DbgCtl;
+
 /// Generate a debug message with the current capabilities for the process.
-extern void DebugCapabilities(const char *tag ///< Debug message tag.
+extern void DebugCapabilities(DbgCtl &dbg_ctl ///< Debug message control.
 );
 /// Set capabilities to persist across change of user id.
 /// @return true on success
@@ -75,13 +77,13 @@ void ImpersonateUserID(uid_t user, ImpersonationLevel level);
 class ElevateAccess
 {
 public:
-  typedef enum {
+  using privilege_level = enum {
     FILE_PRIVILEGE     = 0x1u, ///< Access filesystem objects with privilege
     TRACE_PRIVILEGE    = 0x2u, ///< Trace other processes with privilege
     LOW_PORT_PRIVILEGE = 0x4u, ///< Bind to privilege ports.
-    OWNER_PRIVILEGE    = 0x8u  ///< Bypass permission checks on operations that normally require
-                               ///  filesystem UID & process UID to match
-  } privilege_level;
+    OWNER_PRIVILEGE    = 0x8u, ///< Owner-only operations on unowned files (CAP_FOWNER)
+    CHOWN_PRIVILEGE    = 0x10u ///< Change file ownership
+  };
 
   ElevateAccess(unsigned level = FILE_PRIVILEGE);
   ~ElevateAccess();
@@ -90,8 +92,8 @@ public:
   void demote();
 
 private:
-  bool elevated = false;
-  uid_t saved_uid;
+  bool     elevated = false;
+  uid_t    saved_uid;
   unsigned level;
 
   /// Acquire the privileges marked in @a mask for this process.

@@ -38,6 +38,9 @@ JA3 is available `here <https://github.com/salesforce/ja3>`__.
 The calculated JA3 fingerprints are then appended to upstream request in the field ``X-JA3-Sig``
 (to be processed at upstream). If multiple duplicates exist for the field name, it will append to the last
 occurrence; if none exists, it will add such a field to the headers. The signatures can also be logged locally.
+To help identify what proxy is adding what signature when there are multiple proxies in a chain, the plugin
+also adds a ``x-ja3-via`` header with a ``;`` separated list of :ts:cv:`proxy.config.proxy_name` values for
+each proxy in the chain that adds a signature.
 
 Plugin Configuration
 ====================
@@ -55,11 +58,36 @@ or :file:`remap.config`.
 
 .. option:: --ja3log
 
-
    This option enables logging to the file ``ja3_fingerprint.log`` in the standard logging
    directory. The format is ::
 
       [time] [client IP] [JA3 string] [JA3 hash]
+
+   By default this is not enabled.
+
+.. option:: --modify-incoming
+
+   As described above, typically, the ``X-JA3-Sig`` header is added to the request as it is sent
+   upstream so that any upstream hosts can make use of it.  The ``--modify-incoming`` option
+   instructs the plugin to add the ``X-JA3-Sig`` header field earlier on the incoming request so
+   that other plugins can make use of it while processing the request. To be precise,
+   ``--modify-incoming`` adds the ``X-JA3-Sig`` header field in the
+   ``TS_HTTP_READ_REQUEST_HDR_HOOK`` hook rather than the default ``TS_HTTP_SEND_REQUEST_HDR_HOOK``
+   hook.
+
+   This option is only useful when the plugin is configured as a global plugin. By default this
+   is not enabled.
+
+.. option:: --preserve
+
+   There may be situations in a network where there are multiple proxies handling the same requests.
+   In these situations, each proxy may be configured to add ja* header fields. By default, |TS| will
+   append the ``;`` separated signature values to the already existing header fields characteristic
+   of the client-side connection for the given proxy in the chain. However, it may be that only the
+   signatures for the proxy closest to the client are interesting for fingerprinting and no other
+   signatures are desired to be appended to the fields. In these situations, this option causes the
+   plugin to inspect the request to see whether the ja header field already exists, and, if so, no
+   further signatures are added to the field value.
 
    By default this is not enabled.
 

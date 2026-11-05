@@ -26,15 +26,13 @@
 #include <cstring>
 #include <cstdio>
 
-#define NEW_APIS 1
-
-typedef struct {
-  int TXN, SSN, VCONN, GLB;
+using ArgIndexes = struct {
+  int    TXN, SSN, VCONN, GLB;
   TSCont contp;
-} ArgIndexes;
+};
 
 const char *PLUGIN_NAME = "user_args_test";
-ArgIndexes gIX;
+ArgIndexes  gIX;
 
 bool
 set_header(TSMBuffer bufp, TSMLoc hdr_loc, const char *header, const char *val)
@@ -43,7 +41,7 @@ set_header(TSMBuffer bufp, TSMLoc hdr_loc, const char *header, const char *val)
     return false;
   }
 
-  bool ret         = false;
+  bool   ret       = false;
   TSMLoc field_loc = TSMimeHdrFieldFind(bufp, hdr_loc, header, strlen(header));
 
   TSReleaseAssert(!field_loc); // The headers are for testing, should never exist
@@ -59,21 +57,15 @@ set_header(TSMBuffer bufp, TSMLoc hdr_loc, const char *header, const char *val)
 }
 
 static int
-cont_global(TSCont contp, TSEvent event, void *edata)
+cont_global(TSCont /* contp ATS_UNUSED */, TSEvent /* event ATS_UNUSED */, void *edata)
 {
-  TSHttpTxn txnp = static_cast<TSHttpTxn>(edata);
-  TSHttpSsn ssnp = TSHttpTxnSsnGet(txnp);
-  TSVConn vconnp = TSHttpSsnClientVConnGet(ssnp);
+  TSHttpTxn txnp   = static_cast<TSHttpTxn>(edata);
+  TSHttpSsn ssnp   = TSHttpTxnSsnGet(txnp);
+  TSVConn   vconnp = TSHttpSsnClientVConnGet(ssnp);
 
-#if NEW_APIS
   TSUserArgSet(txnp, gIX.TXN, (void *)"Transaction Data");
   TSUserArgSet(ssnp, gIX.SSN, (void *)"Session Data");
   TSUserArgSet(vconnp, gIX.VCONN, (void *)"VConn Data");
-#else
-  TSHttpTxnArgSet(txnp, gIX.TXN, (void *)"Transaction Data");
-  TSHttpSsnArgSet(ssnp, gIX.SSN, (void *)"Session Data");
-  TSVConnArgSet(vconnp, gIX.VCONN, (void *)"VConn Data");
-#endif
 
   TSHttpTxnReenable(txnp, TS_EVENT_HTTP_CONTINUE);
 
@@ -81,26 +73,20 @@ cont_global(TSCont contp, TSEvent event, void *edata)
 }
 
 static int
-cont_remap(TSCont contp, TSEvent event, void *edata)
+cont_remap(TSCont contp, TSEvent /* event ATS_UNUSED */, void *edata)
 {
-  TSMBuffer bufp;
-  TSMLoc hdrs;
-  ArgIndexes *ix = static_cast<ArgIndexes *>(TSContDataGet(contp));
-  TSHttpTxn txnp = static_cast<TSHttpTxn>(edata);
-  TSHttpSsn ssnp = TSHttpTxnSsnGet(txnp);
-  TSVConn vconnp = TSHttpSsnClientVConnGet(ssnp);
+  TSMBuffer   bufp;
+  TSMLoc      hdrs;
+  ArgIndexes *ix     = static_cast<ArgIndexes *>(TSContDataGet(contp));
+  TSHttpTxn   txnp   = static_cast<TSHttpTxn>(edata);
+  TSHttpSsn   ssnp   = TSHttpTxnSsnGet(txnp);
+  TSVConn     vconnp = TSHttpSsnClientVConnGet(ssnp);
 
   if (TS_SUCCESS == TSHttpTxnClientRespGet(txnp, &bufp, &hdrs)) {
-#if NEW_APIS
     set_header(bufp, hdrs, "X-Arg-GLB", static_cast<const char *>(TSUserArgGet(nullptr, ix->GLB)));
     set_header(bufp, hdrs, "X-Arg-TXN", static_cast<const char *>(TSUserArgGet(txnp, ix->TXN)));
     set_header(bufp, hdrs, "X-Arg-SSN", static_cast<const char *>(TSUserArgGet(ssnp, ix->SSN)));
     set_header(bufp, hdrs, "X-Arg-VCONN", static_cast<const char *>(TSUserArgGet(vconnp, ix->VCONN)));
-#else
-    set_header(bufp, hdrs, "X-Arg-TXN", static_cast<const char *>(TSHttpTxnArgGet(txnp, ix->TXN)));
-    set_header(bufp, hdrs, "X-Arg-SSN", static_cast<const char *>(TSHttpSsnArgGet(ssnp, ix->SSN)));
-    set_header(bufp, hdrs, "X-Arg-VCONN", static_cast<const char *>(TSVConnArgGet(vconnp, ix->VCONN)));
-#endif
   }
 
   TSHttpTxnReenable(txnp, TS_EVENT_HTTP_CONTINUE);
@@ -110,7 +96,7 @@ cont_remap(TSCont contp, TSEvent event, void *edata)
 
 // Called by ATS as our initialization point
 void
-TSPluginInit(int argc, const char *argv[])
+TSPluginInit(int /* argc ATS_UNUSED */, const char ** /* argv ATS_UNUSED */)
 {
   TSPluginRegistrationInfo info;
   info.plugin_name   = const_cast<char *>("user_args");
@@ -120,7 +106,6 @@ TSPluginInit(int argc, const char *argv[])
     TSError("[%s] Plugin registration failed", PLUGIN_NAME);
   }
 
-#if NEW_APIS
   if (TS_SUCCESS != TSUserArgIndexReserve(TS_USER_ARGS_TXN, PLUGIN_NAME, "User args tests TXN", &gIX.TXN)) {
     TSError("[%s] Unable to initialize plugin (disabled). Failed to reserve TXN arg.", PLUGIN_NAME);
     return;
@@ -134,18 +119,6 @@ TSPluginInit(int argc, const char *argv[])
     TSError("[%s] Unable to initialize plugin (disabled). Failed to reserve GLB arg.", PLUGIN_NAME);
     return;
   }
-#else
-  if (TS_SUCCESS != TSHttpTxnArgIndexReserve(PLUGIN_NAME, "User args tests TXN", &gIX.TXN)) {
-    TSError("[%s] Unable to initialize plugin (disabled). Failed to reserve TXN arg.", PLUGIN_NAME);
-    return;
-  } else if (TS_SUCCESS != TSHttpSsnArgIndexReserve(PLUGIN_NAME, "User args tests SSN", &gIX.SSN)) {
-    TSError("[%s] Unable to initialize plugin (disabled). Failed to reserve SSN arg.", PLUGIN_NAME);
-    return;
-  } else if (TS_SUCCESS != TSVConnArgIndexReserve(PLUGIN_NAME, "User args tests VCONN", &gIX.VCONN)) {
-    TSError("[%s] Unable to initialize plugin (disabled). Failed to reserve VCONN arg.", PLUGIN_NAME);
-    return;
-  }
-#endif
 
   // Setup the global slot value
   TSUserArgSet(nullptr, gIX.GLB, (void *)"Global Data");
@@ -155,36 +128,24 @@ TSPluginInit(int argc, const char *argv[])
 }
 
 TSReturnCode
-TSRemapInit(TSRemapInterface *api_info, char *errbuf, int errbuf_size)
+TSRemapInit(TSRemapInterface *api_info, char * /* errbuf ATS_UNUSED */, int /* errbuf_size ATS_UNUSED */)
 {
-  if (!api_info) {
-    strncpy(errbuf, "[TSRemapInit] - Invalid TSRemapInterface argument", errbuf_size - 1);
-    return TS_ERROR;
-  }
-
-  if (api_info->size < sizeof(TSRemapInterface)) {
-    strncpy(errbuf, "[TSRemapInit] - Incorrect size of TSRemapInterface structure", errbuf_size - 1);
-    return TS_ERROR;
-  }
-
-  if (api_info->tsremap_version < TSREMAP_VERSION) {
-    snprintf(errbuf, errbuf_size, "[TSRemapInit] - Incorrect API version %ld.%ld", api_info->tsremap_version >> 16,
-             (api_info->tsremap_version & 0xffff));
-    return TS_ERROR;
-  }
+  TSReleaseAssert(api_info != nullptr);
+  TSReleaseAssert(api_info->size == sizeof(TSRemapInterface));
+  TSReleaseAssert(api_info->tsremap_version == TSREMAP_VERSION);
 
   return TS_SUCCESS;
 }
 
 TSReturnCode
-TSRemapNewInstance(int argc, char *argv[], void **ih, char * /* errbuf ATS_UNUSED */, int /* errbuf_size ATS_UNUSED */)
+TSRemapNewInstance(int /* argc ATS_UNUSED */, char ** /* argv ATS_UNUSED */, void **ih, char * /* errbuf ATS_UNUSED */,
+                   int /* errbuf_size ATS_UNUSED */)
 {
   ArgIndexes *ix = new ArgIndexes;
 
   ix->contp = TSContCreate(cont_remap, nullptr);
   TSContDataSet(ix->contp, static_cast<void *>(ix));
 
-#if NEW_APIS
   if (TS_SUCCESS != TSUserArgIndexNameLookup(TS_USER_ARGS_TXN, PLUGIN_NAME, &ix->TXN, nullptr)) {
     TSError("[%s] Failed to lookup TXN arg.", PLUGIN_NAME);
     return TS_ERROR;
@@ -198,18 +159,6 @@ TSRemapNewInstance(int argc, char *argv[], void **ih, char * /* errbuf ATS_UNUSE
     TSError("[%s] Failed to lookup GLB arg.", PLUGIN_NAME);
     return TS_ERROR;
   }
-#else
-  if (TS_SUCCESS != TSHttpTxnArgIndexNameLookup(PLUGIN_NAME, &ix->TXN, nullptr)) {
-    TSError("[%s] Failed to lookup TXN arg.", PLUGIN_NAME);
-    return TS_ERROR;
-  } else if (TS_SUCCESS != TSHttpSsnArgIndexNameLookup(PLUGIN_NAME, &ix->SSN, nullptr)) {
-    TSError("[%s] Failed to lookup SSN arg.", PLUGIN_NAME);
-    return TS_ERROR;
-  } else if (TS_SUCCESS != TSVConnArgIndexNameLookup(PLUGIN_NAME, &ix->VCONN, nullptr)) {
-    TSError("[%s] Failed to lookup VCONN arg.", PLUGIN_NAME);
-    return TS_ERROR;
-  }
-#endif
 
   *ih = static_cast<void *>(ix);
   return TS_SUCCESS;
@@ -225,12 +174,12 @@ TSRemapDeleteInstance(void *ih)
 }
 
 TSRemapStatus
-TSRemapDoRemap(void *ih, TSHttpTxn txnp, TSRemapRequestInfo *rri)
+TSRemapDoRemap(void *ih, TSHttpTxn txnp, TSRemapRequestInfo * /* rri ATS_UNUSED */)
 {
   ArgIndexes *ix = static_cast<ArgIndexes *>(ih);
 
   TSHttpTxnHookAdd(txnp, TS_HTTP_SEND_RESPONSE_HDR_HOOK, ix->contp);
-  TSHttpTxnStatusSet(txnp, TS_HTTP_STATUS_MOVED_TEMPORARILY);
+  TSHttpTxnStatusSet(txnp, TS_HTTP_STATUS_MOVED_TEMPORARILY, PLUGIN_NAME);
 
   return TSREMAP_DID_REMAP;
 }

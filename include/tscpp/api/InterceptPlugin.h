@@ -20,6 +20,8 @@
  * @file InterceptPlugin.h
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include <string>
@@ -94,7 +96,7 @@ protected:
   bool setOutputComplete();
 
 private:
-  State *state_;
+  State *state_{nullptr};
 
   bool doRead();
   void handleEvent(int, void *);

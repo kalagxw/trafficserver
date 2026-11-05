@@ -2,7 +2,7 @@
 
   Memory allocation routines for libts
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -20,6 +20,7 @@
   See the License for the specific language governing permissions and
   limitations under the License.
  */
+
 #include "tscore/ink_platform.h"
 #include "tscore/ink_memory.h"
 #include "tscore/ink_defs.h"
@@ -32,12 +33,12 @@
 #include <mimalloc-override.h>
 #endif
 
-#if !defined(kfreebsd) && defined(freebsd)
+#if __has_include(<malloc_np.h>)
 #include <malloc_np.h> // for malloc_usable_size
 #endif
 
 #include <cassert>
-#if defined(linux)
+#if defined(__linux__)
 // XXX: Shouldn't that be part of CPPFLAGS?
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 600
@@ -154,7 +155,7 @@ ats_msync(caddr_t addr, size_t len, caddr_t end, int flags)
   if ((a + l) > end) {
     l = end - a; // strict limit
   }
-#if defined(linux)
+#if defined(__linux__)
 /* Fix INKqa06500
    Under Linux, msync(..., MS_SYNC) calls are painfully slow, even on
    non-dirty buffers. This is true as of kernel 2.2.12. We sacrifice
@@ -185,14 +186,14 @@ ats_mlock(caddr_t addr, size_t len)
 {
   size_t pagesize = ats_pagesize();
 
-  caddr_t a = (caddr_t)(((uintptr_t)addr) & ~(pagesize - 1));
-  size_t l  = (len + (addr - a) + pagesize - 1) & ~(pagesize - 1);
-  int res   = mlock(a, l);
+  caddr_t a   = (caddr_t)(((uintptr_t)addr) & ~(pagesize - 1));
+  size_t  l   = (len + (addr - a) + pagesize - 1) & ~(pagesize - 1);
+  int     res = mlock(a, l);
   return res;
 }
 
 void *
-ats_track_malloc(size_t size, uint64_t *stat)
+ats_track_malloc(size_t size, [[maybe_unused]] uint64_t *stat)
 {
   void *ptr = ats_malloc(size);
 #ifdef HAVE_MALLOC_USABLE_SIZE
@@ -202,7 +203,7 @@ ats_track_malloc(size_t size, uint64_t *stat)
 }
 
 void *
-ats_track_realloc(void *ptr, size_t size, uint64_t *alloc_stat, uint64_t *free_stat)
+ats_track_realloc(void *ptr, size_t size, [[maybe_unused]] uint64_t *alloc_stat, [[maybe_unused]] uint64_t *free_stat)
 {
 #ifdef HAVE_MALLOC_USABLE_SIZE
   const size_t old_size = malloc_usable_size(ptr);
@@ -221,7 +222,7 @@ ats_track_realloc(void *ptr, size_t size, uint64_t *alloc_stat, uint64_t *free_s
 }
 
 void
-ats_track_free(void *ptr, uint64_t *stat)
+ats_track_free(void *ptr, [[maybe_unused]] uint64_t *stat)
 {
   if (ptr == nullptr) {
     return;

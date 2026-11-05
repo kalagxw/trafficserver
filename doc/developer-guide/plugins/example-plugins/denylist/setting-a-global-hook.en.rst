@@ -16,6 +16,7 @@
    under the License.
 
 .. include:: ../../../../common.defs
+.. default-domain:: cpp
 
 Setting a Global Hook
 *********************
@@ -23,7 +24,7 @@ Setting a Global Hook
 Global hooks are always added in ``TSPluginInit`` using
 ``TSHttpHookAdd``. The two arguments of ``TSHttpHookAdd`` are the hook
 ID and the continuation to call when processing the event corresponding
-to the hook. In ``denylist_1.c``, the global hook is added as follows:
+to the hook. In ``denylist_1.cc``, the global hook is added as follows:
 
 .. code-block:: c
 
@@ -33,6 +34,6 @@ Above, ``TS_HTTP_OS_DNS_HOOK`` is the ID for the origin server DNS
 lookup hook and ``contp`` is the parent continuation created earlier.
 
 This means that the Denylist plugin is called at every origin server
-DNS lookup. When it is called, the handler functio ``denylist_plugin``
-receives ``TS_EVENT_HTTP_OS_DNS`` and calls ``handle_dns`` to see if the
+DNS lookup. When it is called, the handler function ``denylist_plugin``
+receives :enumerator:`TS_EVENT_HTTP_OS_DNS` and calls ``handle_dns`` to see if the
 request is forbidden.

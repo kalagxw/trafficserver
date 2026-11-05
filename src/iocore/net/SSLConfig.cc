@@ -1,0 +1,1135 @@
+/** @file
+
+  A brief file description
+
+  @par License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+
+/*************************** -*- Mod: C++ -*- ******************************
+  SSLConfig.cc
+   Created On      : 07/20/2000
+
+   Description:
+   SSL Configurations
+ ****************************************************************************/
+
+#include "P_SSLCertLookup.h"
+#include "P_SSLClientUtils.h"
+#include "P_SSLConfig.h"
+#include "P_SSLUtils.h"
+#include "P_TLSKeyLogger.h"
+#include "SSLSessionCache.h"
+#include "iocore/net/SSLMultiCertConfigLoader.h"
+#include "iocore/net/SSLDiags.h"
+#include "iocore/net/TLSEarlyDataSupport.h"
+#include "iocore/net/YamlSNIConfig.h"
+#include "tscore/ink_config.h"
+#include "tscore/Layout.h"
+#include "records/RecHttp.h"
+#include "records/RecCore.h"
+#include "mgmt/config/ConfigContextDiags.h"
+#include "mgmt/config/ConfigRegistry.h"
+
+#include <cinttypes>
+#include <openssl/pem.h>
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <cmath>
+#include <thread>
+#include <unordered_map>
+
+int                SSLConfig::config_index                           = 0;
+int                SSLConfig::configids[]                            = {0, 0};
+int                SSLCertificateConfig::configid                    = 0;
+int                SSLTicketKeyConfig::configid                      = 0;
+int                SSLConfigParams::ssl_maxrecord                    = 0;
+int                SSLConfigParams::ssl_misc_max_iobuffer_size_index = 8;
+bool               SSLConfigParams::ssl_allow_client_renegotiation   = false;
+bool               SSLConfigParams::ssl_ocsp_enabled                 = false;
+int                SSLConfigParams::ssl_ocsp_cache_timeout           = 3600;
+bool               SSLConfigParams::ssl_ocsp_request_mode            = false;
+int                SSLConfigParams::ssl_ocsp_request_timeout         = 10;
+int                SSLConfigParams::ssl_ocsp_update_period           = 60;
+char              *SSLConfigParams::ssl_ocsp_user_agent              = nullptr;
+int                SSLConfigParams::ssl_handshake_timeout_in         = 0;
+int                SSLConfigParams::origin_session_cache             = 1;
+size_t             SSLConfigParams::origin_session_cache_size        = 10240;
+size_t             SSLConfigParams::origin_session_max_size          = SSLConfigParams::ORIGIN_SESSION_MAX_SIZE_DEFAULT;
+init_ssl_ctx_func  SSLConfigParams::init_ssl_ctx_cb                  = nullptr;
+load_ssl_file_func SSLConfigParams::load_ssl_file_cb                 = nullptr;
+swoc::IPRangeSet  *SSLConfigParams::proxy_protocol_ip_addrs          = nullptr;
+bool               SSLConfigParams::ssl_ktls_enabled                 = false;
+
+const uint32_t EARLY_DATA_DEFAULT_SIZE                         = 16384;
+uint32_t       SSLConfigParams::server_max_early_data          = 0;
+uint32_t       SSLConfigParams::server_recv_max_early_data     = EARLY_DATA_DEFAULT_SIZE;
+bool           SSLConfigParams::server_allow_early_data_params = false;
+
+int   SSLConfigParams::async_handshake_enabled = 0;
+char *SSLConfigParams::engine_conf_file        = nullptr;
+
+namespace
+{
+DbgCtl dbg_ctl_ssl_load{"ssl_load"};
+DbgCtl dbg_ctl_ssl_config_updateCTX{"ssl_config_updateCTX"};
+DbgCtl dbg_ctl_ssl_client_ctx{"ssl_client_ctx"};
+
+} // end anonymous namespace
+
+SSLConfigParams::SSLConfigParams()
+{
+  ink_mutex_init(&ctxMapLock);
+  reset();
+}
+
+SSLConfigParams::~SSLConfigParams()
+{
+  cleanup();
+  ink_mutex_destroy(&ctxMapLock);
+}
+
+void
+SSLConfigInit(swoc::IPRangeSet *global)
+{
+  SSLConfigParams::proxy_protocol_ip_addrs = global;
+}
+
+void
+SSLConfigParams::reset()
+{
+  serverCertPathOnly = serverCertChainFilename = configFilePath = serverCACertFilename = serverCACertPath = clientCertPath =
+    clientKeyPath = clientCACertFilename = clientCACertPath = cipherSuite = client_cipherSuite = dhparamsFile = serverKeyPathOnly =
+      clientKeyPathOnly = clientCertPathOnly = nullptr;
+  ssl_ocsp_response_path_only                = nullptr;
+  server_cert_compression_algorithms         = nullptr;
+  client_cert_compression_algorithms         = nullptr;
+  server_tls13_cipher_suites                 = nullptr;
+  client_tls13_cipher_suites                 = nullptr;
+  server_groups_list                         = nullptr;
+  client_groups_list                         = nullptr;
+  keylog_file                                = nullptr;
+  client_ctx                                 = nullptr;
+  clientCertLevel = client_verify_depth = verify_depth = 0;
+  verifyServerPolicy                                   = YamlSNIConfig::Policy::DISABLED;
+  verifyServerProperties                               = YamlSNIConfig::Property::NONE;
+  ssl_ctx_options                                      = SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3;
+  ssl_client_ctx_options                               = SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3;
+  configExitOnLoadError                                = 1;
+  configPartialReload                                  = 0;
+  configLoadConcurrency                                = 1;
+}
+
+void
+SSLConfigParams::cleanup()
+{
+  serverCertChainFilename = static_cast<char *>(ats_free_null(serverCertChainFilename));
+  serverCACertFilename    = static_cast<char *>(ats_free_null(serverCACertFilename));
+  serverCACertPath        = static_cast<char *>(ats_free_null(serverCACertPath));
+  clientCertPath          = static_cast<char *>(ats_free_null(clientCertPath));
+  clientCertPathOnly      = static_cast<char *>(ats_free_null(clientCertPathOnly));
+  clientKeyPath           = static_cast<char *>(ats_free_null(clientKeyPath));
+  clientKeyPathOnly       = static_cast<char *>(ats_free_null(clientKeyPathOnly));
+  clientCACertFilename    = static_cast<char *>(ats_free_null(clientCACertFilename));
+  clientCACertPath        = static_cast<char *>(ats_free_null(clientCACertPath));
+  configFilePath          = static_cast<char *>(ats_free_null(configFilePath));
+  serverCertPathOnly      = static_cast<char *>(ats_free_null(serverCertPathOnly));
+  serverKeyPathOnly       = static_cast<char *>(ats_free_null(serverKeyPathOnly));
+  cipherSuite             = static_cast<char *>(ats_free_null(cipherSuite));
+  client_cipherSuite      = static_cast<char *>(ats_free_null(client_cipherSuite));
+  dhparamsFile            = static_cast<char *>(ats_free_null(dhparamsFile));
+
+  ssl_ocsp_response_path_only = static_cast<char *>(ats_free_null(ssl_ocsp_response_path_only));
+
+  server_cert_compression_algorithms = static_cast<char *>(ats_free_null(server_cert_compression_algorithms));
+  client_cert_compression_algorithms = static_cast<char *>(ats_free_null(client_cert_compression_algorithms));
+  server_tls13_cipher_suites         = static_cast<char *>(ats_free_null(server_tls13_cipher_suites));
+  client_tls13_cipher_suites         = static_cast<char *>(ats_free_null(client_tls13_cipher_suites));
+  server_groups_list                 = static_cast<char *>(ats_free_null(server_groups_list));
+  client_groups_list                 = static_cast<char *>(ats_free_null(client_groups_list));
+  keylog_file                        = static_cast<char *>(ats_free_null(keylog_file));
+
+  cleanupCTXTable();
+  reset();
+}
+
+/**  set_paths_helper
+
+ If path is *not* absolute, consider it relative to PREFIX
+ if it's empty, just take SYSCONFDIR, otherwise we can take it as-is
+ if final_path is nullptr, it will not be updated.
+
+ XXX: Add handling for Windows?
+ */
+static void
+set_paths_helper(const char *path, const char *filename, char **final_path, char **final_filename)
+{
+  if (final_path) {
+    if (path && path[0] != '/') {
+      *final_path = ats_stringdup(Layout::get()->relative_to(Layout::get()->prefix, path));
+    } else if (!path || path[0] == '\0') {
+      *final_path = ats_stringdup(RecConfigReadConfigDir());
+    } else {
+      *final_path = ats_strdup(path);
+    }
+  }
+
+  if (final_filename && path) {
+    *final_filename = filename ? ats_stringdup(Layout::get()->relative_to(path, filename)) : nullptr;
+  }
+}
+
+int
+UpdateServerPolicy(const char * /* name ATS_UNUSED */, RecDataT /* data_type ATS_UNUSED */, RecData data,
+                   void * /* cookie ATS_UNUSED */)
+{
+  SSLConfigParams *params        = SSLConfig::acquire();
+  char            *verify_server = data.rec_string;
+  if (params != nullptr && verify_server != nullptr) {
+    Dbg(dbg_ctl_ssl_load, "New Server Policy %s", verify_server);
+    params->SetServerPolicy(verify_server);
+  } else {
+    Dbg(dbg_ctl_ssl_load, "Failed to load new Server Policy %p %p", verify_server, params);
+  }
+  return 0;
+}
+
+int
+UpdateServerPolicyProperties(const char * /* name ATS_UNUSED */, RecDataT /* data_type ATS_UNUSED */, RecData data,
+                             void * /* cookie ATS_UNUSED */)
+{
+  SSLConfigParams *params        = SSLConfig::acquire();
+  char            *verify_server = data.rec_string;
+  if (params != nullptr && verify_server != nullptr) {
+    params->SetServerPolicyProperties(verify_server);
+  }
+  return 0;
+}
+
+void
+SSLConfigParams::SetServerPolicyProperties(const char *verify_server)
+{
+  if (strcmp(verify_server, "SIGNATURE") == 0) {
+    verifyServerProperties = YamlSNIConfig::Property::SIGNATURE_MASK;
+  } else if (strcmp(verify_server, "NAME") == 0) {
+    verifyServerProperties = YamlSNIConfig::Property::NAME_MASK;
+  } else if (strcmp(verify_server, "ALL") == 0) {
+    verifyServerProperties = YamlSNIConfig::Property::ALL_MASK;
+  } else if (strcmp(verify_server, "NONE") == 0) {
+    verifyServerProperties = YamlSNIConfig::Property::NONE;
+  } else {
+    Warning("%s is invalid for proxy.config.ssl.client.verify.server.properties.  Should be one of ALL, SIGNATURE, NAME, or NONE. "
+            "Default is ALL",
+            verify_server);
+    verifyServerProperties = YamlSNIConfig::Property::NONE;
+  }
+}
+
+void
+SSLConfigParams::SetServerPolicy(const char *verify_server)
+{
+  if (strcmp(verify_server, "DISABLED") == 0) {
+    verifyServerPolicy = YamlSNIConfig::Policy::DISABLED;
+  } else if (strcmp(verify_server, "PERMISSIVE") == 0) {
+    verifyServerPolicy = YamlSNIConfig::Policy::PERMISSIVE;
+  } else if (strcmp(verify_server, "ENFORCED") == 0) {
+    verifyServerPolicy = YamlSNIConfig::Policy::ENFORCED;
+  } else {
+    Warning("%s is invalid for proxy.config.ssl.client.verify.server.policy.  Should be one of DISABLED, PERMISSIVE, or ENFORCED. "
+            "Default is DISABLED",
+            verify_server);
+    verifyServerPolicy = YamlSNIConfig::Policy::DISABLED;
+  }
+}
+
+void
+SSLConfigParams::initialize(ConfigContext ctx)
+{
+  cleanup();
+
+  //+++++++++++++++++++++++++ Server part +++++++++++++++++++++++++++++++++
+  verify_depth = 7;
+
+  clientCertLevel = RecGetRecordInt("proxy.config.ssl.client.certification_level").value_or(0);
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.server.cipher_suite")}; rec_str) {
+    cipherSuite = ats_stringdup(rec_str);
+  }
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.client.cipher_suite")}; rec_str) {
+    client_cipherSuite = ats_stringdup(rec_str);
+  }
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.server.TLSv1_3.cipher_suites")}; rec_str) {
+    server_tls13_cipher_suites = ats_stringdup(rec_str);
+  }
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.client.TLSv1_3.cipher_suites")}; rec_str) {
+    client_tls13_cipher_suites = ats_stringdup(rec_str);
+  }
+
+  dhparamsFile = ats_stringdup(RecConfigReadConfigPath("proxy.config.ssl.server.dhparams_file"));
+
+  int option = 0;
+
+  client_tls_ver_min = RecGetRecordInt("proxy.config.ssl.client.version.min").value_or(0);
+  client_tls_ver_max = RecGetRecordInt("proxy.config.ssl.client.version.max").value_or(0);
+  if (client_tls_ver_min < 0 || client_tls_ver_max < 0) {
+    option = RecGetRecordInt("proxy.config.ssl.client.TLSv1").value_or(0);
+    if (!option) {
+      ssl_client_ctx_options |= SSL_OP_NO_TLSv1;
+    } else {
+      // This is disabled by default. It's used if it's enabled.
+      Warning("proxy.config.ssl.client.TLSv1 is deprecated. Use proxy.config.ssl.client.version.min and "
+              "proxy.config.ssl.client.version.max instead.");
+    }
+
+    option = RecGetRecordInt("proxy.config.ssl.client.TLSv1_1").value_or(0);
+    if (!option) {
+      ssl_client_ctx_options |= SSL_OP_NO_TLSv1_1;
+    } else {
+      // This is disabled by default. It's used if it's enabled.
+      Warning("proxy.config.ssl.client.TLSv1_1 is deprecated. Use proxy.config.ssl.client.version.min and "
+              "proxy.config.ssl.client.version.max instead.");
+    }
+
+    option = RecGetRecordInt("proxy.config.ssl.client.TLSv1_2").value_or(0);
+    if (!option) {
+      ssl_client_ctx_options |= SSL_OP_NO_TLSv1_2;
+      // This is enabled by default. It's used if it's disabled.
+      Warning("proxy.config.ssl.client.TLSv1_2 is deprecated. Use proxy.config.ssl.client.version.min and "
+              "proxy.config.ssl.client.version.max instead.");
+    }
+
+#ifdef SSL_OP_NO_TLSv1_3
+    option = RecGetRecordInt("proxy.config.ssl.client.TLSv1_3.enabled").value_or(0);
+    if (!option) {
+      ssl_client_ctx_options |= SSL_OP_NO_TLSv1_3;
+      // This is enabled by default. It's used if it's disabled.
+      Warning("proxy.config.ssl.client.TLSv1_3.enabled is deprecated. Use proxy.config.ssl.client.version.min and "
+              "proxy.config.ssl.client.version.max instead.");
+    }
+#endif
+  }
+
+  server_tls_ver_min = RecGetRecordInt("proxy.config.ssl.server.version.min").value_or(0);
+  server_tls_ver_max = RecGetRecordInt("proxy.config.ssl.server.version.max").value_or(0);
+  if (server_tls_ver_min < 0 || server_tls_ver_max < 0) {
+    option = RecGetRecordInt("proxy.config.ssl.TLSv1").value_or(0);
+    if (!option) {
+      ssl_ctx_options |= SSL_OP_NO_TLSv1;
+    } else {
+      // This is disabled by default. It's used if it's enabled.
+      Warning("proxy.config.ssl.client.TLSv1 is deprecated. Use proxy.config.ssl.client.version.min and "
+              "proxy.config.ssl.client.version.max instead.");
+    }
+
+    option = RecGetRecordInt("proxy.config.ssl.TLSv1_1").value_or(0);
+    if (!option) {
+      ssl_ctx_options |= SSL_OP_NO_TLSv1_1;
+    } else {
+      // This is disabled by default. It's used if it's enabled.
+      Warning("proxy.config.ssl.client.TLSv1_1 is deprecated. Use proxy.config.ssl.client.version.min and "
+              "proxy.config.ssl.client.version.max instead.");
+    }
+
+    option = RecGetRecordInt("proxy.config.ssl.TLSv1_2").value_or(0);
+    if (!option) {
+      ssl_ctx_options |= SSL_OP_NO_TLSv1_2;
+      // This is enabled by default. It's used if it's disabled.
+      Warning("proxy.config.ssl.client.TLSv1_2 is deprecated. Use proxy.config.ssl.client.version.min and "
+              "proxy.config.ssl.client.version.max instead.");
+    }
+
+#ifdef SSL_OP_NO_TLSv1_3
+    option = RecGetRecordInt("proxy.config.ssl.TLSv1_3.enabled").value_or(0);
+    if (!option) {
+      ssl_ctx_options |= SSL_OP_NO_TLSv1_3;
+      // This is enabled by default. It's used if it's disabled.
+      Warning("proxy.config.ssl.client.TLSv1_3.enabled is deprecated. Use proxy.config.ssl.client.version.min and "
+              "proxy.config.ssl.client.version.max instead.");
+    }
+#endif
+  }
+
+  // Read in the protocol string for ALPN to origin
+  char *clientALPNProtocols = nullptr;
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.client.alpn_protocols")}; rec_str) {
+    clientALPNProtocols = ats_stringdup(rec_str);
+  }
+
+  if (clientALPNProtocols) {
+    this->alpn_protocols_array_size = MAX_ALPN_STRING;
+    convert_alpn_to_wire_format(clientALPNProtocols, this->alpn_protocols_array, this->alpn_protocols_array_size);
+    ats_free(clientALPNProtocols);
+  }
+
+#if defined(SSL_OP_SERVER_PREFERENCE) || defined(SSL_OP_CIPHER_SERVER_PREFERENCE)
+  option = RecGetRecordInt("proxy.config.ssl.server.honor_cipher_order").value_or(0);
+  if (option) {
+    // Prefer the newer, more accurately named flag when available.
+#ifdef SSL_OP_SERVER_PREFERENCE
+    ssl_ctx_options |= SSL_OP_SERVER_PREFERENCE;
+#else
+    ssl_ctx_options |= SSL_OP_CIPHER_SERVER_PREFERENCE;
+#endif
+  }
+#endif // defined(SSL_OP_SERVER_PREFERENCE) || defined(SSL_OP_CIPHER_SERVER_PREFERENCE)
+
+#ifdef SSL_OP_PRIORITIZE_CHACHA
+  option = RecGetRecordInt("proxy.config.ssl.server.prioritize_chacha").value_or(0);
+  if (option) {
+    ssl_ctx_options |= SSL_OP_PRIORITIZE_CHACHA;
+  }
+#endif
+
+#ifdef SSL_OP_NO_COMPRESSION
+  ssl_ctx_options        |= SSL_OP_NO_COMPRESSION;
+  ssl_client_ctx_options |= SSL_OP_NO_COMPRESSION;
+#else
+  sk_SSL_COMP_zero(SSL_COMP_get_compression_methods());
+#endif
+
+// Enable ephemeral DH parameters for the case where we use a cipher with DH forward security.
+#ifdef SSL_OP_SINGLE_DH_USE
+  ssl_ctx_options        |= SSL_OP_SINGLE_DH_USE;
+  ssl_client_ctx_options |= SSL_OP_SINGLE_DH_USE;
+#endif
+
+#ifdef SSL_OP_SINGLE_ECDH_USE
+  ssl_ctx_options        |= SSL_OP_SINGLE_ECDH_USE;
+  ssl_client_ctx_options |= SSL_OP_SINGLE_ECDH_USE;
+#endif
+
+  // Enable all SSL compatibility workarounds.
+  ssl_ctx_options        |= SSL_OP_ALL;
+  ssl_client_ctx_options |= SSL_OP_ALL;
+
+// According to OpenSSL source, applications must enable this if they support the Server Name extension. Since
+// we do, then we ought to enable this. Httpd also enables this unconditionally.
+#ifdef SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION
+  ssl_ctx_options        |= SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION;
+  ssl_client_ctx_options |= SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION;
+#endif
+
+  server_max_early_data          = RecGetRecordInt("proxy.config.ssl.server.max_early_data").value_or(0);
+  server_allow_early_data_params = RecGetRecordInt("proxy.config.ssl.server.allow_early_data_params").value_or(0);
+
+  // we keep it unless "server_max_early_data" is higher.
+  server_recv_max_early_data = std::max(server_max_early_data, TLSEarlyDataSupport::DEFAULT_MAX_EARLY_DATA_SIZE);
+
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.server.cert_chain.filename")}; rec_str) {
+    serverCertChainFilename = ats_stringdup(rec_str);
+  }
+
+  {
+    auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.server.cert.path")};
+    auto serverCertRelativePath{ats_as_c_str(rec_str)};
+    set_paths_helper(serverCertRelativePath, nullptr, &serverCertPathOnly, nullptr);
+  }
+
+  configFilePath        = ats_stringdup(RecConfigReadConfigPath("proxy.config.ssl.server.multicert.filename"));
+  configExitOnLoadError = RecGetRecordInt("proxy.config.ssl.server.multicert.exit_on_load_fail").value_or(0);
+  configPartialReload   = RecGetRecordInt("proxy.config.ssl.server.multicert.partial_reload").value_or(0);
+  configLoadConcurrency = RecGetRecordInt("proxy.config.ssl.server.multicert.concurrency").value_or(1);
+  if (configLoadConcurrency == 0) {
+    configLoadConcurrency = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 256);
+  }
+
+  {
+    auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.server.private_key.path")};
+    auto ssl_server_private_key_path{ats_as_c_str(rec_str)};
+    set_paths_helper(ssl_server_private_key_path, nullptr, &serverKeyPathOnly, nullptr);
+  }
+
+  {
+    auto pash_str{RecGetRecordStringAlloc("proxy.config.ssl.CA.cert.filename")};
+    auto ssl_server_ca_cert_filename{ats_as_c_str(pash_str)};
+    auto filename_str{RecGetRecordStringAlloc("proxy.config.ssl.CA.cert.path")};
+    auto CACertRelativePath{ats_as_c_str(filename_str)};
+    set_paths_helper(CACertRelativePath, ssl_server_ca_cert_filename, &serverCACertPath, &serverCACertFilename);
+
+    // Digested here, once per configuration load, so that the handshake path never reads the bundle.
+    // Both locations are covered, matching what _set_verify_path() hands to
+    // SSL_CTX_load_verify_locations(), so that retargeting either one retires the sessions it verified.
+    clientCADigest = digestClientCAScope(serverCACertFilename != nullptr ? serverCACertFilename : "",
+                                         serverCACertPath != nullptr ? serverCACertPath : "", clientCADigestFailed);
+  }
+
+  // SSL session cache configurations
+  ssl_origin_session_cache      = RecGetRecordInt("proxy.config.ssl.origin_session_cache.enabled").value_or(0);
+  ssl_origin_session_cache_size = RecGetRecordInt("proxy.config.ssl.origin_session_cache.size").value_or(0);
+  // The RECC_INT range on this record is applied when records.yaml is parsed, but
+  // initialize_record() registers a value from RecConfigOverrideFromEnvironment() without
+  // running the validity check -- so an environment override arrives here unbounded, and a
+  // negative one becomes an enormous size_t. The ceiling is the only thing keeping
+  // SSLSessionDup()'s serialization buffer inside the event thread stack, so enforce the
+  // range here rather than trusting the record layer to have done it.
+  {
+    int64_t configured = RecGetRecordInt("proxy.config.ssl.origin_session_cache.max_session_size")
+                           .value_or(static_cast<int64_t>(SSLConfigParams::ORIGIN_SESSION_MAX_SIZE_DEFAULT));
+    int64_t bounded = std::clamp(configured, static_cast<int64_t>(SSLConfigParams::ORIGIN_SESSION_MAX_SIZE_MIN),
+                                 static_cast<int64_t>(SSLConfigParams::ORIGIN_SESSION_MAX_SIZE_MAX));
+    if (bounded != configured) {
+      Warning("proxy.config.ssl.origin_session_cache.max_session_size of %" PRId64 " is outside [%zu-%zu], using %" PRId64,
+              configured, SSLConfigParams::ORIGIN_SESSION_MAX_SIZE_MIN, SSLConfigParams::ORIGIN_SESSION_MAX_SIZE_MAX, bounded);
+    }
+    ssl_origin_session_max_size = static_cast<size_t>(bounded);
+  }
+
+  SSLConfigParams::origin_session_cache      = ssl_origin_session_cache;
+  SSLConfigParams::origin_session_cache_size = ssl_origin_session_cache_size;
+  SSLConfigParams::origin_session_max_size   = ssl_origin_session_max_size;
+
+  if (ssl_origin_session_cache == 1 && ssl_origin_session_cache_size > 0 && origin_sess_cache == nullptr) {
+    origin_sess_cache = new SSLOriginSessionCache();
+  }
+
+  // SSL record size
+  RecEstablishStaticConfigInt32(ssl_maxrecord, "proxy.config.ssl.max_record_size");
+
+  // SSL OCSP Stapling configurations
+  ssl_ocsp_enabled = RecGetRecordInt("proxy.config.ssl.ocsp.enabled").value_or(0);
+  RecEstablishStaticConfigInt32(ssl_ocsp_cache_timeout, "proxy.config.ssl.ocsp.cache_timeout");
+  ssl_ocsp_request_mode = RecGetRecordInt("proxy.config.ssl.ocsp.request_mode").value_or(0);
+  RecEstablishStaticConfigInt32(ssl_ocsp_request_timeout, "proxy.config.ssl.ocsp.request_timeout");
+  RecEstablishStaticConfigInt32(ssl_ocsp_update_period, "proxy.config.ssl.ocsp.update_period");
+  {
+    auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.ocsp.response.path")};
+    auto ssl_ocsp_response_path{ats_as_c_str(rec_str)};
+    set_paths_helper(ssl_ocsp_response_path, nullptr, &ssl_ocsp_response_path_only, nullptr);
+  }
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.http.request_via_str")}; rec_str) {
+    ats_free(ssl_ocsp_user_agent);
+    ssl_ocsp_user_agent = ats_stringdup(rec_str);
+  }
+
+  ssl_handshake_timeout_in = RecGetRecordInt("proxy.config.ssl.handshake_timeout_in").value_or(0);
+
+  async_handshake_enabled = RecGetRecordInt("proxy.config.ssl.async.handshake.enabled").value_or(0);
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.engine.conf_file")}; rec_str) {
+    engine_conf_file = ats_stringdup(rec_str);
+  }
+
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.server.groups_list")}; rec_str) {
+    server_groups_list = ats_stringdup(rec_str);
+  }
+
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.server.cert_compression.algorithms")}; rec_str) {
+    server_cert_compression_algorithms = ats_stringdup(rec_str);
+  }
+  server_cert_compression_cache = RecGetRecordInt("proxy.config.ssl.server.cert_compression.cache").value_or(1);
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.client.cert_compression.algorithms")}; rec_str) {
+    client_cert_compression_algorithms = ats_stringdup(rec_str);
+  }
+
+  // ++++++++++++++++++++++++ Client part ++++++++++++++++++++
+  client_verify_depth = 7;
+
+  {
+    auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.client.verify.server.policy")};
+    auto verify_server_policy{ats_as_c_str(rec_str)};
+    this->SetServerPolicy(verify_server_policy);
+  }
+  RecRegisterConfigUpdateCb("proxy.config.ssl.client.verify.server.policy", UpdateServerPolicy, nullptr);
+
+  {
+    auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.client.verify.server.properties")};
+    auto verify_server_properties{ats_as_c_str(rec_str)};
+    this->SetServerPolicyProperties(verify_server_properties);
+  }
+
+  RecRegisterConfigUpdateCb("proxy.config.ssl.client.verify.server.properties", UpdateServerPolicyProperties, nullptr);
+
+  {
+    auto filename_str{RecGetRecordStringAlloc("proxy.config.ssl.client.cert.filename")};
+    auto ssl_client_cert_filename{ats_as_c_str(filename_str)};
+    auto path_str{RecGetRecordStringAlloc("proxy.config.ssl.client.cert.path")};
+    auto ssl_client_cert_path{ats_as_c_str(path_str)};
+    clientCertExitOnLoadError = RecGetRecordInt("proxy.config.ssl.client.cert.exit_on_load_fail").value_or(0);
+    set_paths_helper(ssl_client_cert_path, ssl_client_cert_filename, &clientCertPathOnly, &clientCertPath);
+  }
+
+  {
+    auto filename_str{RecGetRecordStringAlloc("proxy.config.ssl.client.private_key.filename")};
+    auto ssl_client_private_key_filename{ats_as_c_str(filename_str)};
+    auto path_str{RecGetRecordStringAlloc("proxy.config.ssl.client.private_key.path")};
+    auto ssl_client_private_key_path{ats_as_c_str(path_str)};
+    set_paths_helper(ssl_client_private_key_path, ssl_client_private_key_filename, &clientKeyPathOnly, &clientKeyPath);
+  }
+
+  {
+    auto filename_str{RecGetRecordStringAlloc("proxy.config.ssl.client.CA.cert.filename")};
+    auto ssl_client_ca_cert_filename{ats_as_c_str(filename_str)};
+    auto path_str{RecGetRecordStringAlloc("proxy.config.ssl.client.CA.cert.path")};
+    auto clientCACertRelativePath{ats_as_c_str(path_str)};
+    set_paths_helper(clientCACertRelativePath, ssl_client_ca_cert_filename, &clientCACertPath, &clientCACertFilename);
+  }
+
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.client.groups_list")}; rec_str) {
+    client_groups_list = ats_stringdup(rec_str);
+  }
+
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.keylog_file")}; rec_str) {
+    keylog_file = ats_stringdup(rec_str);
+  }
+  if (keylog_file == nullptr) {
+    TLSKeyLogger::disable_keylogging();
+  } else {
+    TLSKeyLogger::enable_keylogging(keylog_file);
+  }
+
+  ssl_ktls_enabled = RecGetRecordInt("proxy.config.ssl.ktls.enabled").value_or(0);
+#ifndef SSL_OP_ENABLE_KTLS
+  if (ssl_ktls_enabled) {
+    CfgLoadLog(ctx, DL_Error, "kTLS configured but not supported by OpenSSL library");
+  }
+#endif
+
+  ssl_allow_client_renegotiation = RecGetRecordInt("proxy.config.ssl.allow_client_renegotiation").value_or(0);
+
+  ssl_misc_max_iobuffer_size_index = RecGetRecordInt("proxy.config.ssl.misc.io.max_buffer_index").value_or(0);
+
+  // Enable client regardless of config file settings as remap file
+  // can cause HTTP layer to connect using SSL. But only if SSL
+  // initialization hasn't failed already.
+  client_ctx = this->getCTX(this->clientCertPath, this->clientKeyPath, this->clientCACertFilename, this->clientCACertPath);
+  if (client_ctx) {
+    return;
+  }
+  // Can't get SSL client context.
+  if (this->clientCertExitOnLoadError) {
+    Emergency("Can't initialize the SSL client, HTTPS in remap rules will not function");
+  } else {
+    SSLError("Can't initialize the SSL client, HTTPS in remap rules will not function");
+    ctx.log(DL_Warning, "Can't initialize the SSL client, HTTPS in remap rules will not function");
+  }
+}
+
+shared_SSL_CTX
+SSLConfigParams::getClientSSL_CTX() const
+{
+  return client_ctx;
+}
+
+int
+SSLConfig::get_config_index()
+{
+  return config_index;
+}
+
+int
+SSLConfig::get_loading_config_index()
+{
+  return config_index == 0 ? 1 : 0;
+}
+
+void
+SSLConfig::commit_config_id()
+{
+  // Update the active config index
+  config_index = get_loading_config_index();
+
+  if (configids[get_loading_config_index()] != 0) {
+    // Start draining to free the old config
+    configProcessor.set(configids[get_loading_config_index()], nullptr);
+  }
+}
+
+void
+SSLConfig::startup()
+{
+  reconfigure();
+}
+
+void
+SSLConfig::reconfigure(ConfigContext ctx)
+{
+  CfgLoadInProgress(ctx, "SSLConfig loading ...");
+
+  SSLConfigParams *params = new SSLConfigParams;
+  // start loading the next config
+  int loading_config_index = get_loading_config_index();
+
+  configids[loading_config_index] = configProcessor.set(configids[loading_config_index], params);
+  params->initialize(ctx); // re-read configuration
+  // Make the new config available for use.
+  commit_config_id();
+  ctx.complete("SSLConfig reloaded");
+}
+
+SSLConfigParams *
+SSLConfig::acquire()
+{
+  return static_cast<SSLConfigParams *>(configProcessor.get(configids[get_config_index()]));
+}
+
+SSLConfigParams *
+SSLConfig::load_acquire()
+{
+  return static_cast<SSLConfigParams *>(configProcessor.get(configids[get_loading_config_index()]));
+}
+
+void
+SSLConfig::release(SSLConfigParams *params)
+{
+  configProcessor.release(configids[get_config_index()], params);
+}
+
+void
+SSLConfig::load_release(SSLConfigParams *params)
+{
+  configProcessor.release(configids[get_loading_config_index()], params);
+}
+
+bool
+SSLCertificateConfig::startup()
+{
+  // Exit if there are problems on the certificate loading and the
+  // proxy.config.ssl.server.multicert.exit_on_load_fail is true
+  SSLConfig::scoped_config params;
+  if (!reconfigure() && params->configExitOnLoadError) {
+    Emergency("failed to load SSL certificate file, %s", params->configFilePath);
+  }
+
+  return true;
+}
+
+bool
+SSLCertificateConfig::reconfigure(ConfigContext ctx)
+{
+  bool                     retStatus = true;
+  SSLConfig::scoped_config params;
+  SSLCertLookup           *lookup = new SSLCertLookup();
+
+  CfgLoadInProgress(ctx, "(ssl) %s loading ...", params->configFilePath);
+
+  // Test SSL certificate loading startup. With large numbers of certificates, reloading can take time, so delay
+  // twice the healthcheck period to simulate a loading a large certificate set.
+  if (is_action_tag_set("test.multicert.delay")) {
+    const int secs = 60;
+    Dbg(dbg_ctl_ssl_load, "delaying certificate reload by %d secs", secs);
+    ink_hrtime_sleep(HRTIME_SECONDS(secs));
+  }
+
+  auto errata = SSLMultiCertConfigLoader(params).load(lookup, configid == 0);
+  if (!lookup->is_valid || (errata.has_severity() && errata.severity() >= ERRATA_ERROR)) {
+    retStatus = false;
+  }
+
+  // Use user_cert_count, not count(RSA|EC): load() guarantees a default context in ssl_storage
+  // (inserting a bare bootstrap when no wildcard cert loaded), so count() >= 1 even when
+  // all user certs fail, which would spuriously trigger a partial commit.
+  const bool hasAnyCert    = lookup->user_cert_count > 0;
+  const bool partialCommit = !retStatus && params->configPartialReload && hasAnyCert;
+  const bool initialLoad   = (configid == 0);
+  if (retStatus || initialLoad || partialCommit) {
+    configid = configProcessor.set(configid, lookup);
+    // Only flip retStatus on live reloads, startup must preserve false to honour configExitOnLoadError.
+    if (partialCommit && !initialLoad) {
+      CfgLoadLog(ctx, DL_Warning, "(ssl) %s: partial reload committed %u certificate entries; see diags.log for skipped entries",
+                 params->configFilePath, lookup->user_cert_count);
+      retStatus = true;
+    }
+  } else {
+    delete lookup;
+  }
+
+  if (!errata.empty()) {
+    ctx.log(errata);
+  }
+
+  if (retStatus) {
+    CfgLoadComplete(ctx, "(ssl) %s finished loading", params->configFilePath);
+  } else {
+    CfgLoadFail(ctx, "(ssl) %s failed to load", params->configFilePath);
+  }
+
+  return retStatus;
+}
+
+SSLCertLookup *
+SSLCertificateConfig::acquire()
+{
+  return static_cast<SSLCertLookup *>(configProcessor.get(configid));
+}
+
+void
+SSLCertificateConfig::release(SSLCertLookup *lookup)
+{
+  if (lookup == nullptr) {
+    return;
+  }
+  configProcessor.release(configid, lookup);
+}
+
+bool
+SSLTicketParams::LoadTicket(bool &nochange, ConfigContext ctx)
+{
+  cleanup();
+  nochange = true;
+
+#if TS_HAS_TLS_SESSION_TICKET
+  ssl_ticket_key_block *keyblock = nullptr;
+
+  SSLConfig::scoped_config params;
+  time_t                   last_load_time      = 0;
+  bool                     no_default_keyblock = true;
+
+  SSLTicketKeyConfig::scoped_config ticket_params;
+  if (ticket_params) {
+    last_load_time      = ticket_params->load_time;
+    no_default_keyblock = ticket_params->default_global_keyblock == nullptr;
+  }
+
+  // elevate/allow file access to root read only files/certs
+  uint32_t elevate_setting = 0;
+  elevate_setting          = RecGetRecordInt("proxy.config.ssl.cert.load_elevated").value_or(0);
+  ElevateAccess elevate_access(elevate_setting ? ElevateAccess::FILE_PRIVILEGE : 0); // destructor will demote for us
+
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.ssl.server.ticket_key.filename")};
+      rec_str && (ticket_key_filename = ats_stringdup(rec_str)) != nullptr) {
+    ats_scoped_str ticket_key_path(Layout::relative_to(params->serverCertPathOnly, ticket_key_filename));
+    // See if the file changed since we last loaded
+    struct stat sdata;
+    if (last_load_time && (stat(ticket_key_filename, &sdata) >= 0)) {
+      if (sdata.st_mtime && sdata.st_mtime <= last_load_time) {
+        Dbg(dbg_ctl_ssl_load, "ticket key %s has not changed", ticket_key_filename);
+        // No updates since last load
+        return true;
+      }
+    }
+    nochange = false;
+    keyblock = ssl_create_ticket_keyblock(ticket_key_path);
+    // Initialize if we don't have one yet
+  } else if (no_default_keyblock) {
+    nochange = false;
+    keyblock = ssl_create_ticket_keyblock(nullptr);
+  } else {
+    // No need to update.  Keep the previous ticket param
+    return true;
+  }
+  if (!keyblock) {
+    CfgLoadFail(ctx, "Could not load ticket key from %s", ticket_key_filename);
+    return false;
+  }
+  default_global_keyblock = keyblock;
+  load_time               = time(nullptr);
+
+  CfgLoadDbg(ctx, dbg_ctl_ssl_load, "ticket key reloaded from %s", ticket_key_filename);
+#endif
+  return true;
+}
+
+bool
+SSLTicketParams::LoadTicketData(char *ticket_data, int ticket_data_len)
+{
+  cleanup();
+#if TS_HAS_TLS_SESSION_TICKET
+  if (ticket_data != nullptr && ticket_data_len > 0) {
+    default_global_keyblock = ticket_block_create(ticket_data, ticket_data_len);
+  } else {
+    default_global_keyblock = ssl_create_ticket_keyblock(nullptr);
+  }
+  load_time = time(nullptr);
+
+  if (default_global_keyblock == nullptr) {
+    return false;
+  }
+#endif
+  return true;
+}
+
+void
+SSLTicketKeyConfig::startup()
+{
+  config::ConfigRegistry::Get_Instance().register_record_config("ssl_ticket_key",       // key
+                                                                [](ConfigContext ctx) { // handler callback
+                                                                  CfgLoadLog(ctx, DL_Note, "SSL ticket key loading ...");
+                                                                  if (SSLTicketKeyConfig::reconfigure(ctx)) {
+                                                                    ctx.complete("SSL ticket key reloaded");
+                                                                  } else {
+                                                                    ctx.fail("Failed to reload SSL ticket key");
+                                                                  }
+                                                                },
+                                                                {"proxy.config.ssl.server.ticket_key.filename"});
+
+  SSLConfig::scoped_config params;
+  if (!reconfigure() && params->configExitOnLoadError) {
+    Fatal("Failed to load SSL ticket key file");
+  }
+}
+
+bool
+SSLTicketKeyConfig::reconfigure(ConfigContext ctx)
+{
+  SSLTicketParams *ticketKey = new SSLTicketParams();
+
+  if (ticketKey) {
+    bool nochange = false;
+    if (!ticketKey->LoadTicket(nochange, ctx)) {
+      delete ticketKey;
+      return false;
+    }
+    // Nothing updated, leave the original configuration
+    if (nochange) {
+      delete ticketKey;
+      return true;
+    }
+  }
+  configid = configProcessor.set(configid, ticketKey);
+  return true;
+}
+
+bool
+SSLTicketKeyConfig::reconfigure_data(char *ticket_data, int ticket_data_len)
+{
+  SSLTicketParams *ticketKey = new SSLTicketParams();
+  if (ticketKey) {
+    if (ticketKey->LoadTicketData(ticket_data, ticket_data_len) == false) {
+      delete ticketKey;
+      return false;
+    }
+  }
+  configid = configProcessor.set(configid, ticketKey);
+  return true;
+}
+
+void
+SSLTicketParams::cleanup()
+{
+  ticket_block_free(default_global_keyblock);
+  ticket_key_filename = static_cast<char *>(ats_free_null(ticket_key_filename));
+}
+
+void
+cleanup_bio(BIO *&biop)
+{
+  // BIO_new_mem_buf sets BIO_FLAGS_MEM_RDONLY which prevents BIO_free from
+  // cleaning up internal BUF_MEM structures. Clear this flag so BIO_free
+  // properly releases them. BIO_NOCLOSE ensures the external data buffer
+  // (owned by the caller's std::string) is not freed.
+  BIO_clear_flags(biop, BIO_FLAGS_MEM_RDONLY);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-value"
+  BIO_set_close(biop, BIO_NOCLOSE);
+#pragma GCC diagnostic pop
+  BIO_free(biop);
+  biop = nullptr;
+}
+
+void
+SSLConfigParams::updateCTX(const std::string &cert_secret_name) const
+{
+  Dbg(dbg_ctl_ssl_config_updateCTX, "Update cert %s, %p", cert_secret_name.c_str(), this);
+
+  // Instances of SSLConfigParams should access by one thread at a time only.  secret_for_updateCTX is accessed
+  // atomically as a fail-safe.
+  //
+  char const *expected = nullptr;
+  if (!secret_for_updateCTX.compare_exchange_strong(expected, cert_secret_name.c_str())) {
+    if (dbg_ctl_ssl_config_updateCTX.on()) {
+      // As a fail-safe, handle it if secret_for_updateCTX doesn't or no longer points to a null-terminated string.
+      //
+      char const *s{expected};
+      for (; *s && (static_cast<std::size_t>(s - expected) < cert_secret_name.size()); ++s) {}
+      DbgPrint(dbg_ctl_ssl_config_updateCTX, "Update cert, indirect recursive call caused by call for %.*s",
+               static_cast<int>(s - expected), expected);
+    }
+    return;
+  }
+
+  // Clear the corresponding client CTXs.  They will be lazy loaded later
+  Dbg(dbg_ctl_ssl_load, "Update cert %s", cert_secret_name.c_str());
+  this->clearCTX(cert_secret_name);
+
+  // Update the server cert
+  SSLMultiCertConfigLoader loader(this);
+  loader.update_ssl_ctx(cert_secret_name);
+
+  secret_for_updateCTX = nullptr;
+}
+
+void
+SSLConfigParams::clearCTX(const std::string &client_cert) const
+{
+  ink_mutex_acquire(&ctxMapLock);
+  for (auto ctx_map_iter = top_level_ctx_map.begin(); ctx_map_iter != top_level_ctx_map.end(); ++ctx_map_iter) {
+    auto ctx_iter = ctx_map_iter->second.find(client_cert);
+    if (ctx_iter != ctx_map_iter->second.end()) {
+      ctx_iter->second = nullptr;
+      Dbg(dbg_ctl_ssl_load, "Clear client cert %s %s", ctx_map_iter->first.c_str(), ctx_iter->first.c_str());
+    }
+  }
+  ink_mutex_release(&ctxMapLock);
+}
+
+shared_SSL_CTX
+SSLConfigParams::getCTX(const char *client_cert, const char *key_file, const char *ca_bundle_file, const char *ca_bundle_path) const
+{
+  return this->getCTX(std::string(client_cert ? client_cert : ""), std::string(key_file ? key_file : ""), ca_bundle_file,
+                      ca_bundle_path);
+}
+
+shared_SSL_CTX
+SSLConfigParams::getCTX(const std::string &client_cert, const std::string &key_file, const char *ca_bundle_file,
+                        const char *ca_bundle_path) const
+{
+  shared_SSL_CTX client_ctx = nullptr;
+  std::string    top_level_key, ctx_key;
+  ctx_key = client_cert;
+  swoc::bwprint(top_level_key, "{}:{}", ca_bundle_file, ca_bundle_path);
+
+  Dbg(dbg_ctl_ssl_client_ctx, "Look for client cert \"%s\" \"%s\"", top_level_key.c_str(), ctx_key.c_str());
+
+  ink_mutex_acquire(&ctxMapLock);
+  auto ctx_map_iter = top_level_ctx_map.find(top_level_key);
+  if (ctx_map_iter != top_level_ctx_map.end()) {
+    auto ctx_iter = ctx_map_iter->second.find(ctx_key);
+    if (ctx_iter != ctx_map_iter->second.end()) {
+      client_ctx = ctx_iter->second;
+    }
+  }
+  ink_mutex_release(&ctxMapLock);
+
+  BIO      *biop = nullptr;
+  X509     *cert = nullptr;
+  EVP_PKEY *key  = nullptr;
+  // Create context if doesn't exists
+  if (!client_ctx) {
+    Dbg(dbg_ctl_ssl_client_ctx, "Load new cert for %s %s", top_level_key.c_str(), ctx_key.c_str());
+    client_ctx = shared_SSL_CTX(SSLInitClientContext(this), SSLReleaseContext);
+
+    // Upon configuration, elevate file access to be able to read root-only
+    // certificates. The destructor will drop privilege.
+    uint32_t elevate_setting = 0;
+    elevate_setting          = RecGetRecordInt("proxy.config.ssl.cert.load_elevated").value_or(0);
+    ElevateAccess elevate_access(elevate_setting ? ElevateAccess::FILE_PRIVILEGE : 0);
+    // Set public and private keys
+    if (!client_cert.empty()) {
+      std::string secret_data;
+      std::string secret_key_data;
+
+      // Fetch the client_cert data
+      std::string completeSecretPath{Layout::get()->relative_to(this->clientCertPathOnly, client_cert)};
+      std::string completeKeySecretPath{!key_file.empty() ? Layout::get()->relative_to(this->clientKeyPathOnly, key_file) : ""};
+      secrets.getOrLoadSecret(completeSecretPath, completeKeySecretPath, secret_data, secret_key_data);
+      if (secret_data.empty()) {
+        SSLError("failed to access cert %s", client_cert.c_str());
+        goto fail;
+      }
+
+      biop = BIO_new_mem_buf(secret_data.data(), secret_data.size());
+
+      cert = PEM_read_bio_X509(biop, nullptr, nullptr, nullptr);
+      if (!cert) {
+        SSLError("failed to load cert %s", client_cert.c_str());
+        goto fail;
+      }
+      if (!SSL_CTX_use_certificate(client_ctx.get(), cert)) {
+        SSLError("failed to attach client certificate from %s", client_cert.c_str());
+        goto fail;
+      }
+      X509_free(cert);
+
+      // Continue to fetch certs to associate intermediate certificates
+      cert = PEM_read_bio_X509(biop, nullptr, nullptr, nullptr);
+      while (cert) {
+        if (!SSL_CTX_add_extra_chain_cert(client_ctx.get(), cert)) {
+          SSLError("failed to attach client chain certificate from %s", client_cert.c_str());
+          goto fail;
+        }
+        // Do not free cert becasue SSL_CTX_add_extra_chain_cert takes ownership of cert if it succeeds, unlike
+        // SSL_CTX_use_certificate.
+        cert = PEM_read_bio_X509(biop, nullptr, nullptr, nullptr);
+      }
+
+      cleanup_bio(biop);
+
+      const std::string &key_file_name = (secret_key_data.empty()) ? client_cert : key_file;
+
+      // If there is a separate key file, fetch the new content
+      // otherwise, continue on with the cert data and hope for the best
+      if (!secret_key_data.empty()) {
+        biop = BIO_new_mem_buf(secret_key_data.data(), secret_key_data.size());
+      } else {
+        biop = BIO_new_mem_buf(secret_data.data(), secret_data.size());
+      }
+
+      pem_password_cb *password_cb = SSL_CTX_get_default_passwd_cb(client_ctx.get());
+      void            *u           = SSL_CTX_get_default_passwd_cb_userdata(client_ctx.get());
+      key                          = PEM_read_bio_PrivateKey(biop, nullptr, password_cb, u);
+      if (!key) {
+        SSLError("failed to load client private key file from %s", key_file_name.c_str());
+        goto fail;
+      }
+      if (!SSL_CTX_use_PrivateKey(client_ctx.get(), key)) {
+        SSLError("failed to use client private key file from %s", key_file_name.c_str());
+        goto fail;
+      }
+      EVP_PKEY_free(key);
+      key = nullptr;
+
+      if (!SSL_CTX_check_private_key(client_ctx.get())) {
+        SSLError("client private key (%s) does not match the certificate public key (%s)", key_file_name.c_str(),
+                 client_cert.c_str());
+        goto fail;
+      }
+      cleanup_bio(biop);
+    }
+
+    // Set CA information for verifying peer cert
+    if (ca_bundle_file != nullptr || ca_bundle_path != nullptr) {
+      if (!SSL_CTX_load_verify_locations(client_ctx.get(), ca_bundle_file, ca_bundle_path)) {
+        SSLError("invalid client CA Certificate file (%s) or CA Certificate path (%s)", ca_bundle_file, ca_bundle_path);
+        goto fail;
+      }
+    } else if (!SSL_CTX_set_default_verify_paths(client_ctx.get())) {
+      SSLError("failed to set the default verify paths");
+      goto fail;
+    }
+
+    // Try to update the context in mapping with lock acquired. If a valid context exists, return it without changing the structure.
+    ink_mutex_acquire(&ctxMapLock);
+    auto ctx_iter = top_level_ctx_map[top_level_key].find(ctx_key);
+    if (ctx_iter == top_level_ctx_map[top_level_key].end() || ctx_iter->second == nullptr) {
+      top_level_ctx_map[top_level_key][ctx_key] = client_ctx;
+    } else {
+      client_ctx = ctx_iter->second;
+    }
+    ink_mutex_release(&ctxMapLock);
+  }
+  return client_ctx;
+
+fail:
+  if (biop) {
+    cleanup_bio(biop);
+  }
+  if (cert) {
+    X509_free(cert);
+  }
+  if (key) {
+    EVP_PKEY_free(key);
+  }
+  return nullptr;
+}
+
+void
+SSLConfigParams::cleanupCTXTable()
+{
+  ink_mutex_acquire(&ctxMapLock);
+  top_level_ctx_map.clear();
+  ink_mutex_release(&ctxMapLock);
+}

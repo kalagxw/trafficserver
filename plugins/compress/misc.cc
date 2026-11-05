@@ -1,6 +1,6 @@
 /** @file
 
-  Transforms content using gzip, deflate or brotli
+  Transforms content using gzip, deflate, brotli or zstd
 
   @section license License
 
@@ -23,24 +23,12 @@
 
 #include "ts/ts.h"
 #include "tscore/ink_defs.h"
-#include "tscpp/util/TextView.h"
+#include "swoc/TextView.h"
 
 #include "misc.h"
 #include <cstring>
 #include <cinttypes>
 #include "debug_macros.h"
-
-voidpf
-gzip_alloc(voidpf /* opaque ATS_UNUSED */, uInt items, uInt size)
-{
-  return static_cast<voidpf>(TSmalloc(items * size));
-}
-
-void
-gzip_free(voidpf /* opaque ATS_UNUSED */, voidpf address)
-{
-  TSfree(address);
-}
 
 namespace
 {
@@ -48,19 +36,19 @@ namespace
 // zero.
 //
 void
-strip_ae_value(ts::TextView &value)
+strip_ae_value(swoc::TextView &value)
 {
-  ts::TextView compression{value.take_prefix_at(';')};
+  swoc::TextView compression{value.take_prefix_at(';')};
   compression.trim(" \t");
   while (value) {
-    ts::TextView param{value.take_prefix_at(';')};
-    ts::TextView name{param.take_prefix_at('=')};
+    swoc::TextView param{value.take_prefix_at(';')};
+    swoc::TextView name{param.take_prefix_at('=')};
     name.trim(" \t");
     if (strcasecmp("q", name) == 0) {
       // If q value is valid and is zero, suppress compression types.
       param.trim(" \t");
       if (param) {
-        ts::TextView whole{param.take_prefix_at('.')};
+        swoc::TextView whole{param.take_prefix_at('.')};
         whole.ltrim(" \t");
         if ("0" == whole) {
           param.trim('0');
@@ -80,19 +68,20 @@ strip_ae_value(ts::TextView &value)
 void
 normalize_accept_encoding(TSHttpTxn /* txnp ATS_UNUSED */, TSMBuffer reqp, TSMLoc hdr_loc)
 {
-  TSMLoc field = TSMimeHdrFieldFind(reqp, hdr_loc, TS_MIME_FIELD_ACCEPT_ENCODING, TS_MIME_LEN_ACCEPT_ENCODING);
-  bool deflate = false;
-  bool gzip    = false;
-  bool br      = false;
+  TSMLoc field   = TSMimeHdrFieldFind(reqp, hdr_loc, TS_MIME_FIELD_ACCEPT_ENCODING, TS_MIME_LEN_ACCEPT_ENCODING);
+  bool   deflate = false;
+  bool   gzip    = false;
+  bool   br      = false;
+  bool   zstd    = false;
   // remove the accept encoding field(s),
-  // while finding out if gzip or deflate is supported.
+  // while finding out if gzip, brotli, deflate, or zstandard are supported.
   while (field) {
-    int val_len;
+    int         val_len;
     const char *values_ = TSMimeHdrFieldValueStringGet(reqp, hdr_loc, field, -1, &val_len);
     if (values_ && val_len) {
-      ts::TextView values(values_, val_len);
+      swoc::TextView values(values_, val_len);
       while (values) {
-        ts::TextView next{values.take_prefix_at(',')};
+        swoc::TextView next{values.take_prefix_at(',')};
         strip_ae_value(next);
         if (strcasecmp("gzip", next) == 0) {
           gzip = true;
@@ -100,6 +89,8 @@ normalize_accept_encoding(TSHttpTxn /* txnp ATS_UNUSED */, TSMBuffer reqp, TSMLo
           br = true;
         } else if (strcasecmp("deflate", next) == 0) {
           deflate = true;
+        } else if (strcasecmp("zstd", next) == 0) {
+          zstd = true;
         }
       }
     }
@@ -111,9 +102,13 @@ normalize_accept_encoding(TSHttpTxn /* txnp ATS_UNUSED */, TSMBuffer reqp, TSMLo
   }
 
   // append a new accept-encoding field in the header
-  if (deflate || gzip || br) {
+  if (deflate || gzip || br || zstd) {
     TSMimeHdrFieldCreate(reqp, hdr_loc, &field);
     TSMimeHdrFieldNameSet(reqp, hdr_loc, field, TS_MIME_FIELD_ACCEPT_ENCODING, TS_MIME_LEN_ACCEPT_ENCODING);
+    if (zstd) {
+      TSMimeHdrFieldValueStringInsert(reqp, hdr_loc, field, -1, "zstd", strlen("zstd"));
+      info("normalized accept encoding to zstd");
+    }
     if (br) {
       TSMimeHdrFieldValueStringInsert(reqp, hdr_loc, field, -1, "br", strlen("br"));
       info("normalized accept encoding to br");
@@ -161,17 +156,16 @@ restore_accept_encoding(TSHttpTxn /* txnp ATS_UNUSED */, TSMBuffer reqp, TSMLoc 
 const char *
 init_hidden_header_name()
 {
-  char *hidden_header_name;
-  const char *var_name = "proxy.config.proxy_name";
+  char        *hidden_header_name{nullptr};
+  const char  *var_name = "proxy.config.proxy_name";
   TSMgmtString result;
 
   if (TSMgmtStringGet(var_name, &result) != TS_SUCCESS) {
     fatal("failed to get server name");
   } else {
-    int hidden_header_name_len                 = strlen("x-accept-encoding-") + strlen(result);
-    hidden_header_name                         = static_cast<char *>(TSmalloc(hidden_header_name_len + 1));
-    hidden_header_name[hidden_header_name_len] = 0;
-    sprintf(hidden_header_name, "x-accept-encoding-%s", result);
+    size_t hidden_header_name_size = strlen("x-accept-encoding-") + strlen(result) + 1; // add one for null
+    hidden_header_name             = static_cast<char *>(TSmalloc(hidden_header_name_size));
+    snprintf(hidden_header_name, hidden_header_name_size, "x-accept-encoding-%s", result);
     TSfree(result);
   }
   return hidden_header_name;
@@ -190,14 +184,4 @@ register_plugin()
     return 0;
   }
   return 1;
-}
-
-void
-log_compression_ratio(int64_t in, int64_t out)
-{
-  if (in) {
-    info("Compressed size %" PRId64 " (bytes), Original size %" PRId64 ", ratio: %f", out, in, ((float)(in - out) / in));
-  } else {
-    debug("Compressed size %" PRId64 " (bytes), Original size %" PRId64 ", ratio: %f", out, in, 0.0F);
-  }
 }

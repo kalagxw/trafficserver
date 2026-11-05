@@ -1,0 +1,866 @@
+/** @file
+
+  Outbound connection tracking support.
+
+  @par License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+
+#include "P_Net.h" // For Metrics.
+#include "iocore/net/ConnectionTracker.h"
+#include "records/RecCore.h"
+#include "swoc/IPAddr.h"
+
+#include <algorithm>
+#include <array>
+
+using namespace std::literals;
+
+ConnectionTracker::TableSingleton ConnectionTracker::_inbound_table;
+ConnectionTracker::TableSingleton ConnectionTracker::_outbound_table;
+
+ConnectionTracker::GlobalConfig *ConnectionTracker::_global_config{nullptr};
+
+const MgmtConverter ConnectionTracker::MAX_SERVER_CONV(
+  [](const void *data) -> MgmtInt { return static_cast<MgmtInt>(*static_cast<const decltype(TxnConfig::server_max) *>(data)); },
+  [](void *data, MgmtInt i) -> void {
+    *static_cast<decltype(TxnConfig::server_max) *>(data) = static_cast<decltype(TxnConfig::server_max)>(i);
+  });
+
+const MgmtConverter ConnectionTracker::MIN_SERVER_CONV(
+  [](const void *data) -> MgmtInt { return static_cast<MgmtInt>(*static_cast<const decltype(TxnConfig::server_min) *>(data)); },
+  [](void *data, MgmtInt i) -> void {
+    *static_cast<decltype(TxnConfig::server_min) *>(data) = static_cast<decltype(TxnConfig::server_min)>(i);
+  });
+
+// Do integer and string conversions.
+const MgmtConverter ConnectionTracker::SERVER_MATCH_CONV{
+  [](const void *data) -> MgmtInt { return static_cast<MgmtInt>(*static_cast<const decltype(TxnConfig::server_match) *>(data)); },
+  [](void *data, MgmtInt i) -> void {
+    auto const value = std::clamp(i, static_cast<MgmtInt>(MATCH_IP), static_cast<MgmtInt>(MATCH_BOTH));
+
+    *static_cast<decltype(TxnConfig::server_match) *>(data) = static_cast<decltype(TxnConfig::server_match)>(value);
+  },
+  nullptr,
+  nullptr,
+  [](const void *data) -> std::string_view {
+    auto t = *static_cast<const ConnectionTracker::MatchType *>(data);
+    return t < 0 || t > ConnectionTracker::MATCH_BOTH ? "Invalid"sv : ConnectionTracker::MATCH_TYPE_NAME[t];
+  },
+  [](void *data, std::string_view src) -> void {
+    ConnectionTracker::MatchType t;
+    if (ConnectionTracker::lookup_match_type(src, t)) {
+      *static_cast<ConnectionTracker::MatchType *>(data) = t;
+    } else {
+      ConnectionTracker::Warning_Bad_Match_Type(src);
+    }
+  }};
+
+// Neither of these clamps, for the same reason as SERVER_MATCH_CONV above: the InkAPITest
+// regression test requires an arbitrary integer to round trip through the setter and getter. The
+// records paths do the range checking instead -- records.yaml validates the value and the reload
+// callbacks below clamp -- so an out of range value is only reachable by a plugin that sets one
+// deliberately. Both settings degrade safely if that happens: any non-zero metric_enabled enables
+// metrics, and any metric_aggregate outside 0..3 publishes everything, the same as
+// AGGREGATE_GROUP.
+const MgmtConverter ConnectionTracker::METRIC_ENABLED_CONV{
+  [](const void *data) -> MgmtInt { return static_cast<MgmtInt>(*static_cast<const decltype(TxnConfig::metric_enabled) *>(data)); },
+  [](void *data, MgmtInt i) -> void {
+    *static_cast<decltype(TxnConfig::metric_enabled) *>(data) = static_cast<decltype(TxnConfig::metric_enabled)>(i);
+  }};
+
+const MgmtConverter ConnectionTracker::METRIC_AGGREGATE_CONV{
+  [](const void *data) -> MgmtInt { return static_cast<MgmtInt>(*static_cast<const ConnectionTracker::MetricAggregate *>(data)); },
+  [](void *data, MgmtInt i) -> void {
+    *static_cast<ConnectionTracker::MetricAggregate *>(data) = static_cast<ConnectionTracker::MetricAggregate>(i);
+  }};
+
+const std::array<std::string_view, static_cast<int>(ConnectionTracker::MATCH_BOTH) + 1> ConnectionTracker::MATCH_TYPE_NAME{
+  {"ip"sv, "port"sv, "host"sv, "both"sv}
+};
+// Make sure the clock is millisecond resolution or finer.
+static_assert(ConnectionTracker::Group::Clock::period::num == 1);
+static_assert(ConnectionTracker::Group::Clock::period::den >= 1000);
+
+// Configuration callback functions.
+namespace
+{
+bool
+Config_Update_Conntrack_Min(const char * /* name ATS_UNUSED */, RecDataT dtype, RecData data, void *cookie)
+{
+  auto config = static_cast<ConnectionTracker::TxnConfig *>(cookie);
+
+  if (RECD_INT == dtype) {
+    config->server_min = data.rec_int;
+    return true;
+  }
+  return false;
+}
+
+bool
+Config_Update_Conntrack_Max(const char * /* name ATS_UNUSED */, RecDataT dtype, RecData data, void *cookie)
+{
+  auto config = static_cast<ConnectionTracker::TxnConfig *>(cookie);
+
+  if (RECD_INT == dtype) {
+    config->server_max = data.rec_int;
+    return true;
+  }
+  return false;
+}
+
+bool
+Config_Update_Conntrack_Match(const char * /* name ATS_UNUSED */, RecDataT dtype, RecData data, void *cookie)
+{
+  auto config = static_cast<ConnectionTracker::TxnConfig *>(cookie);
+
+  if (RECD_STRING == dtype) {
+    ConnectionTracker::MatchType match_type;
+    std::string_view             tag{data.rec_string};
+    if (ConnectionTracker::lookup_match_type(tag, match_type)) {
+      config->server_match = match_type;
+      return true;
+    } else {
+      ConnectionTracker::Warning_Bad_Match_Type(tag);
+    }
+  } else {
+    Warning("Invalid type for '%s' - must be 'INT'", ConnectionTracker::CONFIG_SERVER_VAR_MATCH.data());
+  }
+  return false;
+}
+
+bool
+Config_Update_Conntrack_Server_Alert_Delay_Helper(const char * /* name ATS_UNUSED */, RecDataT dtype, RecData data,
+                                                  void * /* cookie ATS_UNUSED */, std::chrono::seconds &alert_delay)
+{
+  if (RECD_INT == dtype && data.rec_int >= 0) {
+    alert_delay = std::chrono::seconds(data.rec_int);
+    return true;
+  }
+  return false;
+}
+
+bool
+Config_Update_Conntrack_Server_Alert_Delay(const char *name, RecDataT dtype, RecData data, void *cookie)
+{
+  auto config = static_cast<ConnectionTracker::GlobalConfig *>(cookie);
+  return Config_Update_Conntrack_Server_Alert_Delay_Helper(name, dtype, data, cookie, config->server_alert_delay);
+}
+
+bool
+Config_Update_Conntrack_Client_Alert_Delay(const char *name, RecDataT dtype, RecData data, void *cookie)
+{
+  auto config = static_cast<ConnectionTracker::GlobalConfig *>(cookie);
+  return Config_Update_Conntrack_Server_Alert_Delay_Helper(name, dtype, data, cookie, config->client_alert_delay);
+}
+
+bool
+Config_Update_Conntrack_Metric_Enabled(const char * /* name ATS_UNUSED */, RecDataT dtype, RecData data, void *cookie)
+{
+  auto config = static_cast<ConnectionTracker::TxnConfig *>(cookie);
+
+  if (RECD_INT == dtype) {
+    config->metric_enabled = std::clamp(static_cast<int>(data.rec_int), 0, 1);
+    return true;
+  }
+  return false;
+}
+
+bool
+Config_Update_Conntrack_Metric_Aggregate(const char * /* name ATS_UNUSED */, RecDataT dtype, RecData data, void *cookie)
+{
+  auto config = static_cast<ConnectionTracker::TxnConfig *>(cookie);
+
+  if (RECD_INT == dtype) {
+    auto level               = std::clamp(static_cast<int>(data.rec_int), static_cast<int>(ConnectionTracker::AGGREGATE_NONE),
+                                          static_cast<int>(ConnectionTracker::AGGREGATE_SUM));
+    config->metric_aggregate = static_cast<ConnectionTracker::MetricAggregate>(level);
+    return true;
+  }
+  return false;
+}
+
+bool
+Config_Update_Conntrack_Metric_Prefix(const char * /* name ATS_UNUSED */, RecDataT dtype, RecData data, void *cookie)
+{
+  auto config = static_cast<ConnectionTracker::GlobalConfig *>(cookie);
+
+  if (RECD_STRING == dtype) {
+    config->metric_prefix = data.rec_string;
+    return true;
+  }
+  return false;
+}
+
+// // helper function to build up a json string from the passed conn groups.
+std::string
+Groups_To_JSON(std::vector<std::shared_ptr<ConnectionTracker::Group const>> const &groups)
+{
+  std::string                    text;
+  size_t                         extent = 0;
+  static const swoc::bwf::Format header_fmt{R"({{"count": {}, "list": [  )"};
+  static const swoc::bwf::Format item_fmt{
+    R"(  {{"type": "{}", "ip": "{}", "fqdn": "{}", "current": {}, "max": {}, "blocked": {}, "alert": {}}},
+)"};
+  static const std::string_view trailer{" \n]}"};
+
+  static const auto printer = [](swoc::BufferWriter &w, ConnectionTracker::Group const *g) -> swoc::BufferWriter & {
+    w.print(item_fmt, g->_match_type, g->_addr, g->_fqdn, g->_count.load(), g->_count_max.load(), g->_blocked.load(),
+            g->get_last_alert_epoch_time());
+    return w;
+  };
+
+  swoc::FixedBufferWriter null_bw{nullptr}; // Empty buffer for sizing work.
+
+  null_bw.print(header_fmt, groups.size()).extent();
+  for (auto const &g : groups) {
+    printer(null_bw, g.get());
+  }
+  extent = null_bw.extent() + trailer.size() - 2; // 2 for the trailing comma newline that will get clipped.
+
+  text.resize(extent);
+  swoc::FixedBufferWriter w(const_cast<char *>(text.data()), text.size());
+  w.restrict(trailer.size());
+  w.print(header_fmt, groups.size());
+  for (auto const &g : groups) {
+    printer(w, g.get());
+  }
+  w.restore(trailer.size());
+  w.write(trailer);
+  return text;
+}
+
+bool
+Config_Update_Conntrack_Client_Exempt_List(const char * /* name ATS_UNUSED */, RecDataT dtype, RecData data, void *cookie)
+{
+  if (RECD_STRING != dtype) {
+    Warning("Invalid type for '%s' - must be 'STRING'", ConnectionTracker::CONFIG_CLIENT_VAR_EXEMPT_LIST.data());
+    return false;
+  }
+  auto *config = static_cast<ConnectionTracker::GlobalConfig *>(cookie);
+  ink_release_assert(config != nullptr);
+
+  if (data.rec_string == nullptr) {
+    // There is no exempt list configured. Ensure that our exempt list is empty.
+    std::lock_guard<ts::bravo::shared_mutex> lock(config->client_exempt_list_mutex);
+    config->client_exempt_list.clear();
+    return true;
+  }
+  std::string_view exempt_list_string{data.rec_string};
+
+  // Parse the comma-separated list of IP ranges into a temporary set first.
+  // This ensures we don't lose the previous configuration if parsing fails.
+  swoc::IPRangeSet new_exempt_list;
+  swoc::TextView   ranges{exempt_list_string};
+
+  while (!ranges.empty()) {
+    swoc::TextView range_sv = ranges.take_prefix_at(',');
+    range_sv.trim_if(&isspace);
+
+    if (!range_sv.empty()) {
+      swoc::IPRange range;
+
+      if (!range.load(range_sv)) {
+        Warning("%s: '%.*s' is not a valid IP range in configuration '%s'", ConnectionTracker::CONFIG_CLIENT_VAR_EXEMPT_LIST.data(),
+                static_cast<int>(range_sv.size()), range_sv.data(), ConnectionTracker::CONFIG_CLIENT_VAR_EXEMPT_LIST.data());
+        return false;
+      }
+      new_exempt_list.mark(range);
+    }
+  }
+
+  // Parsing succeeded. Now acquire the lock and replace the global exempt list.
+  std::lock_guard<ts::bravo::shared_mutex> lock(config->client_exempt_list_mutex);
+
+  config->client_exempt_list.clear();
+  for (auto const &ip_range : new_exempt_list) {
+    config->client_exempt_list.mark(ip_range);
+  }
+
+  return true;
+}
+
+} // anonymous namespace
+
+ConnectionTracker::GlobalConfig::GlobalConfig(GlobalConfig const &other)
+{
+  this->client_alert_delay = other.client_alert_delay;
+  this->server_alert_delay = other.server_alert_delay;
+  this->metric_prefix      = other.metric_prefix;
+
+  // Lock the source to safely copy the exempt list.
+  // Note: the mutex itself is not copied; it's default-constructed.
+  ts::bravo::shared_lock<ts::bravo::shared_mutex> lock(other.client_exempt_list_mutex);
+  this->client_exempt_list.clear();
+  for (auto const &ip_range : other.client_exempt_list) {
+    this->client_exempt_list.mark(ip_range);
+  }
+}
+
+ConnectionTracker::GlobalConfig &
+ConnectionTracker::GlobalConfig::operator=(GlobalConfig const &other)
+{
+  if (this != &other) {
+    this->client_alert_delay = other.client_alert_delay;
+    this->server_alert_delay = other.server_alert_delay;
+    this->metric_prefix      = other.metric_prefix;
+    // Lock both source and destination to safely copy the exempt list.
+    // Lock in a consistent order to avoid deadlock (lock 'other' first, then 'this').
+    ts::bravo::shared_lock<ts::bravo::shared_mutex> lock_src(other.client_exempt_list_mutex);
+    std::lock_guard<ts::bravo::shared_mutex>        lock_dst(this->client_exempt_list_mutex);
+    this->client_exempt_list.clear();
+    for (auto const &ip_range : other.client_exempt_list) {
+      this->client_exempt_list.mark(ip_range);
+    }
+  }
+  return *this;
+}
+
+void
+ConnectionTracker::config_init(GlobalConfig *global, TxnConfig *txn, RecConfigUpdateCb const &config_cb)
+{
+  _global_config = global; // remember this for later retrieval.
+                           // Per transaction lookup must be done at call time because it changes.
+
+  Enable_Config_Var(CONFIG_CLIENT_VAR_ALERT_DELAY, &Config_Update_Conntrack_Client_Alert_Delay, config_cb, global);
+  Enable_Config_Var(CONFIG_CLIENT_VAR_EXEMPT_LIST, &Config_Update_Conntrack_Client_Exempt_List, config_cb, global);
+  Enable_Config_Var(CONFIG_SERVER_VAR_MIN, &Config_Update_Conntrack_Min, config_cb, txn);
+  Enable_Config_Var(CONFIG_SERVER_VAR_MAX, &Config_Update_Conntrack_Max, config_cb, txn);
+  Enable_Config_Var(CONFIG_SERVER_VAR_MATCH, &Config_Update_Conntrack_Match, config_cb, txn);
+  Enable_Config_Var(CONFIG_SERVER_VAR_ALERT_DELAY, &Config_Update_Conntrack_Server_Alert_Delay, config_cb, global);
+  Enable_Config_Var(CONFIG_SERVER_VAR_METRIC_ENABLED, &Config_Update_Conntrack_Metric_Enabled, config_cb, txn);
+  Enable_Config_Var(CONFIG_SERVER_VAR_METRIC_AGGREGATE, &Config_Update_Conntrack_Metric_Aggregate, config_cb, txn);
+  Enable_Config_Var(CONFIG_SERVER_VAR_METRIC_PREFIX, &Config_Update_Conntrack_Metric_Prefix, config_cb, global);
+}
+
+bool
+ConnectionTracker::set_client_exempt_list(swoc::IPRangeSet const &ip_ranges)
+{
+  if (_global_config == nullptr) {
+    Warning("ConnectionTracker::set_client_exempt_list called before config_init");
+    return false;
+  }
+
+  // Acquire exclusive lock and replace the exempt list.
+  std::lock_guard<ts::bravo::shared_mutex> lock(_global_config->client_exempt_list_mutex);
+
+  _global_config->client_exempt_list.clear();
+  for (auto const &ip_range : ip_ranges) {
+    _global_config->client_exempt_list.mark(ip_range);
+  }
+
+  return true;
+}
+
+bool
+ConnectionTracker::add_client_exempt_range(swoc::IPRange const &ip_range)
+{
+  if (_global_config == nullptr) {
+    Warning("ConnectionTracker::add_client_exempt_range called before config_init");
+    return false;
+  }
+
+  // Acquire exclusive lock and add the new range to the existing exempt list.
+  std::lock_guard<ts::bravo::shared_mutex> lock(_global_config->client_exempt_list_mutex);
+  _global_config->client_exempt_list.mark(ip_range);
+
+  return true;
+}
+
+bool
+ConnectionTracker::remove_client_exempt_range(swoc::IPRange const &ip_range)
+{
+  if (_global_config == nullptr) {
+    Warning("ConnectionTracker::remove_client_exempt_range called before config_init");
+    return false;
+  }
+
+  // Acquire exclusive lock and remove the range from the existing exempt list.
+  std::lock_guard<ts::bravo::shared_mutex> lock(_global_config->client_exempt_list_mutex);
+  _global_config->client_exempt_list.erase(ip_range);
+
+  return true;
+}
+
+void
+ConnectionTracker::clear_client_exempt_list()
+{
+  if (_global_config == nullptr) {
+    Warning("ConnectionTracker::clear_client_exempt_list called before config_init");
+    return;
+  }
+
+  // Acquire exclusive lock and clear all ranges from the exempt list.
+  std::lock_guard<ts::bravo::shared_mutex> lock(_global_config->client_exempt_list_mutex);
+  _global_config->client_exempt_list.clear();
+}
+
+bool
+ConnectionTracker::is_client_exempt(IpEndpoint const &addr)
+{
+  if (_global_config == nullptr) {
+    return false;
+  }
+
+  ts::bravo::shared_lock<ts::bravo::shared_mutex> lock(_global_config->client_exempt_list_mutex);
+  return _global_config->client_exempt_list.contains(swoc::IPAddr{addr});
+}
+
+ConnectionTracker::TxnState
+ConnectionTracker::obtain_inbound(IpEndpoint const &addr)
+{
+  TxnState                    zret;
+  CryptoHash                  hash;
+  Group::Key                  key{addr, hash, MatchType::MATCH_IP};
+  std::lock_guard<std::mutex> lock(_inbound_table._mutex); // Table lock
+  auto                        loc = _inbound_table._table.find(key);
+  if (loc != _inbound_table._table.end()) {
+    zret._g = loc->second;
+  } else {
+    zret._g = std::make_shared<Group>(Group::DirectionType::INBOUND, key, "", 0);
+    // Note that we must use zret._g's key, not the above key, because Key's
+    // members are references to the Group's members. Thus the above key's
+    // members are invalid after this function.
+    _inbound_table._table.insert(std::make_pair(zret._g->_key, zret._g));
+  }
+  return zret;
+}
+
+ConnectionTracker::TxnState
+ConnectionTracker::obtain_outbound(TxnConfig const &txn_cnf, std::string_view fqdn, IpEndpoint const &addr)
+{
+  TxnState   zret;
+  CryptoHash hash;
+  CryptoContext().hash_immediate(hash, fqdn.data(), fqdn.size());
+  Group::Key                  key{addr, hash, txn_cnf.server_match};
+  std::lock_guard<std::mutex> lock(_outbound_table._mutex); // Table lock
+  auto                        loc = _outbound_table._table.find(key);
+  if (loc != _outbound_table._table.end()) {
+    zret._g = loc->second;
+  } else {
+    zret._g = std::make_shared<Group>(Group::DirectionType::OUTBOUND, key, fqdn, txn_cnf.server_min, txn_cnf.metric_enabled,
+                                      txn_cnf.metric_aggregate);
+    // Note that we must use zret._g's key, not the above key, because Key's
+    // members are references to the Group's members. Thus the above key's
+    // members are invalid after this function.
+    _outbound_table._table.insert(std::make_pair(zret._g->_key, zret._g));
+  }
+  return zret;
+}
+
+ConnectionTracker::Group::Group(DirectionType direction, Key const &key, std::string_view fqdn, int min_keep_alive,
+                                int metric_enabled, MetricAggregate metric_aggregate)
+  : _direction{direction},
+    _hash(key._hash),
+    _match_type(key._match_type),
+    _min_keep_alive_conns(min_keep_alive),
+    _key{_addr, _hash, _match_type},
+    _alert_delay{direction == DirectionType::INBOUND ? _global_config->client_alert_delay : _global_config->server_alert_delay}
+{
+  Metrics::Gauge::increment(net_rsb.connection_tracker_table_size);
+  // only add metrics for server connections
+  if (metric_enabled && direction == DirectionType::OUTBOUND) {
+    std::string _metric_name = metric_name(key, fqdn, _global_config->metric_prefix);
+    // Per group metrics always live in the hidden store. metric_aggregate controls what is
+    // published from them (see MetricAggregate), not whether they exist.
+    _count_metric       = Metrics::Gauge::createHiddenPtr("proxy.process.http.per_server.current_connection.", _metric_name);
+    _count_total_metric = Metrics::Counter::createHiddenPtr("proxy.process.http.per_server.total_connection.", _metric_name);
+    _blocked_metric     = Metrics::Counter::createHiddenPtr("proxy.process.http.per_server.blocked_connection.", _metric_name);
+
+    // Only MATCH_BOTH groups have siblings sharing a hostname to aggregate across.
+    std::string _host_metric_name = host_metric_name(key, fqdn, _global_config->metric_prefix);
+    bool const  has_aggregate     = !_host_metric_name.empty();
+
+    // A plugin can set an out of range value through the overridable config, see
+    // METRIC_AGGREGATE_CONV. Anything unrecognized publishes everything.
+    if (metric_aggregate < AGGREGATE_NONE || metric_aggregate > AGGREGATE_SUM) {
+      metric_aggregate = AGGREGATE_GROUP;
+    }
+
+    // See MetricAggregate for the table these three implement. A group with no hostname to
+    // aggregate under keeps its own metrics whatever the setting says, since suppressing them would
+    // report nothing at all for that upstream.
+    bool const publish_sums  = has_aggregate && (metric_aggregate == AGGREGATE_GROUP || metric_aggregate == AGGREGATE_SUM);
+    bool const publish_max   = has_aggregate && metric_aggregate != AGGREGATE_NONE;
+    bool const publish_group = !has_aggregate || metric_aggregate == AGGREGATE_NONE || metric_aggregate == AGGREGATE_GROUP;
+
+    std::array<std::string, 3> const sum_names{
+      "proxy.process.http.per_server.current_connection." + _host_metric_name,
+      "proxy.process.http.per_server.total_connection." + _host_metric_name,
+      "proxy.process.http.per_server.blocked_connection." + _host_metric_name,
+    };
+    std::array<std::string, 3> const group_names{
+      "proxy.process.http.per_server.current_connection." + _metric_name,
+      "proxy.process.http.per_server.total_connection." + _metric_name,
+      "proxy.process.http.per_server.blocked_connection." + _metric_name,
+    };
+    std::string const max_name = "proxy.process.http.per_server.current_connection.max." + _host_metric_name;
+
+    // metric_aggregate is dynamic and overridable, so this group may well have published a name
+    // under an earlier value. A published name is never removed from the store, so without
+    // withdrawing it here it would report for the life of the process no matter what the setting
+    // says. Re-registering a source republishes it if the setting changes back.
+    if (publish_sums) {
+      Metrics::Derived::add_source(sum_names[0], Metrics::MetricType::GAUGE, _count_metric, Metrics::Derived::Op::SUM);
+      Metrics::Derived::add_source(sum_names[1], Metrics::MetricType::COUNTER, _count_total_metric, Metrics::Derived::Op::SUM);
+      Metrics::Derived::add_source(sum_names[2], Metrics::MetricType::COUNTER, _blocked_metric, Metrics::Derived::Op::SUM);
+    } else if (has_aggregate) {
+      // Stop contributing rather than unlist: every group of this hostname shares these names, so
+      // one that does not want them must not remove a name another is still publishing.
+      Metrics::Derived::remove_source(sum_names[0], _count_metric);
+      Metrics::Derived::remove_source(sum_names[1], _count_total_metric);
+      Metrics::Derived::remove_source(sum_names[2], _blocked_metric);
+    }
+
+    if (publish_max) {
+      // The largest current count among this hostname's groups, sampled. Deliberately taken over
+      // the instantaneous gauge rather than each group's all time peak, so the value falls again
+      // and a maximum over time can be computed by whatever scrapes it.
+      Metrics::Derived::add_source(max_name, Metrics::MetricType::GAUGE, _count_metric, Metrics::Derived::Op::MAX);
+    } else if (has_aggregate) {
+      Metrics::Derived::remove_source(max_name, _count_metric);
+    }
+
+    if (publish_group) {
+      // Mirror the per group metrics into the published store under their own name. A single
+      // source SUM combines nothing, but the published value is still a sample: it is whatever
+      // the last derived tick read, and it reads 0 from creation until that first tick.
+      Metrics::Derived::add_source(group_names[0], Metrics::MetricType::GAUGE, _count_metric, Metrics::Derived::Op::SUM);
+      Metrics::Derived::add_source(group_names[1], Metrics::MetricType::COUNTER, _count_total_metric, Metrics::Derived::Op::SUM);
+      Metrics::Derived::add_source(group_names[2], Metrics::MetricType::COUNTER, _blocked_metric, Metrics::Derived::Op::SUM);
+    } else {
+      // Same mechanism as the aggregates above, though these names have only this group as a
+      // source. It leaves nothing behind for the derived pass to keep recomputing into a name that
+      // is no longer published.
+      Metrics::Derived::remove_source(group_names[0], _count_metric);
+      Metrics::Derived::remove_source(group_names[1], _count_total_metric);
+      Metrics::Derived::remove_source(group_names[2], _blocked_metric);
+    }
+
+    if (dbg_ctl.on()) {
+      swoc::LocalBufferWriter<256> w;
+      w.print("Registered per_server_connection.{}\0", _metric_name);
+      DbgPrint(dbg_ctl, "%s", w.data());
+    }
+  }
+  // store the host name if relevant.
+  if (MATCH_HOST == _match_type || MATCH_BOTH == _match_type) {
+    _fqdn.assign(fqdn);
+  }
+  // store the IP address if relevant.
+  if (MATCH_HOST == _match_type) {
+    _addr.setToAnyAddr(AF_INET);
+  } else {
+    ats_ip_copy(_addr, key._addr);
+  }
+}
+
+ConnectionTracker::Group::~Group()
+{
+  Metrics::Gauge::decrement(net_rsb.connection_tracker_table_size);
+}
+
+bool
+ConnectionTracker::Group::equal(const Key &lhs, const Key &rhs)
+{
+  bool zret = false;
+  if (lhs._match_type == rhs._match_type) {
+    switch (lhs._match_type) {
+    case MATCH_IP:
+      zret = ats_ip_addr_eq(&lhs._addr.sa, &rhs._addr.sa);
+      break;
+    case MATCH_PORT:
+      zret = ats_ip_addr_port_eq(&lhs._addr.sa, &rhs._addr.sa);
+      break;
+    case MATCH_HOST:
+      zret = lhs._hash == rhs._hash;
+      break;
+    case MATCH_BOTH:
+      zret = (lhs._hash == rhs._hash && ats_ip_addr_port_eq(&lhs._addr.sa, &rhs._addr.sa));
+      break;
+    }
+  }
+
+  if (dbg_ctl.on()) {
+    swoc::LocalBufferWriter<256> w;
+    w.print("Comparing {} to {} -> {}\0", lhs, rhs, zret ? "match" : "fail");
+    DbgPrint(dbg_ctl, "%s", w.data());
+  }
+
+  return zret;
+}
+
+bool
+ConnectionTracker::Group::should_alert(std::time_t *lat)
+{
+  bool zret = false;
+  // This is a bit clunky because the goal is to store just the tick count as an atomic.
+  // Might check to see if an atomic time_point is really atomic and avoid this.
+  Ticker    last_tick{_last_alert};               // Load the most recent alert time in ticks.
+  TimePoint last{TimePoint::duration{last_tick}}; // Most recent alert time in a time_point.
+  TimePoint now = Clock::now();                   // Current time_point.
+  if (last + _alert_delay <= now) {
+    // it's been long enough, swap out our time for the last time. The winner of this swap
+    // does the actual alert, leaving its current time as the last alert time.
+    zret = _last_alert.compare_exchange_strong(last_tick, now.time_since_epoch().count());
+    if (zret && lat) {
+      *lat = Clock::to_time_t(last);
+    }
+  }
+  return zret;
+}
+
+void
+ConnectionTracker::Group::release()
+{
+  // @a _count is always the authoritative count; the metric, if enabled, only mirrors it.
+  if (_count > 0) {
+    auto count = --_count;
+    if (_count_metric != nullptr) {
+      ts::Metrics::Gauge::decrement(_count_metric);
+    }
+    if (count == 0) {
+      TableSingleton             &table = _direction == DirectionType::INBOUND ? _inbound_table : _outbound_table;
+      std::lock_guard<std::mutex> lock(table._mutex); // Table lock
+      if (_count > 0) {
+        // Someone else grabbed the Group between our last check and taking the
+        // lock.
+        return;
+      }
+      table._table.erase(_key);
+    }
+  } else {
+    // A bit dubious, as there's no guarantee it's still negative, but even that would be interesting to know.
+    Error("Number of tracked connections should be greater than or equal to zero: %d", _count.load());
+  }
+}
+
+std::time_t
+ConnectionTracker::Group::get_last_alert_epoch_time() const
+{
+  return Clock::to_time_t(TimePoint{TimePoint::duration{Ticker{_last_alert}}});
+}
+
+void
+ConnectionTracker::get_outbound_groups(std::vector<std::shared_ptr<Group const>> &groups)
+{
+  std::lock_guard<std::mutex> lock(_outbound_table._mutex); // TABLE LOCK
+  groups.resize(0);
+  groups.reserve(_outbound_table._table.size());
+  for (auto &&[key, group] : _outbound_table._table) {
+    groups.push_back(group);
+  }
+}
+
+void
+ConnectionTracker::get_inbound_groups(std::vector<std::shared_ptr<Group const>> &groups)
+{
+  std::lock_guard<std::mutex> lock(_inbound_table._mutex); // TABLE LOCK
+  groups.resize(0);
+  groups.reserve(_inbound_table._table.size());
+  for (auto &&[key, group] : _inbound_table._table) {
+    groups.push_back(group);
+  }
+}
+
+std::string
+ConnectionTracker::inbound_to_json_string()
+{
+  std::vector<std::shared_ptr<Group const>> groups;
+  self_type::get_inbound_groups(groups);
+  return Groups_To_JSON(groups);
+}
+
+std::string
+ConnectionTracker::outbound_to_json_string()
+{
+  std::vector<std::shared_ptr<Group const>> groups;
+  self_type::get_outbound_groups(groups);
+  return Groups_To_JSON(groups);
+}
+
+void
+ConnectionTracker::dump_outbound(FILE *f)
+{
+  std::vector<std::shared_ptr<Group const>> groups;
+
+  self_type::get_outbound_groups(groups);
+
+  if (groups.size()) {
+    fprintf(f, "\n[O] Peer Connection Tracking\n%7s | %5s | %24s | %33s | %8s |\n", "Current", "Block", "Address", "Hostname Hash",
+            "Match");
+    fprintf(f, "------|-------|--------------------------|-----------------------------------|----------|\n");
+
+    for (std::shared_ptr<Group const> const &g : groups) {
+      swoc::LocalBufferWriter<128> w;
+      w.print("{:7} | {:5} | {:24} | {:33} | {:8} |\n", g->_count.load(), g->_blocked.load(), g->_addr, g->_hash, g->_match_type);
+      fwrite(w.data(), w.size(), 1, f);
+    }
+
+    fprintf(f, "------|-------|--------------------------|-----------------------------------|----------|\n");
+  }
+}
+
+void
+ConnectionTracker::dump(FILE *f)
+{
+  dump_outbound(f);
+  dump_inbound(f);
+}
+
+void
+ConnectionTracker::dump_inbound(FILE *f)
+{
+  std::vector<std::shared_ptr<Group const>> groups;
+
+  self_type::get_inbound_groups(groups);
+
+  if (groups.size()) {
+    fprintf(f, "\n[I] Peer Connection Tracking\n%7s | %5s | %24s | %33s | %8s |\n", "Current", "Block", "Address", "Hostname Hash",
+            "Match");
+    fprintf(f, "------|-------|--------------------------|-----------------------------------|----------|\n");
+
+    for (std::shared_ptr<Group const> const &g : groups) {
+      swoc::LocalBufferWriter<128> w;
+      w.print("{:7} | {:5} | {:24} | {:33} | {:8} |\n", g->_count.load(), g->_blocked.load(), g->_addr, g->_hash, g->_match_type);
+      fwrite(w.data(), w.size(), 1, f);
+    }
+
+    fprintf(f, "------|-------|--------------------------|-----------------------------------|----------|\n");
+  }
+}
+
+bool
+ConnectionTracker::lookup_match_type(std::string_view tag, ConnectionTracker::MatchType &type)
+{
+  // Search the array for the tag.
+  for (ConnectionTracker::MatchType idx :
+       {ConnectionTracker::MATCH_IP, ConnectionTracker::MATCH_PORT, ConnectionTracker::MATCH_HOST, ConnectionTracker::MATCH_BOTH}) {
+    if (tag == MATCH_TYPE_NAME[idx]) {
+      type = idx;
+      return true;
+    }
+  }
+  return false;
+}
+
+void
+ConnectionTracker::Warning_Bad_Match_Type(std::string_view tag)
+{
+  swoc::LocalBufferWriter<256> w;
+  w.print("Invalid value '{}' for '{}' - must be one of", tag, CONFIG_SERVER_VAR_MATCH);
+  for (auto n : MATCH_TYPE_NAME) {
+    w.write(" '"sv);
+    w.write(n);
+    w.write("',"sv);
+  }
+  w.aux_data()[-1] = '\0'; // clip trailing comma and null terminate.
+  Warning("%s", w.data());
+}
+
+void
+ConnectionTracker::TxnState::Note_Unblocked(const TxnConfig *config, int count, sockaddr const *addr)
+{
+  time_t lat; // last alert time (epoch seconds)
+
+  if (_g->_blocked > 0 && _g->should_alert(&lat)) {
+    auto                         blocked = _g->_blocked.exchange(0);
+    swoc::LocalBufferWriter<256> w;
+    w.print("Peer unblocked: [{}] count={} limit={} group=({}) blocked={} peer={}\0", swoc::bwf::Date(lat, "%b %d %H:%M:%S"sv),
+            count, config->server_max, *_g, blocked, addr);
+    Dbg(dbg_ctl, "%s", w.data());
+    Note("%s", w.data());
+  }
+}
+
+void
+ConnectionTracker::TxnState::Warn_Blocked(int max_connections, int64_t id, int count, sockaddr const *addr, DbgCtl *dbg_ctl_p)
+{
+  bool alert_p = _g->should_alert();
+  auto blocked = alert_p ? _g->_blocked.exchange(0) : _g->_blocked.load();
+
+  if (alert_p || dbg_ctl_p) {
+    swoc::LocalBufferWriter<256> w;
+    if (id > 1) {
+      w.print("[{}] ", id);
+    }
+    w.print("too many connections: count={} limit={} group=({}) blocked={} peer={}\0", count, max_connections, *_g, blocked, addr);
+
+    if (dbg_ctl_p) {
+      Dbg(*dbg_ctl_p, "%s", w.data());
+    }
+    if (alert_p) {
+      Warning("%s", w.data());
+    }
+  }
+}
+
+namespace swoc
+{
+BufferWriter &
+bwformat(BufferWriter &w, bwf::Spec const &spec, ConnectionTracker::MatchType type)
+{
+  if (spec.has_numeric_type()) {
+    bwformat(w, spec, static_cast<unsigned int>(type));
+  } else {
+    bwformat(w, spec, ConnectionTracker::MATCH_TYPE_NAME[type]);
+  }
+  return w;
+}
+
+BufferWriter &
+bwformat(BufferWriter &w, bwf::Spec const & /* spec ATS_UNUSED */, ConnectionTracker::Group::Key const &key)
+{
+  switch (key._match_type) {
+  case ConnectionTracker::MATCH_BOTH:
+    w.print("{:s} {},{}", key._match_type, key._addr, key._hash);
+    break;
+  case ConnectionTracker::MATCH_HOST:
+    w.print("{:s} {}", key._match_type, key._hash);
+    break;
+  case ConnectionTracker::MATCH_PORT:
+    w.print("{:s} {}", key._match_type, key._addr);
+    break;
+  case ConnectionTracker::MATCH_IP:
+    w.print("{:s} {::a}", key._match_type, key._addr);
+    break;
+  }
+  return w;
+}
+
+BufferWriter &
+bwformat(BufferWriter &w, bwf::Spec const & /* spec ATS_UNUSED */, ConnectionTracker::Group const &g)
+{
+  switch (g._match_type) {
+  case ConnectionTracker::MATCH_BOTH:
+    w.print("{:s} {},{}", g._match_type, g._addr, g._fqdn);
+    break;
+  case ConnectionTracker::MATCH_HOST:
+    w.print("{:s} {}", g._match_type, g._fqdn);
+    break;
+  case ConnectionTracker::MATCH_PORT:
+    w.print("{:s} {}", g._match_type, g._addr);
+    break;
+  case ConnectionTracker::MATCH_IP:
+    w.print("{:s} {::a}", g._match_type, g._addr);
+    break;
+  }
+  return w;
+}
+
+} // namespace swoc

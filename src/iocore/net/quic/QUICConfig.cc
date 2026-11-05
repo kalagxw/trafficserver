@@ -1,0 +1,643 @@
+/** @file
+ *
+ *  A brief file description
+ *
+ *  @par License
+ *
+ *  Licensed to the Apache Software Foundation (ASF) under one
+ *  or more contributor license agreements.  See the NOTICE file
+ *  distributed with this work for additional information
+ *  regarding copyright ownership.  The ASF licenses this file
+ *  to you under the Apache License, Version 2.0 (the
+ *  "License"); you may not use this file except in compliance
+ *  with the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
+#include "iocore/net/quic/QUICConfig.h"
+
+#include <openssl/crypto.h>
+#include <openssl/rand.h>
+#if TS_HAS_OPENSSL_QUIC
+#include <openssl/quic.h>
+#endif
+#include <openssl/ssl.h>
+
+#include "mgmt/config/ConfigContextDiags.h"
+#include "mgmt/config/ConfigRegistry.h"
+#include "records/RecHttp.h"
+#include "tscore/Layout.h"
+#include "tscore/MatcherUtils.h"
+#include "tscore/ink_memory.h"
+
+#include "../P_SSLConfig.h"
+#include "../P_TLSKeyLogger.h"
+
+#include "iocore/net/quic/QUICGlobals.h"
+#include "iocore/net/quic/QUICTransportParameters.h"
+
+int QUICTokenKeyConfig::_config_id           = 0;
+int QUICConfig::_config_id                   = 0;
+int QUICConfigParams::_connection_table_size = 65521;
+
+QUICTokenKeyConfigParams::~QUICTokenKeyConfigParams()
+{
+  if (!m_keys.empty()) {
+    OPENSSL_cleanse(m_keys.data(), m_keys.size() * sizeof(Key));
+  }
+}
+
+bool
+QUICTokenKeyConfigParams::load(const char *path, ConfigContext ctx)
+{
+  int            key_data_len = 0;
+  ats_scoped_str key_data{readIntoBuffer(path, __func__, &key_data_len)};
+
+  if (!key_data) {
+    CfgLoadFail(ctx, "Could not load QUIC token key from %s", path);
+    return false;
+  }
+
+  if (key_data_len < 0) {
+    CfgLoadFail(ctx, "QUIC token key file %s is too large", path);
+    return false;
+  }
+
+  size_t const key_data_size = static_cast<size_t>(key_data_len);
+
+  if (key_data_size < KEY_LENGTH || key_data_size % KEY_LENGTH != 0) {
+    CfgLoadFail(ctx, "QUIC token key file %s must contain one or more %zu-byte keys", path, KEY_LENGTH);
+    OPENSSL_cleanse(key_data.get(), key_data_size);
+    return false;
+  }
+
+  m_keys.resize(key_data_size / KEY_LENGTH);
+  memcpy(m_keys.data(), key_data.get(), key_data_size);
+  OPENSSL_cleanse(key_data.get(), key_data_size);
+  m_filename = path;
+  return true;
+}
+
+bool
+QUICTokenKeyConfigParams::generate(ConfigContext ctx)
+{
+  m_keys.resize(1);
+  if (RAND_bytes(m_keys.front().data(), static_cast<int>(m_keys.front().size())) != 1) {
+    CfgLoadFail(ctx, "Could not generate a random QUIC token key");
+    OPENSSL_cleanse(m_keys.data(), m_keys.size() * sizeof(Key));
+    m_keys.clear();
+    return false;
+  }
+  return true;
+}
+
+const std::vector<QUICTokenKeyConfigParams::Key> &
+QUICTokenKeyConfigParams::keys() const
+{
+  return m_keys;
+}
+
+const std::string &
+QUICTokenKeyConfigParams::filename() const
+{
+  return m_filename;
+}
+
+void
+QUICTokenKeyConfig::startup()
+{
+  config::ConfigRegistry::Get_Instance().register_record_config("quic_token_key",
+                                                                [](ConfigContext ctx) {
+                                                                  CfgLoadLog(ctx, DL_Note, "QUIC token key loading ...");
+                                                                  if (QUICTokenKeyConfig::reconfigure(ctx)) {
+                                                                    ctx.complete("QUIC token key reloaded");
+                                                                  } else {
+                                                                    ctx.fail("Failed to reload QUIC token key");
+                                                                  }
+                                                                },
+                                                                {"proxy.config.quic.server.token_key.filename"});
+
+  if (!reconfigure()) {
+    Fatal("Failed to initialize QUIC token key");
+  }
+}
+
+bool
+QUICTokenKeyConfig::reconfigure(ConfigContext ctx)
+{
+  std::string path;
+  if (auto rec_str = RecGetRecordStringAlloc("proxy.config.quic.server.token_key.filename"); rec_str && !rec_str->empty()) {
+    path = Layout::relative_to(Layout::get()->sysconfdir, *rec_str);
+  }
+
+  if (path.empty()) {
+    bool already_random = false;
+    {
+      scoped_config current;
+      already_random = current && current->filename().empty();
+    }
+    if (already_random) {
+      return true;
+    }
+  }
+
+  auto *params = new QUICTokenKeyConfigParams;
+  if ((!path.empty() && !params->load(path.c_str(), ctx)) || (path.empty() && !params->generate(ctx))) {
+    delete params;
+    return false;
+  }
+
+  bool unchanged = false;
+  {
+    scoped_config current;
+    unchanged = current && current->filename() == params->filename() && current->keys() == params->keys();
+  }
+  if (unchanged) {
+    delete params;
+    return true;
+  }
+
+  _config_id = configProcessor.set(_config_id, params);
+  return true;
+}
+
+QUICTokenKeyConfigParams *
+QUICTokenKeyConfig::acquire()
+{
+  return static_cast<QUICTokenKeyConfigParams *>(configProcessor.get(_config_id));
+}
+
+void
+QUICTokenKeyConfig::release(QUICTokenKeyConfigParams *params)
+{
+  if (_config_id > 0) {
+    configProcessor.release(_config_id, params);
+  }
+}
+
+SSL_CTX *
+quic_new_ssl_ctx()
+{
+  SSL_CTX *ssl_ctx = SSL_CTX_new(TLS_method());
+
+  SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_3_VERSION);
+  SSL_CTX_set_max_proto_version(ssl_ctx, TLS1_3_VERSION);
+
+#ifdef SSL_OP_ENABLE_MIDDLEBOX_COMPAT
+  // FIXME: OpenSSL (1.1.1-alpha) enable this option by default. But this should be removed when OpenSSL disable this by default.
+  SSL_CTX_clear_options(ssl_ctx, SSL_OP_ENABLE_MIDDLEBOX_COMPAT);
+  SSL_CTX_set_max_early_data(ssl_ctx, UINT32_C(0xFFFFFFFF));
+#endif
+
+  return ssl_ctx;
+}
+
+SSL_CTX *
+quic_new_server_ssl_ctx()
+{
+#if TS_HAS_OPENSSL_QUIC
+  SSL_CTX *ssl_ctx = SSL_CTX_new(OSSL_QUIC_server_method());
+  if (ssl_ctx == nullptr) {
+    return nullptr;
+  }
+
+  SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_3_VERSION);
+  SSL_CTX_set_max_proto_version(ssl_ctx, TLS1_3_VERSION);
+
+  return ssl_ctx;
+#else
+  return quic_new_ssl_ctx();
+#endif
+}
+
+/**
+   ALPN and SNI should be set to SSL object with NETVC_OPTIONS
+ **/
+static shared_SSL_CTX
+quic_init_client_ssl_ctx(const QUICConfigParams *params, [[maybe_unused]] ConfigContext ctx)
+{
+  std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> ssl_ctx(nullptr, &SSL_CTX_free);
+  ssl_ctx.reset(quic_new_ssl_ctx());
+
+#if defined(SSL_CTX_set1_groups_list) || defined(SSL_CTX_set1_curves_list)
+  if (params->client_supported_groups() != nullptr) {
+#ifdef SSL_CTX_set1_groups_list
+    if (SSL_CTX_set1_groups_list(ssl_ctx.get(), params->client_supported_groups()) != 1) {
+#else
+    if (SSL_CTX_set1_curves_list(ssl_ctx.get(), params->client_supported_groups()) != 1) {
+#endif
+      CfgLoadLog(ctx, DL_Error, "SSL_CTX_set1_groups_list failed");
+    }
+  }
+#endif
+
+  if (params->client_session_file() != nullptr) {
+    SSL_CTX_set_session_cache_mode(ssl_ctx.get(), SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL_STORE);
+    SSL_CTX_sess_set_new_cb(ssl_ctx.get(), QUIC::ssl_client_new_session);
+  }
+
+  if (unlikely(TLSKeyLogger::is_enabled())) {
+    SSL_CTX_set_keylog_callback(ssl_ctx.get(), TLSKeyLogger::ssl_keylog_cb);
+  }
+
+  return ssl_ctx;
+}
+
+//
+// QUICConfigParams
+//
+QUICConfigParams::~QUICConfigParams()
+{
+  this->_server_supported_groups = static_cast<char *>(ats_free_null(this->_server_supported_groups));
+  this->_client_supported_groups = static_cast<char *>(ats_free_null(this->_client_supported_groups));
+  this->_qlog_file_base_name     = static_cast<char *>(ats_free_null(this->_qlog_file_base_name));
+
+  SSL_CTX_free(this->_client_ssl_ctx.get());
+};
+
+void
+QUICConfigParams::initialize(ConfigContext ctx)
+{
+  RecEstablishStaticConfigUInt32(this->_instance_id, "proxy.config.quic.instance_id");
+  RecEstablishStaticConfigInt32(this->_connection_table_size, "proxy.config.quic.connection_table.size");
+  RecEstablishStaticConfigUInt32(this->_stateless_retry, "proxy.config.quic.server.stateless_retry_enabled");
+  RecEstablishStaticConfigUInt32(this->_vn_exercise_enabled, "proxy.config.quic.client.vn_exercise_enabled");
+  RecEstablishStaticConfigUInt32(this->_cm_exercise_enabled, "proxy.config.quic.client.cm_exercise_enabled");
+  RecEstablishStaticConfigUInt32(this->_quantum_readiness_test_enabled_out,
+                                 "proxy.config.quic.client.quantum_readiness_test_enabled");
+  RecEstablishStaticConfigUInt32(this->_quantum_readiness_test_enabled_in,
+                                 "proxy.config.quic.server.quantum_readiness_test_enabled");
+
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.quic.server.supported_groups")}; rec_str) {
+    this->_server_supported_groups = ats_stringdup(rec_str);
+  }
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.quic.client.supported_groups")}; rec_str) {
+    this->_client_supported_groups = ats_stringdup(rec_str);
+  }
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.quic.client.session_file")}; rec_str) {
+    this->_client_session_file = ats_stringdup(rec_str);
+  }
+
+  // Qlog
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.quic.qlog.file_base")}; rec_str) {
+    this->_qlog_file_base_name = ats_stringdup(rec_str);
+  }
+
+  // Transport Parameters
+  RecEstablishStaticConfigUInt32(this->_no_activity_timeout_in, "proxy.config.quic.no_activity_timeout_in");
+  RecEstablishStaticConfigUInt32(this->_no_activity_timeout_out, "proxy.config.quic.no_activity_timeout_out");
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.quic.preferred_address_ipv4")}; rec_str) {
+    this->_preferred_address_ipv4 = ats_stringdup(rec_str);
+  }
+  if (this->_preferred_address_ipv4) {
+    ats_ip_pton(this->_preferred_address_ipv4, &this->_preferred_endpoint_ipv4);
+  }
+  if (auto rec_str{RecGetRecordStringAlloc("proxy.config.quic.preferred_address_ipv6")}; rec_str) {
+    this->_preferred_address_ipv6 = ats_stringdup(rec_str);
+  }
+  if (this->_preferred_address_ipv6) {
+    ats_ip_pton(this->_preferred_address_ipv6, &this->_preferred_endpoint_ipv6);
+  }
+  RecEstablishStaticConfigUInt32(this->_initial_max_data_in, "proxy.config.quic.initial_max_data_in");
+  RecEstablishStaticConfigUInt32(this->_initial_max_data_out, "proxy.config.quic.initial_max_data_out");
+  RecEstablishStaticConfigUInt32(this->_initial_max_stream_data_bidi_local_in,
+                                 "proxy.config.quic.initial_max_stream_data_bidi_local_in");
+  RecEstablishStaticConfigUInt32(this->_initial_max_stream_data_bidi_local_out,
+                                 "proxy.config.quic.initial_max_stream_data_bidi_local_out");
+  RecEstablishStaticConfigUInt32(this->_initial_max_stream_data_bidi_remote_in,
+                                 "proxy.config.quic.initial_max_stream_data_bidi_remote_in");
+  RecEstablishStaticConfigUInt32(this->_initial_max_stream_data_bidi_remote_out,
+                                 "proxy.config.quic.initial_max_stream_data_bidi_remote_out");
+  RecEstablishStaticConfigUInt32(this->_initial_max_stream_data_uni_in, "proxy.config.quic.initial_max_stream_data_uni_in");
+  RecEstablishStaticConfigUInt32(this->_initial_max_stream_data_uni_out, "proxy.config.quic.initial_max_stream_data_uni_out");
+  RecEstablishStaticConfigUInt32(this->_initial_max_streams_bidi_in, "proxy.config.quic.initial_max_streams_bidi_in");
+  RecEstablishStaticConfigUInt32(this->_initial_max_streams_bidi_out, "proxy.config.quic.initial_max_streams_bidi_out");
+  RecEstablishStaticConfigUInt32(this->_initial_max_streams_uni_in, "proxy.config.quic.initial_max_streams_uni_in");
+  RecEstablishStaticConfigUInt32(this->_initial_max_streams_uni_out, "proxy.config.quic.initial_max_streams_uni_out");
+  RecEstablishStaticConfigUInt32(this->_ack_delay_exponent_in, "proxy.config.quic.ack_delay_exponent_in");
+  RecEstablishStaticConfigUInt32(this->_ack_delay_exponent_out, "proxy.config.quic.ack_delay_exponent_out");
+  RecEstablishStaticConfigUInt32(this->_max_ack_delay_in, "proxy.config.quic.max_ack_delay_in");
+  RecEstablishStaticConfigUInt32(this->_max_ack_delay_out, "proxy.config.quic.max_ack_delay_out");
+  RecEstablishStaticConfigUInt32(this->_active_cid_limit_in, "proxy.config.quic.active_cid_limit_in");
+  RecEstablishStaticConfigUInt32(this->_active_cid_limit_out, "proxy.config.quic.active_cid_limit_out");
+  RecEstablishStaticConfigUInt32(this->_disable_active_migration, "proxy.config.quic.disable_active_migration");
+  RecEstablishStaticConfigUInt32(this->_max_recv_udp_payload_size_in, "proxy.config.quic.max_recv_udp_payload_size_in");
+  RecEstablishStaticConfigUInt32(this->_max_recv_udp_payload_size_out, "proxy.config.quic.max_recv_udp_payload_size_out");
+  RecEstablishStaticConfigUInt32(this->_max_send_udp_payload_size_in, "proxy.config.quic.max_send_udp_payload_size_in");
+  RecEstablishStaticConfigUInt32(this->_max_send_udp_payload_size_out, "proxy.config.quic.max_send_udp_payload_size_out");
+  RecEstablishStaticConfigUInt32(this->_disable_http_0_9, "proxy.config.quic.disable_http_0_9");
+  RecEstablishStaticConfigUInt32(this->_cc_algorithm, "proxy.config.quic.cc_algorithm");
+
+  this->_client_ssl_ctx = quic_init_client_ssl_ctx(this, ctx);
+}
+
+uint32_t
+QUICConfigParams::no_activity_timeout_in() const
+{
+  return this->_no_activity_timeout_in;
+}
+
+uint32_t
+QUICConfigParams::no_activity_timeout_out() const
+{
+  return this->_no_activity_timeout_out;
+}
+
+const IpEndpoint *
+QUICConfigParams::preferred_address_ipv4() const
+{
+  if (!this->_preferred_address_ipv4) {
+    return nullptr;
+  }
+
+  return &this->_preferred_endpoint_ipv4;
+}
+
+const IpEndpoint *
+QUICConfigParams::preferred_address_ipv6() const
+{
+  if (!this->_preferred_address_ipv6) {
+    return nullptr;
+  }
+
+  return &this->_preferred_endpoint_ipv6;
+}
+
+uint32_t
+QUICConfigParams::instance_id() const
+{
+  return this->_instance_id;
+}
+
+int
+QUICConfigParams::connection_table_size()
+{
+  return _connection_table_size;
+}
+
+uint32_t
+QUICConfigParams::stateless_retry() const
+{
+  return this->_stateless_retry;
+}
+
+uint32_t
+QUICConfigParams::vn_exercise_enabled() const
+{
+  return this->_vn_exercise_enabled;
+}
+
+uint32_t
+QUICConfigParams::cm_exercise_enabled() const
+{
+  return this->_cm_exercise_enabled;
+}
+
+uint32_t
+QUICConfigParams::quantum_readiness_test_enabled_in() const
+{
+  return this->_quantum_readiness_test_enabled_in;
+}
+
+uint32_t
+QUICConfigParams::quantum_readiness_test_enabled_out() const
+{
+  return this->_quantum_readiness_test_enabled_out;
+}
+
+uint32_t
+QUICConfigParams::initial_max_data_in() const
+{
+  return this->_initial_max_data_in;
+}
+
+uint32_t
+QUICConfigParams::initial_max_data_out() const
+{
+  return this->_initial_max_data_out;
+}
+
+uint32_t
+QUICConfigParams::initial_max_stream_data_bidi_local_in() const
+{
+  return this->_initial_max_stream_data_bidi_local_in;
+}
+
+uint32_t
+QUICConfigParams::initial_max_stream_data_bidi_local_out() const
+{
+  return this->_initial_max_stream_data_bidi_local_out;
+}
+
+uint32_t
+QUICConfigParams::initial_max_stream_data_bidi_remote_in() const
+{
+  return this->_initial_max_stream_data_bidi_remote_in;
+}
+
+uint32_t
+QUICConfigParams::initial_max_stream_data_bidi_remote_out() const
+{
+  return this->_initial_max_stream_data_bidi_remote_out;
+}
+
+uint32_t
+QUICConfigParams::initial_max_stream_data_uni_in() const
+{
+  return this->_initial_max_stream_data_uni_in;
+}
+
+uint32_t
+QUICConfigParams::initial_max_stream_data_uni_out() const
+{
+  return this->_initial_max_stream_data_uni_out;
+}
+
+uint64_t
+QUICConfigParams::initial_max_streams_bidi_in() const
+{
+  return this->_initial_max_streams_bidi_in;
+}
+
+uint64_t
+QUICConfigParams::initial_max_streams_bidi_out() const
+{
+  return this->_initial_max_streams_bidi_out;
+}
+
+uint64_t
+QUICConfigParams::initial_max_streams_uni_in() const
+{
+  return this->_initial_max_streams_uni_in;
+}
+
+uint64_t
+QUICConfigParams::initial_max_streams_uni_out() const
+{
+  return this->_initial_max_streams_uni_out;
+}
+
+uint8_t
+QUICConfigParams::ack_delay_exponent_in() const
+{
+  return this->_ack_delay_exponent_in;
+}
+
+uint8_t
+QUICConfigParams::ack_delay_exponent_out() const
+{
+  return this->_ack_delay_exponent_out;
+}
+
+uint8_t
+QUICConfigParams::max_ack_delay_in() const
+{
+  return this->_max_ack_delay_in;
+}
+
+uint8_t
+QUICConfigParams::max_ack_delay_out() const
+{
+  return this->_max_ack_delay_out;
+}
+
+uint8_t
+QUICConfigParams::active_cid_limit_in() const
+{
+  return this->_active_cid_limit_in;
+}
+
+uint8_t
+QUICConfigParams::active_cid_limit_out() const
+{
+  return this->_active_cid_limit_out;
+}
+
+bool
+QUICConfigParams::disable_active_migration() const
+{
+  return this->_disable_active_migration;
+}
+
+uint32_t
+QUICConfigParams::get_max_recv_udp_payload_size_in() const
+{
+  return this->_max_recv_udp_payload_size_in;
+}
+
+uint32_t
+QUICConfigParams::get_max_recv_udp_payload_size_out() const
+{
+  return this->_max_recv_udp_payload_size_out;
+}
+
+uint32_t
+QUICConfigParams::get_max_send_udp_payload_size_in() const
+{
+  return this->_max_send_udp_payload_size_in;
+}
+
+uint32_t
+QUICConfigParams::get_max_send_udp_payload_size_out() const
+{
+  return this->_max_send_udp_payload_size_out;
+}
+
+const char *
+QUICConfigParams::server_supported_groups() const
+{
+  return this->_server_supported_groups;
+}
+
+const char *
+QUICConfigParams::client_supported_groups() const
+{
+  return this->_client_supported_groups;
+}
+
+shared_SSL_CTX
+QUICConfigParams::client_ssl_ctx() const
+{
+  return this->_client_ssl_ctx;
+}
+
+uint8_t
+QUICConfigParams::scid_len()
+{
+  return QUICConfigParams::_scid_len;
+}
+
+const char *
+QUICConfigParams::client_session_file() const
+{
+  return this->_client_session_file;
+}
+
+const char *
+QUICConfigParams::get_qlog_file_base_name() const
+{
+  return this->_qlog_file_base_name;
+}
+
+bool
+QUICConfigParams::disable_http_0_9() const
+{
+  return this->_disable_http_0_9;
+}
+
+#if TS_HAS_QUICHE
+quiche_cc_algorithm
+QUICConfigParams::get_cc_algorithm() const
+{
+  switch (this->_cc_algorithm) {
+  case 0:
+    return QUICHE_CC_RENO;
+  case 1:
+    return QUICHE_CC_CUBIC;
+  default:
+    return QUICHE_CC_RENO;
+  }
+}
+#endif
+
+//
+// QUICConfig
+//
+void
+QUICConfig::startup()
+{
+  QUICTokenKeyConfig::startup();
+  reconfigure();
+}
+
+void
+QUICConfig::reconfigure(ConfigContext ctx)
+{
+  QUICConfigParams *params;
+  params = new QUICConfigParams;
+  // re-read configuration
+  params->initialize(ctx);
+  _config_id = configProcessor.set(_config_id, params);
+
+  QUICConnectionId::SCID_LEN = params->scid_len();
+  ctx.complete("QUICConfig reloaded");
+}
+
+QUICConfigParams *
+QUICConfig::acquire()
+{
+  return static_cast<QUICConfigParams *>(configProcessor.get(_config_id));
+}
+
+void
+QUICConfig::release(QUICConfigParams *params)
+{
+  configProcessor.release(_config_id, params);
+}

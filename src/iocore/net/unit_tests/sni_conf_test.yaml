@@ -1,0 +1,67 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+sni:
+- fqdn: allports.com
+- fqdn: someport.com
+  inbound_port_ranges:
+  - 1-433
+  - 480-488
+  http2: true
+- fqdn: someport.com
+  inbound_port_ranges: 8080-65535
+- fqdn: oneport.com
+  inbound_port_ranges: 433
+
+# order check
+- fqdn: foo.bar.com
+  http2: true
+  http2_buffer_water_mark: 256
+  http2_initial_window_size_in: 256
+- fqdn: "*.bar.com"
+  http2: true
+  http2_buffer_water_mark: 256
+- fqdn: foo.bar.com
+  http2: false
+
+# test with mixed-case
+- fqdn: "MiXeDcAsE.foo.com"
+  http2: true
+  http2_buffer_water_mark: 256
+  inbound_port_ranges: 31337
+
+# test with mixed-case glob
+- fqdn: "*.MiXeDcAsE.com"
+  http2: false
+
+# test glob in the middle, this will be an exact match
+- fqdn: "cat.*.com"
+
+# test session ticket overrides
+- fqdn: tickets.com
+  ssl_ticket_enabled: 1
+  ssl_ticket_number: 3
+
+# test ip_allow filtering
+- fqdn: ipallow.example.com
+  ip_allow: 192.168.1.0/24,10.0.0.1
+
+# test entry with no ip_allow (only protocol settings)
+- fqdn: noipallow.example.com
+  http2: off
+# test raw public key (RFC 7250) settings
+- fqdn: rpk.com
+  client_rpk_enabled: true

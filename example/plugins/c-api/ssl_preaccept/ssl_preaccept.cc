@@ -35,13 +35,15 @@
 #include <deque>
 
 #define PLUGIN_NAME "ssl-preaccept"
-#define PCP "[" PLUGIN_NAME "] "
+#define PCP         "[" PLUGIN_NAME "] "
 
 namespace
 {
 using IpRange      = std::pair<IpAddr, IpAddr>;
 using IpRangeQueue = std::deque<IpRange>;
 IpRangeQueue ClientBlindTunnelIp;
+
+DbgCtl dbg_ctl{PLUGIN_NAME};
 
 void
 Parse_Addr_String(std::string_view const &text, IpRange &range)
@@ -65,10 +67,10 @@ int
 CB_Pre_Accept(TSCont, TSEvent event, void *edata)
 {
   TSVConn ssl_vc = reinterpret_cast<TSVConn>(edata);
-  IpAddr ip(TSNetVConnLocalAddrGet(ssl_vc));
-  char buff[INET6_ADDRSTRLEN];
-  IpAddr ip_client(TSNetVConnRemoteAddrGet(ssl_vc));
-  char buff2[INET6_ADDRSTRLEN];
+  IpAddr  ip(TSNetVConnLocalAddrGet(ssl_vc));
+  char    buff[INET6_ADDRSTRLEN];
+  IpAddr  ip_client(TSNetVConnRemoteAddrGet(ssl_vc));
+  char    buff2[INET6_ADDRSTRLEN];
 
   // Not the worlds most efficient address comparison.  For short lists
   // shouldn't be too bad.  If the client IP is in any of the ranges,
@@ -87,9 +89,9 @@ CB_Pre_Accept(TSCont, TSEvent event, void *edata)
     TSVConnTunnel(ssl_vc);
   }
 
-  TSDebug(PLUGIN_NAME, "Pre accept callback %p - event is %s, target address %s, client address %s%s", ssl_vc,
-          event == TS_EVENT_VCONN_START ? "good" : "bad", ip.toString(buff, sizeof(buff)), ip_client.toString(buff2, sizeof(buff2)),
-          proxy_tunnel ? "" : " blind tunneled");
+  Dbg(dbg_ctl, "Pre accept callback %p - event is %s, target address %s, client address %s%s", ssl_vc,
+      event == TS_EVENT_VCONN_START ? "good" : "bad", ip.toString(buff, sizeof(buff)), ip_client.toString(buff2, sizeof(buff2)),
+      proxy_tunnel ? "" : " blind tunneled");
 
   // All done, reactivate things
   TSVConnReenable(ssl_vc);
@@ -102,8 +104,8 @@ CB_Pre_Accept(TSCont, TSEvent event, void *edata)
 void
 TSPluginInit(int argc, const char *argv[])
 {
-  bool success = false;
-  TSCont cb_pa = nullptr; // pre-accept callback continuation
+  bool   success = false;
+  TSCont cb_pa   = nullptr; // pre-accept callback continuation
 
   TSPluginRegistrationInfo info;
   info.plugin_name   = PLUGIN_NAME;
@@ -133,7 +135,7 @@ TSPluginInit(int argc, const char *argv[])
   if (!success) {
     TSError(PCP "not initialized");
   }
-  TSDebug(PLUGIN_NAME, "Plugin %s", success ? "online" : "offline");
+  Dbg(dbg_ctl, "Plugin %s", success ? "online" : "offline");
 
   return;
 }

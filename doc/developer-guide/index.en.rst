@@ -29,9 +29,9 @@ current version. As a result, some of the sections may refer to
 functionality that no longer exists.
 
 If you find any such issues, you may want to submit a `bug or a
-patch <https://issues.apache.org/jira/secure/CreateIssue!default.jspa?pid=12310963>`__.
+patch <https://github.com/apache/trafficserver/issues/new>`__.
 We also have a Wiki page explaining how to `create useful bug reports
-<https://cwiki.apache.org/confluence/display/TS/Filing+useful+bug+reports>`__.
+<https://github.com/apache/trafficserver/wiki/Contributing#writing-a-useful-bug-report>`__.
 We encourage everyone to file tickets, early and often. Looking for existing,
 duplicate bugs is encouraged, but not required.
 
@@ -41,14 +41,15 @@ duplicate bugs is encouraged, but not required.
    introduction/index.en
    release-process/index.en
    contributing/index.en
-   testing-with-vagrant/index.en
    debugging/index.en
    threads-and-events.en
    cache-architecture/index.en
    logging-architecture/index.en
    internal-libraries/index.en
    plugins/index.en
+   cripts/index.en
    config-vars.en
+   config-reload-framework.en
    api/index.en
    continuous-integration/index.en
    documentation/index.en
@@ -58,3 +59,4 @@ duplicate bugs is encouraged, but not required.
    design-documents/index.en
    layout/index.en
    testing/index.en
+   jsonrpc/index.en

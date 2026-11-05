@@ -2,7 +2,7 @@
 
   Pseudorandom Number Generator
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -33,24 +33,44 @@ public:
   static uint64_t
   random()
   {
-    std::uniform_int_distribution<uint64_t> dist{0, UINT64_MAX};
-    return dist(_engine);
+    State &s = state();
+
+    return s.int_dist(s.engine);
   }
 
   static double
   drandom()
   {
-    std::uniform_real_distribution<double> dist{0, 1};
-    return dist(_engine);
+    State &s = state();
+
+    return s.real_dist(s.engine);
   }
 
   static void
   seed(uint64_t s)
   {
-    _engine.seed(s);
+    State &st = state();
+
+    st.engine.seed(s);
+    st.int_dist.reset();
+    st.real_dist.reset();
   }
 
 private:
-  thread_local static std::mt19937_64 _engine;
+  struct State {
+    std::mt19937_64                         engine{std::random_device{}()};
+    std::uniform_int_distribution<uint64_t> int_dist{0, UINT64_MAX};
+    std::uniform_real_distribution<double>  real_dist{0.0, 1.0};
+  };
+
+  // Defined in the header so plugins (cripts, cache_promote) don't depend on traffic_server happening to link a tscore
+  // object. Function-local rather than an inline variable: Darwin emits the inline variable's TLS wrapper as a strong symbol.
+  static State &
+  state()
+  {
+    thread_local State s;
+
+    return s;
+  }
 };
 }; // namespace ts

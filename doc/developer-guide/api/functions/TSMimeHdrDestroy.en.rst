@@ -16,7 +16,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSMimeHdrDestroy
 ****************
@@ -28,7 +28,7 @@ Synopsis
 
     #include <ts/ts.h>
 
-.. function:: TSReturnCode TSMimeHdrDestroy(TSMBuffer bufp, TSMLoc offset)
+.. function:: TSReturnCode TSMimeHdrDestroy(TSMBuffer bufp, TSMLoc offset) noexcept
 
 Description
 ===========

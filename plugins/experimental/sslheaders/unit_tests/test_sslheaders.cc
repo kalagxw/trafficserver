@@ -17,34 +17,19 @@
  */
 
 #include "../sslheaders.h"
+#include <ts/ts.h>
 #include <cstdio>
 #include <cstdarg>
 #include <openssl/ssl.h>
 #include <openssl/bio.h>
 #include <openssl/pem.h>
 
-#include <catch.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 // Mock TS API functions.
 
-char *
-_TSstrdup(const char *str, int64_t length, const char *)
-{
-  if (length == -1) {
-    return strdup(str);
-  } else {
-    return strndup(str, length);
-  }
-}
-
 void
-_TSfree(void *ptr)
-{
-  free(ptr);
-}
-
-void
-TSDebug(const char *tag, const char *fmt, ...)
+DbgCtl::print(const char *tag, char const * /* file */, char const * /* function */, int /* line */, const char *fmt, ...)
 {
   va_list args;
 
@@ -56,7 +41,7 @@ TSDebug(const char *tag, const char *fmt, ...)
 }
 
 void
-TSError(const char *fmt, ...)
+TSError(const char *fmt, ...) noexcept
 {
   va_list args;
 
@@ -71,15 +56,15 @@ TSError(const char *fmt, ...)
 static char *
 make_pem_header(const char *pem)
 {
-  char *hdr;
-  char *ptr;
+  char    *hdr;
+  char    *ptr;
   unsigned remain;
 
   hdr = ptr = strdup(pem);
   remain    = strlen(hdr);
 
   for (char *nl; (nl = static_cast<char *>(memchr(ptr, '\n', remain))); ptr = nl) {
-    *nl = ' ';
+    *nl     = ' ';
     remain -= nl - ptr;
   }
 
@@ -212,15 +197,15 @@ TEST_CASE("SSLHeaders", "[ssl_hdrs]")
   ;
 #endif
 
-    BIO *exp   = BIO_new(BIO_s_mem());
-    BIO *bio   = BIO_new_mem_buf((void *)test_certificate, -1);
+    BIO  *exp  = BIO_new(BIO_s_mem());
+    BIO  *bio  = BIO_new_mem_buf((void *)test_certificate, -1);
     X509 *x509 = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
 
     LOG_CHECK(x509 != nullptr, "failed to load the test certificate");
 
 #define EXPECT_FIELD(_field, _value)                                                                                    \
   do {                                                                                                                  \
-    long len;                                                                                                           \
+    long  len;                                                                                                          \
     char *ptr;                                                                                                          \
     SslHdrExpandX509Field(exp, x509, _field);                                                                           \
     len = BIO_get_mem_data(exp, &ptr);                                                                                  \

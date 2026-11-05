@@ -21,19 +21,23 @@
  * @brief Plugin configuration.
  */
 
-#include <fstream>   /* std::ifstream */
-#include <getopt.h>  /* getopt_long() */
-#include <sstream>   /* std::istringstream */
-#include <strings.h> /* strncasecmp() */
+#include <charconv> /* std::from_chars() */
+#include <cstring>  /* strlen() */
+#include <fstream>  /* std::ifstream */
+#include <getopt.h> /* getopt_long() */
+#include <sstream>  /* std::istringstream */
 
 #include "configs.h"
+#include "tsutil/StringCompare.h"
+
+DbgCtl Bg_dbg_ctl{PLUGIN_NAME};
 
 template <typename ContainerType>
 static void
 commaSeparateString(ContainerType &c, const String &input)
 {
   std::istringstream istr(input);
-  String token;
+  String             token;
 
   while (std::getline(istr, token, ',')) {
     c.insert(c.end(), token);
@@ -43,7 +47,63 @@ commaSeparateString(ContainerType &c, const String &input)
 static bool
 isTrue(const char *arg)
 {
-  return (0 == strncasecmp("true", arg, 4) || 0 == strncasecmp("1", arg, 1) || 0 == strncasecmp("yes", arg, 3));
+  return (ts::iequals("true", arg) || ts::iequals("1", arg) || ts::iequals("yes", arg));
+}
+
+static String
+fetchOverflowString(const EvalPolicy policy)
+{
+  switch (policy) {
+  case EvalPolicy::Overflow64:
+    return "64";
+    break;
+  case EvalPolicy::Bignum:
+    return "Bignum";
+    break;
+  default:
+    return "32";
+    break;
+  }
+}
+
+bool
+PrefetchConfig::setFetchOverflow(const char *optarg)
+{
+  if (nullptr == optarg) {
+    return false;
+  }
+  if (StringView("32") == optarg) {
+    _fetchOverflow = EvalPolicy::Overflow32;
+  } else if (StringView("64") == optarg) {
+    _fetchOverflow = EvalPolicy::Overflow64;
+  } else if (ts::iequals("bignum", optarg)) {
+    _fetchOverflow = EvalPolicy::Bignum;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Parses @a optarg as an unsigned integer option value.
+ * @param optarg the option value to parse.
+ * @param value set to the parsed value on success, untouched on failure.
+ * @return true if @a optarg is a non-empty string of decimal digits that fits in @a value.
+ */
+static bool
+parseUnsignedInt(const char *optarg, unsigned &value)
+{
+  if (nullptr == optarg) {
+    return false;
+  }
+
+  const char *const end = optarg + strlen(optarg);
+  auto const [parsed, ec]{std::from_chars(optarg, end, value)};
+
+  /* from_chars() reports a leading sign or a non-digit as invalid_argument and a value too large
+   * for @a value as result_out_of_range. Requiring it to consume the whole string rejects trailing
+   * characters such as "10abc". */
+  return std::errc{} == ec && parsed == end;
 }
 
 /**
@@ -54,27 +114,31 @@ isTrue(const char *arg)
 bool
 PrefetchConfig::init(int argc, char *argv[])
 {
-  static const struct option longopt[] = {{const_cast<char *>("front"), optional_argument, nullptr, 'f'},
-                                          {const_cast<char *>("api-header"), optional_argument, nullptr, 'h'},
-                                          {const_cast<char *>("next-header"), optional_argument, nullptr, 'n'},
-                                          {const_cast<char *>("fetch-policy"), optional_argument, nullptr, 'p'},
-                                          {const_cast<char *>("fetch-count"), optional_argument, nullptr, 'c'},
-                                          {const_cast<char *>("fetch-path-pattern"), optional_argument, nullptr, 'e'},
-                                          {const_cast<char *>("fetch-query"), optional_argument, nullptr, 'q'},
-                                          {const_cast<char *>("fetch-max"), optional_argument, nullptr, 'x'},
-                                          {const_cast<char *>("replace-host"), optional_argument, nullptr, 'r'},
-                                          {const_cast<char *>("name-space"), optional_argument, nullptr, 's'},
-                                          {const_cast<char *>("metrics-prefix"), optional_argument, nullptr, 'm'},
-                                          {const_cast<char *>("exact-match"), optional_argument, nullptr, 'y'},
-                                          {const_cast<char *>("log-name"), optional_argument, nullptr, 'l'},
-                                          {nullptr, 0, nullptr, 0}};
+  static const struct option longopt[] = {
+    {const_cast<char *>("front"),              optional_argument, nullptr, 'f'},
+    {const_cast<char *>("api-header"),         optional_argument, nullptr, 'h'},
+    {const_cast<char *>("cmcd-nor"),           optional_argument, nullptr, 'd'},
+    {const_cast<char *>("next-header"),        optional_argument, nullptr, 'n'},
+    {const_cast<char *>("fetch-policy"),       optional_argument, nullptr, 'p'},
+    {const_cast<char *>("fetch-count"),        optional_argument, nullptr, 'c'},
+    {const_cast<char *>("fetch-path-pattern"), optional_argument, nullptr, 'e'},
+    {const_cast<char *>("fetch-query"),        optional_argument, nullptr, 'q'},
+    {const_cast<char *>("fetch-max"),          optional_argument, nullptr, 'x'},
+    {const_cast<char *>("replace-host"),       optional_argument, nullptr, 'r'},
+    {const_cast<char *>("name-space"),         optional_argument, nullptr, 's'},
+    {const_cast<char *>("metrics-prefix"),     optional_argument, nullptr, 'm'},
+    {const_cast<char *>("exact-match"),        optional_argument, nullptr, 'y'},
+    {const_cast<char *>("log-name"),           optional_argument, nullptr, 'l'},
+    {const_cast<char *>("fetch-overflow"),     optional_argument, nullptr, 'o'},
+    {nullptr,                                  0,                 nullptr, 0  },
+  };
 
   bool status = true;
   optind      = 0;
 
   /* argv contains the "to" and "from" URLs. Skip the first so that the second one poses as the program name. */
-  argc--;
-  argv++;
+  --argc;
+  ++argv;
 
   for (;;) {
     int opt;
@@ -95,6 +159,10 @@ PrefetchConfig::init(int argc, char *argv[])
       setApiHeader(optarg);
       break;
 
+    case 'd': /* --cmcd-nor */
+      _cmcd_nor = ::isTrue(optarg);
+      break;
+
     case 'n': /* --next-header */
       setNextHeader(optarg);
       break;
@@ -104,17 +172,24 @@ PrefetchConfig::init(int argc, char *argv[])
       break;
 
     case 'c': /* --fetch-count */
-      setFetchCount(optarg);
+      if (unsigned count = 0; parseUnsignedInt(optarg, count)) {
+        setFetchCount(count);
+      } else {
+        PrefetchError("invalid --fetch-count '%s': expected a non-negative integer", optarg ? optarg : "");
+        status = false;
+      }
       break;
 
     case 'e': /* --fetch-path-pattern */ {
-      Pattern *pattern = new Pattern();
+      auto pattern = std::make_unique<Pattern>();
       if (nullptr != pattern) {
         if (pattern->init(optarg)) {
-          _nextPaths.add(pattern);
+          _nextPaths.add(std::move(pattern));
         } else {
-          PrefetchError("failed to initialize next object pattern");
-          delete pattern;
+          /* An unusable fetch-path-pattern is a configuration error; fail instance creation so ATS
+           * refuses to load the remap rule rather than silently running with prefetch disabled. */
+          PrefetchError("failed to initialize fetch-path-pattern '%s'", optarg ? optarg : "");
+          status = false;
         }
       }
     } break;
@@ -124,7 +199,19 @@ PrefetchConfig::init(int argc, char *argv[])
     } break;
 
     case 'x': /* --fetch-max */
-      setFetchMax(optarg);
+      if (unsigned max = 0; parseUnsignedInt(optarg, max)) {
+        setFetchMax(max);
+      } else {
+        PrefetchError("invalid --fetch-max '%s': expected a non-negative integer", optarg ? optarg : "");
+        status = false;
+      }
+      break;
+
+    case 'o': /* --fetch-overflow */
+      if (!setFetchOverflow(optarg)) {
+        PrefetchError("invalid --fetch-overflow '%s': expected 32, 64, or bignum", optarg ? optarg : "");
+        status = false;
+      }
       break;
 
     case 'r': /* --replace-host */
@@ -165,11 +252,14 @@ PrefetchConfig::finalize()
   PrefetchDebug("front-end: %s", (_front ? "true" : "false"));
   PrefetchDebug("exact match: %s", (_exactMatch ? "true" : "false"));
   PrefetchDebug("query key: %s", _queryKey.c_str());
+  PrefetchDebug("cncd-nor: %s", (_front ? "true" : "false"));
   PrefetchDebug("API header name: %s", _apiHeader.c_str());
   PrefetchDebug("next object header name: %s", _nextHeader.c_str());
   PrefetchDebug("fetch policy parameters: %s", _fetchPolicy.c_str());
   PrefetchDebug("fetch count: %d", _fetchCount);
   PrefetchDebug("fetch concurrently max: %d", _fetchMax);
+  String fostr = fetchOverflowString(_fetchOverflow);
+  PrefetchDebug("fetch overflow: %.*s", (int)fostr.length(), fostr.data());
   PrefetchDebug("replace host name: %s", _replaceHost.c_str());
   PrefetchDebug("name space: %s", _namespace.c_str());
   PrefetchDebug("log name: %s", _logName.c_str());

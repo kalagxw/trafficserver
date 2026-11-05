@@ -27,15 +27,26 @@
 #include <fstream>
 #include <string_view>
 
-#include "Http3Transaction.h"
-#include "P_QUICNetVConnection.h"
+#include "proxy/http3/Http3Transaction.h"
+#include "../iocore/net/P_QUICNetVConnection.h"
+#include "iocore/net/quic/QUICStreamManager.h"
 
 // OpenSSL protocol-lists format (vector of 8-bit length-prefixed, byte strings)
 // https://www.openssl.org/docs/manmaster/man3/SSL_CTX_set_alpn_protos.html
 // Should be integrate with IP_PROTO_TAG_HTTP_QUIC in ts/ink_inet.h ?
 using namespace std::literals;
-static constexpr std::string_view HQ_ALPN_PROTO_LIST("\5hq-29\5hq-27"sv);
-static constexpr std::string_view H3_ALPN_PROTO_LIST("\5h3-29\5h3-27"sv);
+
+namespace
+{
+
+constexpr std::string_view HQ_ALPN_PROTO_LIST("\5hq-29\5hq-27"sv);
+constexpr std::string_view H3_ALPN_PROTO_LIST("\5h3-29\5h3-27"sv);
+
+DbgCtl dbg_ctl_quic_client{"quic_client"};
+DbgCtl dbg_ctl_quic_client_app{"quic_client_app"};
+DbgCtl dbg_ctl_v_quic_client_app{"v_quic_client_app"};
+
+} // end anonymous namespace
 
 QUICClient::QUICClient(const QUICClientConfig *config) : Continuation(new_ProxyMutex()), _config(config)
 {
@@ -62,7 +73,7 @@ QUICClient::start(int, void *)
 
   int res = getaddrinfo(this->_config->addr, this->_config->port, &hints, &this->_remote_addr_info);
   if (res < 0) {
-    Debug("quic_client", "Error: %s (%d)", strerror(errno), errno);
+    Dbg(dbg_ctl_quic_client, "Error: %s (%d)", strerror(errno), errno);
     return EVENT_DONE;
   }
 
@@ -89,7 +100,7 @@ QUICClient::start(int, void *)
 
     SCOPED_MUTEX_LOCK(lock, this->mutex, this_ethread());
 
-    Action *action = quic_NetProcessor.connect_re(this, info->ai_addr, &opt);
+    Action *action = quic_NetProcessor.connect_re(this, info->ai_addr, opt);
     if (action == ACTION_RESULT_DONE) {
       break;
     }
@@ -104,7 +115,7 @@ QUICClient::state_http_server_open(int event, void *data)
   switch (event) {
   case NET_EVENT_OPEN: {
     // TODO: create ProxyServerSession / ProxyServerTransaction
-    Debug("quic_client", "start proxy server ssn/txn");
+    Dbg(dbg_ctl_quic_client, "start proxy server ssn/txn");
 
     QUICNetVConnection *conn = static_cast<QUICNetVConnection *>(data);
 
@@ -113,7 +124,7 @@ QUICClient::state_http_server_open(int event, void *data)
       app->start();
     } else if (this->_config->http3) {
       // TODO: see what server session is doing with IpAllow::ACL
-      IpAllow::ACL session_acl;
+      IpAllow::ACL    session_acl;
       Http3ClientApp *app = new Http3ClientApp(conn, std::move(session_acl), options, this->_config);
       SCOPED_MUTEX_LOCK(lock, app->mutex, this_ethread());
       app->start();
@@ -141,8 +152,8 @@ QUICClient::state_http_server_open(int event, void *data)
 //
 // Http09ClientApp
 //
-#define Http09ClientAppDebug(fmt, ...) Debug("quic_client_app", "[%s] " fmt, this->_qc->cids().data(), ##__VA_ARGS__)
-#define Http09ClientAppVDebug(fmt, ...) Debug("v_quic_client_app", "[%s] " fmt, this->_qc->cids().data(), ##__VA_ARGS__)
+#define Http09ClientAppDebug(fmt, ...)  Dbg(dbg_ctl_quic_client_app, "[%s] " fmt, this->_qc->cids().data(), ##__VA_ARGS__)
+#define Http09ClientAppVDebug(fmt, ...) Dbg(dbg_ctl_v_quic_client_app, "[%s] " fmt, this->_qc->cids().data(), ##__VA_ARGS__)
 
 Http09ClientApp::Http09ClientApp(QUICNetVConnection *qvc, const QUICClientConfig *config) : QUICApplication(qvc), _config(config)
 {
@@ -154,7 +165,7 @@ Http09ClientApp::Http09ClientApp(QUICNetVConnection *qvc, const QUICClientConfig
 void
 Http09ClientApp::on_new_stream(QUICStream &stream)
 {
-  auto ret   = this->_streams.emplace(stream.id(), stream);
+  auto  ret  = this->_streams.emplace(stream.id(), stream);
   auto &info = ret.first->second;
 
   switch (stream.direction()) {
@@ -194,7 +205,7 @@ Http09ClientApp::start()
 void
 Http09ClientApp::_do_http_request()
 {
-  QUICStreamId stream_id;
+  QUICStreamId            stream_id;
   QUICConnectionErrorUPtr error = this->_qc->stream_manager()->create_bidi_stream(stream_id);
 
   if (error != nullptr) {
@@ -204,7 +215,7 @@ Http09ClientApp::_do_http_request()
 
   // TODO: move to transaction
   char request[1024] = {0};
-  int request_len    = snprintf(request, sizeof(request), "GET %s\r\n", this->_config->path);
+  int  request_len   = snprintf(request, sizeof(request), "GET %s\r\n", this->_config->path);
 
   Http09ClientAppDebug("\n%s", request);
 
@@ -220,7 +231,7 @@ Http09ClientApp::main_event_handler(int event, Event *data)
 {
   Http09ClientAppVDebug("%s (%d)", get_vc_event_name(event), event);
 
-  VIO *vio                     = reinterpret_cast<VIO *>(data->cookie);
+  VIO                 *vio     = reinterpret_cast<VIO *>(data->cookie);
   QUICStreamVCAdapter *adapter = static_cast<QUICStreamVCAdapter *>(vio->vc_server);
 
   if (adapter == nullptr) {
@@ -232,7 +243,7 @@ Http09ClientApp::main_event_handler(int event, Event *data)
   case VC_EVENT_READ_READY:
   case VC_EVENT_READ_COMPLETE: {
     std::streambuf *default_stream = nullptr;
-    std::ofstream f_stream;
+    std::ofstream   f_stream;
 
     if (this->_filename) {
       default_stream = std::cout.rdbuf();
@@ -242,7 +253,7 @@ Http09ClientApp::main_event_handler(int event, Event *data)
 
     uint8_t buf[8192] = {0};
     int64_t nread;
-    auto reader = vio->get_reader();
+    auto    reader = vio->get_reader();
     while ((nread = reader->read(buf, sizeof(buf))) > 0) {
       std::cout.write(reinterpret_cast<char *>(buf), nread);
       vio->ndone += nread;
@@ -325,7 +336,7 @@ void
 Http3ClientApp::_do_http_request()
 {
   QUICConnectionErrorUPtr error;
-  QUICStreamId stream_id;
+  QUICStreamId            stream_id;
   error = this->_qc->stream_manager()->create_bidi_stream(stream_id);
   if (error != nullptr) {
     Error("%s", error->msg);
@@ -344,7 +355,7 @@ Http3ClientApp::_do_http_request()
   this->_resp_handler->set_read_vio(read_vio);
 
   // Write HTTP Request to write_vio
-  char request[1024] = {0};
+  char        request[1024] = {0};
   std::string format;
   if (this->_config->path[0] == '/') {
     format = "GET https://%s%s HTTP/1.1\r\n\r\n";
@@ -363,7 +374,7 @@ Http3ClientApp::_do_http_request()
   Http09ClientAppDebug("\n%s", request);
 
   // TODO: check write avail size
-  int64_t nbytes            = this->_req_buf->write(request, request_len);
+  int64_t         nbytes    = this->_req_buf->write(request, request_len);
   IOBufferReader *buf_start = this->_req_buf->alloc_reader();
   txn->do_io_write(this->_req_generator, nbytes, buf_start);
 }
@@ -395,12 +406,12 @@ RespHandler::set_read_vio(VIO *vio)
 int
 RespHandler::main_event_handler(int event, Event *data)
 {
-  Debug("v_http3", "%s", get_vc_event_name(event));
+  Dbg(dbg_ctl_v_http3, "%s", get_vc_event_name(event));
   switch (event) {
   case VC_EVENT_READ_READY:
   case VC_EVENT_READ_COMPLETE: {
     std::streambuf *default_stream = nullptr;
-    std::ofstream f_stream;
+    std::ofstream   f_stream;
 
     if (this->_filename) {
       default_stream = std::cout.rdbuf();

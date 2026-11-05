@@ -14,6 +14,7 @@
    implied.  See the License for the specific language governing
    permissions and limitations under the License.
 
+.. default-domain:: cpp
 
 TSVConnSslSniGet
 ================
@@ -25,9 +26,11 @@ Synopsis
 
     #include <ts/ts.h>
 
-.. c:function:: const char TSVConnSslSniGet(TSVConn sslp, int *length)
+.. function:: const char TSVConnSslSniGet(TSVConn sslp, int *length)
 
 
 Description
 -----------
 Get the SNI (Server Name Indication) that corresponds to SSL connection :arg:`sslp`.
+
+If :arg:`length` is not null, the length of the returned string (or 0 if this function returns null) will be stored.

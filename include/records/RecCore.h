@@ -1,0 +1,288 @@
+/** @file
+
+  Public RecCore declarations
+
+  @par License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+
+#pragma once
+
+#include <functional>
+#include <optional>
+#include <string>
+#include <utility>
+
+#include "tscore/Diags.h"
+
+#include "records/RecDefs.h"
+#include "mgmt/config/ConfigContext.h"
+#include "swoc/MemSpan.h"
+
+struct RecRecord;
+
+//-------------------------------------------------------------------------
+// Diagnostic Output
+//-------------------------------------------------------------------------
+int RecSetDiags(Diags *diags);
+
+//-------------------------------------------------------------------------
+// Config File Parsing
+//-------------------------------------------------------------------------
+using RecConfigEntryCallback = void (*)(RecT, RecDataT, const char *, const char *, RecSourceT);
+
+void RecConfigFileInit();
+int  RecConfigFileParse(const char *path, RecConfigEntryCallback handler);
+
+// Return a copy of the system's configuration directory.
+std::string RecConfigReadConfigDir();
+
+// Return a copy of the system's local state directory, taking proxy.config.local_state_dir into account.
+std::string RecConfigReadRuntimeDir();
+
+// Return a copy of the system's log directory, taking proxy.config.log.logfile_dir into account.
+std::string RecConfigReadLogDir();
+
+// Return a copy of the system's bin directory, taking proxy.config.bin_path into account.
+std::string RecConfigReadBinDir();
+
+// Return a copy of the system's plugin directory, taking proxy.config.plugin.plugin_dir into account.
+std::string RecConfigReadPluginDir();
+
+// Return a copy of a configuration file that is relative to sysconfdir. The relative path to the configuration
+// file is specified in the configuration variable named by "file_variable". If the configuration variable has no
+// value, nullptr is returned.
+std::string RecConfigReadConfigPath(const char *file_variable, const char *default_value = nullptr);
+
+// Return a copy of the persistent stats file. This is $RUNTIMEDIR/records.snap.
+std::string RecConfigReadPersistentStatsPath();
+
+/// Indicates why RecConfigOverrideFromEnvironment() chose its returned value.
+enum class RecConfigOverrideSource {
+  NONE,    ///< No override — the original value was kept.
+  ENV,     ///< Overridden by a PROXY_CONFIG_* environment variable.
+  RUNROOT, ///< Overridden with the resolved Layout path because runroot manages this record.
+};
+
+/// Label for the override source (for logging).
+constexpr const char *
+RecConfigOverrideSourceName(RecConfigOverrideSource src)
+{
+  switch (src) {
+  case RecConfigOverrideSource::ENV:
+    return "environment variable";
+  case RecConfigOverrideSource::RUNROOT:
+    return "runroot";
+  case RecConfigOverrideSource::NONE:
+    return "none";
+  default:
+    return "unknown";
+  }
+}
+
+// Test whether the named configuration value is overridden by the execution
+// environment — either a PROXY_CONFIG_* environment variable or the runroot
+// mechanism.  Returns the resolved value together with the source that
+// produced it.
+std::pair<std::string, RecConfigOverrideSource> RecConfigOverrideFromEnvironment(const char *name, const char *value);
+
+//-------------------------------------------------------------------------
+// Stat Registration
+//-------------------------------------------------------------------------
+RecErrT _RecRegisterStatInt(RecT rec_type, const char *name, RecInt data_default, RecPersistT persist_type);
+#define RecRegisterStatInt(rec_type, name, data_default, persist_type) \
+  _RecRegisterStatInt((rec_type), (name), (data_default), REC_PERSISTENCE_TYPE(persist_type))
+
+RecErrT _RecRegisterStatFloat(RecT rec_type, const char *name, RecFloat data_default, RecPersistT persist_type);
+#define RecRegisterStatFloat(rec_type, name, data_default, persist_type) \
+  _RecRegisterStatFloat((rec_type), (name), (data_default), REC_PERSISTENCE_TYPE(persist_type))
+
+RecErrT _RecRegisterStatCounter(RecT rec_type, const char *name, RecCounter data_default, RecPersistT persist_type);
+#define RecRegisterStatCounter(rec_type, name, data_default, persist_type) \
+  _RecRegisterStatCounter((rec_type), (name), (data_default), REC_PERSISTENCE_TYPE(persist_type))
+
+//-------------------------------------------------------------------------
+// Config Registration
+//-------------------------------------------------------------------------
+
+RecErrT RecRegisterConfigInt(RecT rec_type, const char *name, RecInt data_default, RecUpdateT update_type, RecCheckT check_type,
+                             const char *ccheck_regex, RecSourceT source, RecAccessT access_type = RECA_NULL);
+
+RecErrT RecRegisterConfigFloat(RecT rec_type, const char *name, RecFloat data_default, RecUpdateT update_type, RecCheckT check_type,
+                               const char *check_regex, RecSourceT source, RecAccessT access_type = RECA_NULL);
+
+RecErrT RecRegisterConfigString(RecT rec_type, const char *name, const char *data_default, RecUpdateT update_type,
+                                RecCheckT check_type, const char *check_regex, RecSourceT source,
+                                RecAccessT access_type = RECA_NULL);
+
+RecErrT RecRegisterConfigCounter(RecT rec_type, const char *name, RecCounter data_default, RecUpdateT update_type,
+                                 RecCheckT check_type, const char *check_regex, RecSourceT source,
+                                 RecAccessT access_type = RECA_NULL);
+
+//-------------------------------------------------------------------------
+// Config Change Notification
+//-------------------------------------------------------------------------
+
+RecErrT RecLinkConfigInt(const char *name, RecInt *rec_int);
+RecErrT RecLinkConfigInt32(const char *name, int32_t *p_int32);
+RecErrT RecLinkConfigUInt32(const char *name, uint32_t *p_uint32);
+RecErrT RecLinkConfigFloat(const char *name, RecFloat *rec_float);
+RecErrT RecLinkConfigCounter(const char *name, RecCounter *rec_counter);
+RecErrT RecLinkConfigString(const char *name, RecString *rec_string);
+RecErrT RecLinkConfigByte(const char *name, RecByte *rec_byte);
+
+RecErrT RecRegisterConfigUpdateCb(const char *name, RecConfigUpdateCb const &update_cb, void *cookie);
+
+/** Enable a dynamic configuration variable.
+ *
+ * @param name Configuration var name.
+ * @param record_cb Callback to do the actual update of the master record.
+ * @param config_cb Callback to invoke when the configuration variable is updated.
+ * @param cookie Extra data for @a cb
+ *
+ * The purpose of this is to unite the different ways and times a configuration variable needs
+ * to be loaded. These are
+ * - Process start.
+ * - Dynamic update.
+ * - Plugin API update.
+ *
+ * @a record_cb is expected to perform the update. It must return a @c bool which is
+ * - @c true if the value was changed.
+ * - @c false if the value was not changed.
+ *
+ * Based on that, a run time configuration update is triggered or not.
+ *
+ * In addition, this invokes @a record_cb and passes it the information in the configuration variable
+ * global table in order to perform the initial loading of the value. No update is triggered for
+ * that call as it is not needed.
+ */
+void Enable_Config_Var(std::string_view const &name, RecContextCb record_cb, RecConfigUpdateCb const &config_cb, void *cookie);
+
+//-------------------------------------------------------------------------
+// Record Reading/Writing
+//-------------------------------------------------------------------------
+
+// WARNING!  Avoid deadlocks by calling the following set/get calls
+// with the appropriate locking conventions.  If you're calling these
+// functions from a configuration update callback (RecConfigUpdateCb),
+// be sure to set 'lock' to 'false' as the hash-table rwlock has
+// already been taken out for the callback.
+
+RecErrT RecSetRecordInt(const char *name, RecInt rec_int, RecSourceT source, bool lock = true);
+RecErrT RecSetRecordFloat(const char *name, RecFloat rec_float, RecSourceT source, bool lock = true);
+RecErrT RecSetRecordString(const char *name, RecStringConst rec_string, RecSourceT source, bool lock = true);
+RecErrT RecSetRecordCounter(const char *name, RecCounter rec_counter, RecSourceT source, bool lock = true);
+
+std::optional<RecInt>           RecGetRecordInt(const char *name, bool lock = true);
+std::optional<RecFloat>         RecGetRecordFloat(const char *name, bool lock = true);
+std::optional<std::string_view> RecGetRecordString(const char *name, char *buf, int buf_len, bool lock = true);
+std::optional<std::string>      RecGetRecordStringAlloc(const char *name, bool lock = true);
+std::optional<RecCounter>       RecGetRecordCounter(const char *name, bool lock = true);
+
+// Convinience to link and get a config of RecInt type
+inline RecErrT
+RecEstablishStaticConfigInt(RecInt &rec_int, const char *name, bool lock = true)
+{
+  RecLinkConfigInt(name, &rec_int);
+  auto tmp{RecGetRecordInt(name, lock)};
+  rec_int = tmp.value_or(0);
+  return tmp ? REC_ERR_OKAY : REC_ERR_FAIL;
+}
+
+// Convinience to link and get a config of int32_t type
+inline RecErrT
+RecEstablishStaticConfigInt32(int32_t &rec_int, const char *name, bool lock = true)
+{
+  RecLinkConfigInt32(name, &rec_int);
+  auto tmp{RecGetRecordInt(name, lock)};
+  rec_int = static_cast<int32_t>(tmp.value_or(0));
+  return tmp ? REC_ERR_OKAY : REC_ERR_FAIL;
+}
+
+// Convinience to link and get a config of uint32_t type
+inline RecErrT
+RecEstablishStaticConfigUInt32(uint32_t &rec_int, const char *name, bool lock = true)
+{
+  RecLinkConfigUInt32(name, &rec_int);
+  auto tmp{RecGetRecordInt(name, lock)};
+  rec_int = static_cast<uint32_t>(tmp.value_or(0));
+  return tmp ? REC_ERR_OKAY : REC_ERR_FAIL;
+}
+
+// Convenience to link and get a config of string type
+inline RecErrT
+RecEstablishStaticConfigString(RecString &rec_string, const char *name, bool lock = true)
+{
+  if (RecLinkConfigString(name, &rec_string) == REC_ERR_OKAY) {
+    ats_free(rec_string);
+  }
+  auto tmp{RecGetRecordStringAlloc(name, lock)};
+  rec_string = ats_stringdup(tmp);
+  return tmp ? REC_ERR_OKAY : REC_ERR_FAIL;
+}
+
+// Convenience to link and get a config of float type
+inline RecErrT
+RecEstablishStaticConfigFloat(RecFloat &rec_float, const char *name, bool lock = true)
+{
+  RecLinkConfigFloat(name, &rec_float);
+  auto tmp{RecGetRecordFloat(name, lock)};
+  rec_float = tmp.value_or(0);
+  return tmp ? REC_ERR_OKAY : REC_ERR_FAIL;
+}
+
+// Convenience to link and get a config of byte type
+// Allow to treat our "INT" configs as a byte type internally. Note
+// that the byte type is just a wrapper around RECD_INT.
+inline RecErrT
+RecEstablishStaticConfigByte(RecByte &rec_byte, const char *name, bool lock = true)
+{
+  RecLinkConfigByte(name, &rec_byte);
+  auto tmp{RecGetRecordInt(name, lock)};
+  rec_byte = static_cast<RecByte>(tmp.value_or(0));
+  return tmp ? REC_ERR_OKAY : REC_ERR_FAIL;
+}
+
+//------------------------------------------------------------------------
+// Record Attributes Reading
+//------------------------------------------------------------------------
+using RecLookupCallback = void (*)(const RecRecord *, void *);
+
+RecErrT RecLookupRecord(const char *name, RecLookupCallback callback, void *data, bool lock = true);
+RecErrT RecLookupMatchingRecords(unsigned rec_type, const char *match, RecLookupCallback callback, void *data, bool lock = true);
+
+RecErrT RecGetRecordType(const char *name, RecT *rec_type, bool lock = true);
+RecErrT RecGetRecordDataType(const char *name, RecDataT *data_type, bool lock = true);
+RecErrT RecGetRecordPersistenceType(const char *name, RecPersistT *persist_type, bool lock = true);
+RecErrT RecGetRecordSource(const char *name, RecSourceT *source, bool lock = true);
+
+/// Generate a warning if any configuration name/value is not registered.
+// void RecConfigWarnIfUnregistered();
+/// Generate a warning if any configuration name/value is not registered.
+void RecConfigWarnIfUnregistered(ConfigContext ctx = {});
+
+//------------------------------------------------------------------------
+// Set RecRecord attributes
+//------------------------------------------------------------------------
+RecErrT RecSetSyncRequired(const char *name, bool lock = true);
+
+/// Flush pending record config-update callbacks (those marked sync-required).
+/// This forces immediate execution of RecConfigUpdateCb callbacks for dirty records,
+/// rather than waiting for the next config_update_cont timer tick (~3s).
+/// After this call the sync-required flag on those records is cleared.
+void RecFlushConfigUpdateCbs();

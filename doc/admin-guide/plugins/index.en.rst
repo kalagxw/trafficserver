@@ -43,9 +43,8 @@ Stable plugins
 Plugins that are considered stable are installed by default in |TS| releases.
 
 .. toctree::
-   :hidden:
+   :maxdepth: 1
 
-   AWS S3 Authentication <s3_auth.en>
    AuthProxy <authproxy.en>
    Background Fetch <background_fetch.en>
    Cache Key Manipulation <cachekey.en>
@@ -53,7 +52,6 @@ Plugins that are considered stable are installed by default in |TS| releases.
    Cache Range Requests <cache_range_requests.en>
    Combo Handler <combo_handler.en>
    Configuration Remap <conf_remap.en>
-   Cookie Remap <cookie_remap.en>
    ESI <esi.en>
    Escalate <escalate.en>
    Compress <compress.en>
@@ -61,19 +59,22 @@ Plugins that are considered stable are installed by default in |TS| releases.
    Header Rewrite <header_rewrite.en>
    Health Checks <healthchecks.en>
    HTTP Stats <http_stats.en>
+   JA3 Fingerprint <ja3_fingerprint.en>
    Lua <lua.en>
+   Origin Server Authentication <origin_server_auth.en>
    Regex Remap <regex_remap.en>
    Regex Revalidate <regex_revalidate.en>
    Remap Purge <remap_purge.en>
+   Remap Stats <remap_stats.en>
+   Static Hit <statichit.en>
    Stats over HTTP <stats_over_http.en>
    TCPInfo <tcpinfo.en>
+   Traffic Dump <traffic_dump.en>
+   WebP Transform <webp_transform.en>
    XDebug <xdebug.en>
 
 :doc:`AuthProxy <authproxy.en>`
    Delegates the authorization decision of a request to an external HTTP service.
-
-:doc:`AWS S3 Authentication <s3_auth.en>`
-   Support for Amazon S3 authentication features.
 
 :doc:`Background Fetch <background_fetch.en>`
    Proactively fetch content from Origin in a way that it will fill the object into cache.
@@ -117,8 +118,14 @@ Plugins that are considered stable are installed by default in |TS| releases.
 :doc:`HTTP Stats <http_stats.en>`
     A remap-based plugin that provides an HTTP interface to all |TS| statistics.
 
+:doc:`JA3 Fingerprint <ja3_fingerprint.en>`
+   Calculates JA3 Fingerprints for incoming SSL traffic.
+
 :doc:`Lua <lua.en>`
    Allows plugins to be written in Lua instead of C code.
+
+:doc:`Origin Server Authentication <origin_server_auth.en>`
+   Support for Amazon S3 and Google Cloud Services authentication features.
 
 :doc:`Regex Remap <regex_remap.en>`
     Configure remapping rules using regular expressions.
@@ -126,11 +133,23 @@ Plugins that are considered stable are installed by default in |TS| releases.
 :doc:`Regex Revalidate <regex_revalidate.en>`
    Configurable rules for forcing cache object revalidations using regular expressions.
 
+:doc:`Remap Stats <remap_stats.en>`
+   This global plugin adds remap stats to the stats.
+
+:doc:`Static Hit <statichit.en>`
+    Serve static content from proxy's local filesystem.
+
 :doc:`Stats over HTTP <stats_over_http.en>`
     Provide an HTTP interface to all |TS| statistics.
 
 :doc:`TCPInfo <tcpinfo.en>`
     Log TCP metrics at various points of the HTTP processing pipeline.
+
+:doc:`Traffic Dump <traffic_dump.en>`
+   Dumps traffic data into a JSON format file which can be used to replay traffic.
+
+:doc:`WebP Transform <webp_transform.en>`
+   Converts jpeg and png images to webp format.
 
 :doc:`XDebug <xdebug.en>`
    Allows HTTP clients to debug the operation of the Traffic Server cache using the X-Debug header.
@@ -141,50 +160,55 @@ Experimental plugins
 Plugins that are considered experimental are located in the
 `plugins/experimental <https://git-wip-us.apache.org/repos/asf?p=trafficserver.git;a=tree;f=plugins/experimental;hb=HEAD>`_
 directory of the |TS| source tree. Experimental plugins can be compiled by passing the
-`--enable-experimental-plugins` option to `configure`::
-
-    $ autoconf -i
-    $ ./configure --enable-experimental-plugins
-    $ make
+``-DBUILD_EXPERIMENTAL_PLUGINS=ON``` variable to ``cmake`` command when building.
 
 .. toctree::
-   :hidden:
+   :maxdepth: 1
 
+   Abuse Shield <abuse_shield.en>
    Access Control <access_control.en>
+   Block Errors <block_errors.en>
    Cache Fill <cache_fill.en>
    Certifier <certifier.en>
    Cert Reporting Tool <cert_reporting_tool.en>
-   Collapsed-Forwarding <collapsed_forwarding.en>
+   Connection Exempt List <connection_exempt_list.en>
+   Cookie Remap <cookie_remap.en>
+   Filter Body <filter_body.en>
    GeoIP ACL <geoip_acl.en>
    FQ Pacing <fq_pacing.en>
    Header Frequency <header_freq.en>
    Hook Trace <hook-trace.en>
    ICAP <icap.en>
-   JA3 Fingerprint <ja3_fingerprint.en>
+   JA4 Fingerprint <ja4_fingerprint.en>
+   JAx Fingerprint <jax_fingerprint.en>
    Maxmind ACL <maxmind_acl.en>
    Memcache <memcache.en>
    Memory Profile <memory_profile.en>
-   Metalink <metalink.en>
    Money Trace <money_trace.en>
    MP4 <mp4.en>
    Multiplexer <multiplexer.en>
-   MySQL Remap <mysql_remap.en>
    OpenTelemetry Tracer <otel_tracer.en>
-   Parent Select <parent_select.en>
    Rate Limit <rate_limit.en>
+   Real IP <realip.en>
    URI Signing <uri_signing.en>
    Legacy Signed URLs <url_sig.en>
    Slice <slice.en>
    SSL Headers <sslheaders.en>
-   SSL Session Reuse <ssl_session_reuse.en>
+   Stale Response <stale_response.en>
    STEK Share <stek_share.en>
    System Statistics <system_stats.en>
-   Traffic Dump <traffic_dump.en>
-   WebP Transform <webp_transform.en>
+   Wasm <wasm.en>
    Prefetch <prefetch.en>
+   Transaction Box(TxnBox) <txn_box/index.en>
+
+:doc:`Abuse Shield <abuse_shield.en>`
+   Unified connection and request abuse protection.
 
 :doc:`Access Control <access_control.en>`
    Access control plugin that handles various access control use-cases.
+
+:doc:`Block Errors <block_errors.en>`
+   Blocks or downgrades new connections when the server receives too many errors from an IP address.
 
 :doc:`Certifier <certifier.en>`
    Manages and/or generates certificates for incoming HTTPS requests.
@@ -192,9 +216,15 @@ directory of the |TS| source tree. Experimental plugins can be compiled by passi
 :doc:`Cert Reporting Tool <cert_reporting_tool.en>`
    Examines and logs information on loaded certificates.
 
-:doc:`Collapsed-Forwarding <collapsed_forwarding.en>`
-   Allows to Collapse multiple Concurrent requests by downloading once from the Origin and serving
-   all clients in parallel.
+:doc:`Connection Exempt List <connection_exempt_list.en>`
+   Provides a way for administrators to set
+   :ts:cv:`proxy.config.http.per_client.connection.exempt_list` via a YAML file.
+
+:doc:`Cookie Remap <cookie_remap.en>`
+   Makes decisions on destinations based on cookies.
+
+:doc:`Filter Body <filter_body.en>`
+   Streaming body content inspection with configurable pattern matching for detecting security threats.
 
 :doc:`FQ Pacing <fq_pacing.en>`
    FQ Pacing: Rate Limit TCP connections using Linux's Fair Queuing queue discipline
@@ -208,17 +238,17 @@ directory of the |TS| source tree. Experimental plugins can be compiled by passi
 :doc:`ICAP <icap.en>`
    Pass response data to external server for further processing using the ICAP protocol.
 
-:doc:`JA3 Fingerprint <ja3_fingerprint.en>`
-   Calculates JA3 Fingerprints for incoming SSL traffic.
+:doc:`JA4 Fingerprint <ja4_fingerprint.en>`
+   Calculates JA4 Fingerprints for incoming TLS traffic.
+
+:doc:`JAx Fingerprint <jax_fingerprint.en>`
+   Calculates JAx Fingerprints.
 
 :doc:`MaxMind ACL <maxmind_acl.en>`
    ACL based on the maxmind geo databases (GeoIP2 mmdb and libmaxminddb)
 
 :doc:`Memcache <memcache.en>`
    Implements the memcache protocol for cache contents.
-
-:doc:`Metalink <metalink.en>`
-   Implements the Metalink download description format in order to try not to download the same file twice.
 
 :doc:`Money Trace <money_trace.en>`
    Allows Trafficserver to participate in a distributed tracing system based upon the Comcast Money library.
@@ -232,21 +262,17 @@ directory of the |TS| source tree. Experimental plugins can be compiled by passi
    this can be used to do A/B testing by sending a duplicated slice of inbound production traffic to
    experimental upstreams.
 
-:doc:`MySQL Remap <mysql_remap.en>`
-   Allows dynamic remaps from a MySQL database.
-
 :doc:`OpenTelemetry Tracer <otel_tracer.en>`
    Allows Trafficserver to participate in OpenTelemetry distributed tracing system
 
 :doc:`Prefetch <prefetch.en>`
    Pre-fetch objects based on the requested URL path pattern.
 
-:doc:`Parent Select <parent_select.en>`
-   This remap plugin allows selection of parent proxies or origins during requests. This
-   provides the same functionality as the core :file:`parent.config` and :file:`strategies.yaml` config files.
-
 :doc:`Rate Limit <rate_limit.en>`
    Simple transaction rate limiting.
+
+:doc:`Real IP <realip.en>`
+   Provides real client's IP address.
 
 :doc:`Remap Purge <remap_purge.en>`
    This remap plugin allows the administrator to easily setup remotely
@@ -268,11 +294,12 @@ directory of the |TS| source tree. Experimental plugins can be compiled by passi
    spread across multiple cache stripes. Allows arbitrary range requests to be satisfied by stitching
    these chunks together.
 
-:doc:`SSL Session Reuse <ssl_session_reuse.en>`
-   Coordinates Session ID and ticket based TLS session resumption between a group of ATS machines.
-
 :doc:`SSL Headers <sslheaders.en>`
    Populate request headers with SSL session information.
+
+:doc:`Stale Response <stale_response.en>`
+    Implements handling of the ``stale-while-revalidate`` and ``stale-if-error``
+    ``Cache-Control`` directive extensions.
 
 :doc:`STEK Share <stek_share.en>`
     Coordinates STEK (Session Ticket Encryption Key) between ATS instances running in a group.
@@ -280,8 +307,8 @@ directory of the |TS| source tree. Experimental plugins can be compiled by passi
 :doc:`System Stats <system_stats.en>`
     Inserts system statistics in to the stats list
 
-:doc:`Traffic Dump <traffic_dump.en>`
-   Dumps traffic data into a JSON format file which can be used to replay traffic.
+:doc:`Wasm <wasm.en>`
+   Allows WebAssembly/Wasm (proxy-wasm) module to be used as ATS Plugin.
 
-:doc:`WebP Transform <webp_transform.en>`
-   Converts jpeg and png images to webp format.
+:doc:`Transaction Box(TxnBox) <txn_box/index.en>`
+   Transaction Box, or TxnBox, is an Apache Traffic Server plugin to manipulate transactions.

@@ -1,0 +1,64 @@
+/** @file
+
+  This file used for catch based tests. It is the main() stub.
+
+  @section license License
+
+  Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements.
+  See the NOTICE file distributed with this work for additional information regarding copyright
+  ownership.  The ASF licenses this file to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance with the License.  You may obtain a
+  copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software distributed under the License
+  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+  or implied. See the License for the specific language governing permissions and limitations under
+  the License.
+ */
+
+#include <cstdio>
+#include <cstdlib>
+#include <exception>
+#include <vector>
+#include <string>
+#include "tscore/ink_resolver.h"
+#include "iocore/eventsystem/EventSystem.h"
+#include "iocore/eventsystem/RecProcess.h"
+#include "tscore/Layout.h"
+#include "test_Diags.h"
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_session.hpp>
+
+extern void ts_session_protocol_well_known_name_indices_init();
+
+int
+main(int argc, char *argv[])
+{
+  // The global initialization below runs outside of any Catch2 assertion, so an exception thrown
+  // there would otherwise escape main and abort without a diagnostic.
+  try {
+    // Set the global diags variable
+    Layout::create(); // RecProcess will fail if Layout is not created.
+    DiagsPtr::set(new CatchDiags);
+    RecProcessInit();
+    // Global data initialization needed for the unit tests.
+    ts_session_protocol_well_known_name_indices_init();
+    // Cheat for ts_host_res_global_init as there's no records.config to check for non-default.
+    host_res_default_preference_order = HOST_RES_DEFAULT_PREFERENCE_ORDER;
+
+    int result = Catch::Session().run(argc, argv);
+
+    // global clean-up...
+
+    return result;
+  } catch (std::exception const &ex) {
+    std::fprintf(stderr, "test_records aborted: %s\n", ex.what());
+  } catch (...) {
+    std::fprintf(stderr, "test_records aborted: unknown exception\n");
+  }
+
+  return EXIT_FAILURE;
+}

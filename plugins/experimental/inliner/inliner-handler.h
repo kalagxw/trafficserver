@@ -35,10 +35,10 @@ namespace inliner
 {
   struct Handler : HtmlParser {
     ats::io::IOSinkPointer ioSink_;
-    ats::io::SinkPointer sink_, sink2_;
+    ats::io::SinkPointer   sink_, sink2_;
     const TSIOBufferReader reader_;
-    size_t counter_;
-    bool abort_;
+    size_t                 counter_;
+    bool                   abort_;
 
     ~Handler() override
     {
@@ -54,13 +54,13 @@ namespace inliner
 
     Handler(const TSIOBufferReader, ats::io::IOSinkPointer &&);
 
-    Handler(const Handler &) = delete;
+    Handler(const Handler &)            = delete;
     Handler &operator=(const Handler &) = delete;
 
     void parse();
 
     size_t bypass(const size_t, const size_t) override;
-    void handleImage(const Attributes &) override;
+    void   handleImage(const Attributes &) override;
 
     std::string generateId();
 

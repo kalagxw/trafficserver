@@ -30,10 +30,11 @@
 #include <string>
 #include <vector>
 
-typedef std::string String;
-typedef std::set<std::string> StringSet;
-typedef std::list<std::string> StringList;
-typedef std::vector<std::string> StringVector;
+using String       = std::string;
+using StringView   = std::string_view;
+using StringSet    = std::set<std::string>;
+using StringList   = std::list<std::string>;
+using StringVector = std::vector<std::string>;
 
 #ifdef PREFETCH_UNIT_TEST
 #include <assert.h>
@@ -49,15 +50,21 @@ void PrintToStdErr(const char *fmt, ...);
 
 #include "ts/ts.h"
 
-#define PrefetchDebug(fmt, ...)                                                           \
-  do {                                                                                    \
-    TSDebug(PLUGIN_NAME, "%s:%d:%s() " fmt, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+namespace prefetch_ns
+{
+extern DbgCtl dbg_ctl;
+}
+using namespace prefetch_ns;
+
+#define PrefetchDebug(fmt, ...)                                                   \
+  do {                                                                            \
+    Dbg(dbg_ctl, "%s:%d:%s() " fmt, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
   } while (0)
 
-#define PrefetchError(fmt, ...)                                                           \
-  do {                                                                                    \
-    TSError("(%s) " fmt, PLUGIN_NAME, ##__VA_ARGS__);                                     \
-    TSDebug(PLUGIN_NAME, "%s:%d:%s() " fmt, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
+#define PrefetchError(fmt, ...)                                                   \
+  do {                                                                            \
+    TSError("(%s) " fmt, PLUGIN_NAME, ##__VA_ARGS__);                             \
+    Dbg(dbg_ctl, "%s:%d:%s() " fmt, __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
   } while (0)
 
 #define PrefetchAssert TSAssert

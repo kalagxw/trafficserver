@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -23,6 +23,9 @@
 
 #include <fstream>
 
+#include "swoc/TextView.h"
+#include "swoc/bwf_ip.h"
+
 #include "tscore/ink_platform.h"
 #include "tscore/ink_defs.h"
 #include "tscore/ink_inet.h"
@@ -30,7 +33,6 @@
 #include "tscore/CryptoHash.h"
 #include "tscore/ink_assert.h"
 #include "ts/apidefs.h"
-#include "tscpp/util/TextView.h"
 #include "tscore/ink_inet.h"
 
 IpAddr const IpAddr::INVALID;
@@ -50,85 +52,13 @@ const std::string_view IP_PROTO_TAG_HTTP_0_9("http/0.9"sv);
 const std::string_view IP_PROTO_TAG_HTTP_1_0("http/1.0"sv);
 const std::string_view IP_PROTO_TAG_HTTP_1_1("http/1.1"sv);
 const std::string_view IP_PROTO_TAG_HTTP_2_0("h2"sv);         // HTTP/2 over TLS
-const std::string_view IP_PROTO_TAG_HTTP_QUIC("hq-29"sv);     // HTTP/0.9 over QUIC
-const std::string_view IP_PROTO_TAG_HTTP_3("h3-29"sv);        // HTTP/3 over QUIC
-const std::string_view IP_PROTO_TAG_HTTP_QUIC_D27("hq-27"sv); // HTTP/0.9 over QUIC (draft-27)
-const std::string_view IP_PROTO_TAG_HTTP_3_D27("h3-27"sv);    // HTTP/3 over QUIC (draft-27)
+const std::string_view IP_PROTO_TAG_HTTP_QUIC("hq"sv);        // HTTP/0.9 over QUIC
+const std::string_view IP_PROTO_TAG_HTTP_3("h3"sv);           // HTTP/3 over QUIC
+const std::string_view IP_PROTO_TAG_HTTP_QUIC_D29("hq-29"sv); // HTTP/0.9 over QUIC (draft-29)
+const std::string_view IP_PROTO_TAG_HTTP_3_D29("h3-29"sv);    // HTTP/3 over QUIC (draft-29)
+const std::string_view IP_PROTO_TAG_H3QX("h3qx-01"sv);        // HTTP/3 over QMux (TLS/TCP)
 
 const std::string_view UNIX_PROTO_TAG{"unix"sv};
-
-uint32_t
-ink_inet_addr(const char *s)
-{
-  uint32_t u[4];
-  uint8_t *pc   = (uint8_t *)s;
-  int n         = 0;
-  uint32_t base = 10;
-
-  if (nullptr == s) {
-    return htonl(static_cast<uint32_t>(-1));
-  }
-
-  while (n < 4) {
-    u[n] = 0;
-    base = 10;
-
-    // handle hex, octal
-
-    if (*pc == '0') {
-      if (*++pc == 'x' || *pc == 'X') {
-        base = 16, pc++;
-      } else {
-        base = 8;
-      }
-    }
-    // handle hex, octal, decimal
-
-    while (*pc) {
-      if (ParseRules::is_digit(*pc)) {
-        u[n] = u[n] * base + (*pc++ - '0');
-        continue;
-      }
-      if (base == 16 && ParseRules::is_hex(*pc)) {
-        u[n] = u[n] * 16 + ParseRules::ink_tolower(*pc++) - 'a' + 10;
-        continue;
-      }
-      break;
-    }
-
-    n++;
-    if (*pc == '.') {
-      pc++;
-    } else {
-      break;
-    }
-  }
-
-  if (*pc && !ParseRules::is_wslfcr(*pc)) {
-    return htonl(static_cast<uint32_t>(-1));
-  }
-
-  switch (n) {
-  case 1:
-    return htonl(u[0]);
-  case 2:
-    if (u[0] > 0xff || u[1] > 0xffffff) {
-      return htonl(static_cast<uint32_t>(-1));
-    }
-    return htonl((u[0] << 24) | u[1]);
-  case 3:
-    if (u[0] > 0xff || u[1] > 0xff || u[2] > 0xffff) {
-      return htonl(static_cast<uint32_t>(-1));
-    }
-    return htonl((u[0] << 24) | (u[1] << 16) | u[2]);
-  case 4:
-    if (u[0] > 0xff || u[1] > 0xff || u[2] > 0xff || u[3] > 0xff) {
-      return htonl(static_cast<uint32_t>(-1));
-    }
-    return htonl((u[0] << 24) | (u[1] << 16) | (u[2] << 8) | u[3]);
-  }
-  return htonl(static_cast<uint32_t>(-1));
-}
 
 const char *
 ats_ip_ntop(const struct sockaddr *addr, char *dst, size_t size)
@@ -141,6 +71,9 @@ ats_ip_ntop(const struct sockaddr *addr, char *dst, size_t size)
     break;
   case AF_INET6:
     zret = inet_ntop(AF_INET6, &ats_ip6_addr_cast(addr), dst, size);
+    break;
+  case AF_UNIX:
+    zret = strncpy(dst, ats_unix_cast(addr)->sun_path, size);
     break;
   default:
     zret = dst;
@@ -178,7 +111,7 @@ ats_ip_nptop(sockaddr const *addr, char *dst, size_t size)
 int
 ats_ip_parse(std::string_view str, std::string_view *addr, std::string_view *port, std::string_view *rest)
 {
-  ts::TextView src(str); /// Easier to work with for parsing.
+  swoc::TextView src(str); /// Easier to work with for parsing.
   // In case the incoming arguments are null, set them here and only check for null once.
   // it doesn't matter if it's all the same, the results will be thrown away.
   std::string_view local;
@@ -223,10 +156,10 @@ ats_ip_parse(std::string_view str, std::string_view *addr, std::string_view *por
         ++src;
       }
     } else {
-      ts::TextView::size_type last = src.rfind(':');
-      if (last != ts::TextView::npos && last == src.find(':')) {
+      swoc::TextView::size_type last = src.rfind(':');
+      if (last != swoc::TextView::npos && last == src.find(':')) {
         // Exactly one colon - leave post colon stuff in @a src.
-        *addr   = src.take_prefix_at(last);
+        *addr   = src.take_prefix(last);
         colon_p = true;
       } else { // presume no port, use everything.
         *addr = src;
@@ -234,7 +167,7 @@ ats_ip_parse(std::string_view str, std::string_view *addr, std::string_view *por
       }
     }
     if (colon_p) {
-      ts::TextView tmp{src};
+      swoc::TextView tmp{src};
       src.ltrim_if(&ParseRules::is_digit);
 
       if (tmp.data() == src.data()) {               // no digits at all
@@ -251,7 +184,7 @@ ats_ip_parse(std::string_view str, std::string_view *addr, std::string_view *por
 int
 ats_ip_pton(const std::string_view &src, sockaddr *ip)
 {
-  int zret = -1;
+  int              zret = -1;
   std::string_view addr, port;
 
   ats_ip_invalidate(ip);
@@ -276,9 +209,10 @@ ats_ip_pton(const std::string_view &src, sockaddr *ip)
         ats_ip4_set(ip, addr4.s_addr);
       }
     }
-    // If we had a successful conversion, set the port.
+    // If we had a successful conversion, set the port. @a port is all digits but is not
+    // NUL terminated, so parse it with a bounded decimal conversion.
     if (ats_is_ip(ip)) {
-      ats_ip_port_cast(ip) = port.empty() ? 0 : htons(atoi(port.data()));
+      ats_ip_port_cast(ip) = port.empty() ? 0 : htons(static_cast<in_port_t>(swoc::svtoi(port, nullptr, 10)));
     }
   }
 
@@ -288,15 +222,15 @@ ats_ip_pton(const std::string_view &src, sockaddr *ip)
 int
 ats_ip_range_parse(std::string_view src, IpAddr &lower, IpAddr &upper)
 {
-  int zret = TS_ERROR;
-  IpAddr addr, addr2;
+  int                 zret = TS_ERROR;
+  IpAddr              addr, addr2;
   static const IpAddr ZERO_ADDR4{INADDR_ANY};
   static const IpAddr MAX_ADDR4{INADDR_BROADCAST};
   static const IpAddr ZERO_ADDR6{in6addr_any};
   // I can't find a clean way to static const initialize an IPv6 address to all ones.
   // This is the best I can find that's portable.
   static const uint64_t ones[]{UINT64_MAX, UINT64_MAX};
-  static const IpAddr MAX_ADDR6{reinterpret_cast<in6_addr const &>(ones)};
+  static const IpAddr   MAX_ADDR6{reinterpret_cast<in6_addr const &>(ones)};
 
   auto idx = src.find_first_of("/-"sv);
   if (idx != src.npos) {
@@ -304,9 +238,9 @@ ats_ip_range_parse(std::string_view src, IpAddr &lower, IpAddr &upper)
       zret = TS_ERROR;
     } else if ('/' == src[idx]) {
       if (TS_SUCCESS == addr.load(src.substr(0, idx))) { // load the address
-        ts::TextView parsed;
+        swoc::TextView parsed;
         src.remove_prefix(idx + 1); // drop address and separator.
-        int cidr = ts::svtoi(src, &parsed);
+        int cidr = swoc::svtoi(src, &parsed);
         if (parsed.size() && 0 <= cidr) { // a cidr that's a positive integer.
           // Special case the cidr sizes for 0, maximum, and for IPv6 64 bit boundaries.
           if (addr.isIp4()) {
@@ -317,7 +251,7 @@ ats_ip_range_parse(std::string_view src, IpAddr &lower, IpAddr &upper)
             } else if (cidr <= 32) {
               lower = upper = addr;
               if (cidr < 32) {
-                in_addr_t mask = htonl(INADDR_BROADCAST << (32 - cidr));
+                in_addr_t mask    = htonl(INADDR_BROADCAST << (32 - cidr));
                 lower._addr._ip4 &= mask;
                 upper._addr._ip4 |= ~mask;
               }
@@ -345,7 +279,7 @@ ats_ip_range_parse(std::string_view src, IpAddr &lower, IpAddr &upper)
             } else if (cidr <= 128) { // lower bytes changed, upper bytes unaffected.
               lower = upper = addr;
               if (cidr < 128) {
-                mask = htobe64(~static_cast<uint64_t>(0) << (128 - cidr));
+                mask                 = htobe64(~static_cast<uint64_t>(0) << (128 - cidr));
                 lower._addr._u64[1] &= mask;
                 upper._addr._u64[1] |= ~mask;
               }
@@ -390,7 +324,7 @@ ats_ip_port_hash(sockaddr const *addr)
   if (ats_is_ip4(addr)) {
     return (static_cast<uint64_t>(ats_ip4_addr_cast(addr)) << 16) | (ats_ip_port_cast(addr));
   } else if (ats_is_ip6(addr)) {
-    CryptoHash hash;
+    CryptoHash    hash;
     CryptoContext hash_context;
     hash_context.update(ats_ip_addr8_cast(addr), TS_IP6_SIZE);
     in_port_t port = ats_ip_port_cast(addr);
@@ -440,8 +374,8 @@ int
 IpAddr::load(const char *text)
 {
   IpEndpoint ip;
-  int zret = ats_ip_pton(text, &ip);
-  *this    = ip;
+  int        zret = ats_ip_pton(text, &ip);
+  *this           = ip;
   return zret;
 }
 
@@ -449,7 +383,7 @@ int
 IpAddr::load(std::string_view const &text)
 {
   IpEndpoint ip;
-  int zret = ats_ip_pton(text, &ip.sa);
+  int        zret = ats_ip_pton(text, &ip.sa);
   this->assign(&ip.sa);
   return zret;
 }
@@ -524,7 +458,7 @@ operator==(IpAddr const &lhs, sockaddr const *rhs)
 int
 IpAddr::cmp(self const &that) const
 {
-  int zret       = 0;
+  int      zret  = 0;
   uint16_t rtype = that._family;
   uint16_t ltype = _family;
 
@@ -565,10 +499,10 @@ IpAddr::cmp(self const &that) const
 int
 ats_ip_getbestaddrinfo(const char *host, IpEndpoint *ip4, IpEndpoint *ip6)
 {
-  int zret = -1;
-  int port = 0; // port value to assign if we find an address.
-  addrinfo ai_hints;
-  addrinfo *ai_result;
+  int              zret = -1;
+  int              port = 0; // port value to assign if we find an address.
+  addrinfo         ai_hints;
+  addrinfo        *ai_result;
   std::string_view addr_text, port_text;
   std::string_view src(host, strlen(host) + 1);
 
@@ -688,8 +622,8 @@ ats_ip_check_characters(std::string_view text)
   return found_hex && !found_colon ? AF_UNSPEC : found_colon ? AF_INET6 : AF_INET;
 }
 
-int
-ats_tcp_somaxconn()
+std::optional<int>
+ats_tcp_somaxconn_detected()
 {
   int value = 0;
 
@@ -706,23 +640,29 @@ ats_tcp_somaxconn()
   }
 #endif
 
-  // Default to the compatible value we used before detection. SOMAXCONN is the right
-  // macro to use, but most systems set this to 128, which is just too small.
   if (value <= 0 || value > 65535) {
-    value = 1024;
+    return std::nullopt;
   }
 
   return value;
 }
 
-namespace ts
+int
+ats_tcp_somaxconn()
+{
+  // Default to the compatible value we used before detection. SOMAXCONN is the right
+  // macro to use, but most systems set this to 128, which is just too small.
+  return ats_tcp_somaxconn_detected().value_or(1024);
+}
+
+namespace swoc
 {
 BufferWriter &
-bwformat(BufferWriter &w, BWFSpec const &spec, in_addr_t addr)
+bwformat(BufferWriter &w, bwf::Spec const &spec, in_addr_t addr)
 {
-  uint8_t *ptr = reinterpret_cast<uint8_t *>(&addr);
-  BWFSpec local_spec{spec}; // Format for address elements.
-  bool align_p = false;
+  uint8_t  *ptr = reinterpret_cast<uint8_t *>(&addr);
+  bwf::Spec local_spec{spec}; // Format for address elements.
+  bool      align_p = false;
 
   if (spec._ext.size()) {
     if (spec._ext.front() == '=') {
@@ -736,7 +676,7 @@ bwformat(BufferWriter &w, BWFSpec const &spec, in_addr_t addr)
 
   if (align_p) {
     local_spec._min   = 3;
-    local_spec._align = BWFSpec::Align::RIGHT;
+    local_spec._align = bwf::Spec::Align::RIGHT;
   } else {
     local_spec._min = 0;
   }
@@ -752,79 +692,11 @@ bwformat(BufferWriter &w, BWFSpec const &spec, in_addr_t addr)
 }
 
 BufferWriter &
-bwformat(BufferWriter &w, BWFSpec const &spec, in6_addr const &addr)
+bwformat(BufferWriter &w, bwf::Spec const &spec, IpAddr const &addr)
 {
-  using QUAD = uint16_t const;
-  BWFSpec local_spec{spec}; // Format for address elements.
-  uint8_t const *ptr   = addr.s6_addr;
-  uint8_t const *limit = ptr + sizeof(addr.s6_addr);
-  QUAD *lower          = nullptr; // the best zero range
-  QUAD *upper          = nullptr;
-  bool align_p         = false;
-
-  if (spec._ext.size()) {
-    if (spec._ext.front() == '=') {
-      align_p          = true;
-      local_spec._fill = '0';
-    } else if (spec._ext.size() > 1 && spec._ext[1] == '=') {
-      align_p          = true;
-      local_spec._fill = spec._ext[0];
-    }
-  }
-
-  if (align_p) {
-    local_spec._min   = 4;
-    local_spec._align = BWFSpec::Align::RIGHT;
-  } else {
-    local_spec._min = 0;
-    // do 0 compression if there's no internal fill.
-    for (QUAD *spot = reinterpret_cast<QUAD *>(ptr), *last = reinterpret_cast<QUAD *>(limit), *current = nullptr; spot < last;
-         ++spot) {
-      if (0 == *spot) {
-        if (current) {
-          // If there's no best, or this is better, remember it.
-          if (!lower || (upper - lower < spot - current)) {
-            lower = current;
-            upper = spot;
-          }
-        } else {
-          current = spot;
-        }
-      } else {
-        current = nullptr;
-      }
-    }
-  }
-
-  if (!local_spec.has_numeric_type()) {
-    local_spec._type = 'x';
-  }
-
-  for (; ptr < limit; ptr += 2) {
-    if (reinterpret_cast<uint8_t const *>(lower) <= ptr && ptr <= reinterpret_cast<uint8_t const *>(upper)) {
-      if (ptr == addr.s6_addr) {
-        w.write(':'); // only if this is the first quad.
-      }
-      if (ptr == reinterpret_cast<uint8_t const *>(upper)) {
-        w.write(':');
-      }
-    } else {
-      uint16_t f = (ptr[0] << 8) + ptr[1];
-      bwformat(w, local_spec, f);
-      if (ptr != limit - 2) {
-        w.write(':');
-      }
-    }
-  }
-  return w;
-}
-
-BufferWriter &
-bwformat(BufferWriter &w, BWFSpec const &spec, IpAddr const &addr)
-{
-  BWFSpec local_spec{spec}; // Format for address elements and port.
-  bool addr_p{true};
-  bool family_p{false};
+  bwf::Spec local_spec{spec}; // Format for address elements and port.
+  bool      addr_p{true};
+  bool      family_p{false};
 
   if (spec._ext.size()) {
     if (spec._ext.front() == '=') {
@@ -874,14 +746,14 @@ bwformat(BufferWriter &w, BWFSpec const &spec, IpAddr const &addr)
 }
 
 BufferWriter &
-bwformat(BufferWriter &w, BWFSpec const &spec, sockaddr const *addr)
+bwformat(BufferWriter &w, bwf::Spec const &spec, sockaddr const *addr)
 {
-  BWFSpec local_spec{spec}; // Format for address elements and port.
-  bool port_p{true};
-  bool addr_p{true};
-  bool family_p{false};
-  bool local_numeric_fill_p{false};
-  char local_numeric_fill_char{'0'};
+  bwf::Spec local_spec{spec}; // Format for address elements and port.
+  bool      port_p{true};
+  bool      addr_p{true};
+  bool      family_p{false};
+  bool      local_numeric_fill_p{false};
+  char      local_numeric_fill_char{'0'};
 
   if (spec._type == 'p' || spec._type == 'P') {
     bwformat(w, spec, static_cast<void const *>(addr));
@@ -931,6 +803,10 @@ bwformat(BufferWriter &w, BWFSpec const &spec, sockaddr const *addr)
       }
       bwformat(w, spec, ats_ip6_addr_cast(addr));
       break;
+    case AF_UNIX:
+      bwformat(w, spec, ats_unix_cast(addr)->sun_path);
+      port_p = false;
+      break;
     default:
       w.print("*Not IP address [{}]*", addr->sa_family);
       break;
@@ -946,7 +822,7 @@ bwformat(BufferWriter &w, BWFSpec const &spec, sockaddr const *addr)
     if (local_numeric_fill_p) {
       local_spec._min   = 5;
       local_spec._fill  = local_numeric_fill_char;
-      local_spec._align = BWFSpec::Align::RIGHT;
+      local_spec._align = bwf::Spec::Align::RIGHT;
     } else {
       local_spec._min = 0;
     }
@@ -966,13 +842,4 @@ bwformat(BufferWriter &w, BWFSpec const &spec, sockaddr const *addr)
   return w;
 }
 
-namespace bwf
-{
-  detail::MemDump
-  Hex_Dump(IpEndpoint const &addr)
-  {
-    return detail::MemDump(ats_ip_addr8_cast(&addr), ats_ip_addr_size(&addr));
-  }
-} // namespace bwf
-
-} // namespace ts
+} // namespace swoc

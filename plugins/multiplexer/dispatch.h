@@ -66,24 +66,25 @@ struct Statistics {
   int size; // average
 };
 
-typedef std::vector<std::string> Origins;
+using Origins = std::vector<std::string>;
 
 struct Request {
-  std::string host;
-  int length;
+  std::string                  host;
+  int                          length;
   std::unique_ptr<ats::io::IO> io;
 
   Request(const std::string &, const TSMBuffer, const TSMLoc);
   Request(const Request &) = delete;
-  Request(Request &&);
-  Request &operator=(const Request &);
+  Request(Request &&) noexcept;
+  Request &operator=(const Request &) = delete;
+  Request &operator=(Request &&) noexcept;
 };
 
-typedef std::vector<Request> Requests;
+using Requests = std::vector<Request>;
 
 struct Instance {
   Origins origins;
-  bool skipPostPut;
+  bool    skipPostPut;
 };
 
 extern size_t timeout;

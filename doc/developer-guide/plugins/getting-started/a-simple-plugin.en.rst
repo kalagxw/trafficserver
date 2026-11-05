@@ -16,6 +16,7 @@
    under the License.
 
 .. include:: ../../../common.defs
+.. default-domain:: cpp
 
 .. _developer-plugins-getting-started-simple-plugin:
 
@@ -25,40 +26,16 @@ A Simple Plugin
 This section describes how to write, compile, configure, and run a
 simple Traffic Server plugin. You'll follow the steps below:
 
-1. Make sure that your plugin source code contains an :c:func:`TSPluginInit`
+1. Make sure that your plugin source code contains an :func:`TSPluginInit`
    initialization function.
 
 2. Compile your plugin source code, creating a shared library.
 
 3. Add an entry to :file:`plugin.config`.
 
-4. Add the path to your plugin shared library into :file:`records.config`.
+4. Add the path to your plugin shared library into :file:`records.yaml`.
 
 5. Restart Traffic Server.
-
-Compile Your Plugin
-===================
-
-The process for compiling a shared library varies with the platform
-used, so the Traffic Server API provides the tsxs tool which you can use
-to create shared libraries on all the supported Traffic Server
-platforms.
-
-Example
--------
-
-Assuming the sample program is stored in the file ``hello_world.c``, you
-could use the following commands to build a shared library::
-
-    tsxs -o hello_world.so -c hello_world.c
-
-``tsxs`` is installed in the ``bin`` directory of |TS|.
-
-This shared library will be your plugin. In order to install it, run::
-
-    sudo tsxs -o hello_world.so -i
-
-or the equivalent to ``sudo`` on your platform.
 
 Update the plugin configuration file
 ====================================
@@ -82,7 +59,7 @@ Specify the Plugin's Location
 
 All plugins must be located in the directory specified by the
 configuration variable ``proxy.config.plugin.plugin_dir``, which is
-located in the :file:`records.config` file. The directory can be specified
+located in the :file:`records.yaml` file. The directory can be specified
 as an absolute or relative path.
 
 If a relative path is used, then the starting directory will be the
@@ -115,6 +92,6 @@ plugin.
 
   In the example above, Traffic Server notes are directed to the
   console by specifying ``E`` for :ts:cv:`proxy.config.diags.output.note` in
-  :file:`records.config`. The second note shows Traffic Server attempting to
+  :file:`records.yaml`. The second note shows Traffic Server attempting to
   load the ``hello_world`` plugin. The third line of Traffic Server output
   is from your plugin.

@@ -27,9 +27,9 @@ Data Structures
 
    hide empty members
 
-   CacheHostRecord *-- "*" Stripe : Vol >
+   CacheHostRecord *-- "*" StripeSM : stripe >
    CacheHostRecord *-- "*" CacheVol : cp >
-   CacheVol *-- "*" Stripe : Vol >
+   CacheVol *-- "*" StripeSM : stripe >
 
 .. var:: size_t STORE_BLOCK_SIZE = 8192
 
@@ -58,7 +58,7 @@ Data Structures
 
       The cache volumes that are part of this cache host record.
 
-   .. member:: Vol ** vols
+   .. member:: StripeSM ** vols
 
       The stripes that are part of the cache volumes. This is the union over the stripes of
       :member:`CacheHostRecord::cp`
@@ -112,7 +112,7 @@ Data Structures
 
    This class is a wrapper for :class:`HTTPCacheAlt`. It provides the
    external API for accessing data in the wrapped class. It contains only a
-   pointer (possibly ``NULL``) to an instance of the wrapped class.
+   pointer (possibly ``nullptr``) to an instance of the wrapped class.
 
 .. class:: CacheHTTPInfo
 
@@ -133,17 +133,13 @@ Data Structures
 
    * Timestamps for request and response from :term:`origin server`.
 
-.. class:: Vol
+.. class:: Stripe
 
    This represents a :term:`storage unit` inside a :term:`cache volume`.
 
    .. cpp:member:: off_t data_blocks
 
       The number of blocks of storage in the stripe.
-
-   .. cpp:member:: int aggWrite(int event, void * e)
-
-      Schedule the aggregation buffer to be written to disk.
 
    .. member:: off_t segments
 
@@ -158,14 +154,17 @@ Data Structures
       values this is around 16,384 (2^16 / 4). Buckets are used as the targets
       of the index hash.
 
-   .. member:: DLL<EvacuationBlock> evacuate
-
-      Array of :class:`EvacuationBlock` buckets. This is sized so there
-      is one bucket for every evacuation span.
-
    .. member:: off_t len
 
       Length of stripe in bytes.
+
+.. class:: StripeSM
+
+   Defined in :ts:git:`src/iocore/cache/Stripe.h`.
+
+   .. cpp:member:: int aggWrite(int event, void * e)
+
+      Schedule the aggregation buffer to be written to disk.
 
    .. member:: int evac_range(off_t low, off_t high, int evac_phase)
 
@@ -173,9 +172,18 @@ Data Structures
          from :arg:`low` to :arg:`high`. Return ``0`` if no evacuation was started,
          non-zero otherwise.
 
+.. class:: PreservationTable
+
+   Defined in :ts:git:`src/iocore/cache/PreservationTable.h`.
+
+   .. member:: DLL<EvacuationBlock> evacuate
+
+      Array of :class:`EvacuationBlock` buckets. This is sized so there
+      is one bucket for every evacuation span.
+
 .. class:: Doc
 
-   Defined in :ts:git:`iocore/cache/P_CacheVol.h`.
+   Defined in :ts:git:`iocore/cache/StripeSM.h`.
 
    .. member:: uint32_t magic
 
@@ -272,18 +280,18 @@ Data Structures
 
       The number of volume blocks in the span.
 
-   .. member:: DiskVolBlock vol_info[1]
+   .. member:: DiskStripeBlock vol_info[1]
 
       A flexible array. The actual length of this array is :code:`num_diskvol_blks` and each element describes
       a span block.
 
-.. class:: DiskVolBlock
+.. class:: DiskStripeBlock
 
-   A description of a span stripe (Vol) block . This is a serialized data structure.
+   A description of a span stripe (StripeSM) block . This is a serialized data structure.
 
    .. member:: uint64_t offset
 
-      Offset in the span of the start of the span stripe (Vol) block, in bytes.
+      Offset in the span of the start of the span stripe (StripeSM) block, in bytes.
 
    .. member:: uint64_t len
 
@@ -302,11 +310,11 @@ Data Structures
       In use or free flag - set if the span block is not in use by a cache volume.
 
 
-.. class:: VolHeaderFooter
+.. class:: StripeHeaderFooter
 
    .. member:: unsigned int magic
 
-      Container for a magic value, ``VOL_MAGIC``, to indicate the instance is valid.
+      Container for a magic value, ``STRIPE_MAGIC``, to indicate the instance is valid.
 
    .. member:: VersionNumber version
 
@@ -350,21 +358,21 @@ Data Structures
       for a segment, in the same order as the segments in the directory.
 
 
-.. class:: DiskVolBlockQueue
+.. class:: DiskStripeBlockQueue
 
-   .. member:: DiskVolBlock* b
+   .. member:: DiskStripeBlock* b
 
    .. member:: int new_block
 
-      Indicates if this is a new stripe rather than an existing one. In case a stripe is new ATS decides to clear that stripe(:class:`Vol`)
+      Indicates if this is a new stripe rather than an existing one. In case a stripe is new ATS decides to clear that stripe(:class:`StripeSM`)
 
-   .. member:: LINK<DiskVolBlockQueue> link
+   .. member:: LINK<DiskStripeBlockQueue> link
 
 
-.. class:: DiskVol
+.. class:: DiskStripe
 
    Describes the Disk that contains the stripe identified by vol_number. This class also contains the queue
-   containing all the DiskVolBlock
+   containing all the DiskStripeBlock
 
    .. member:: int num_volblocks
 
@@ -372,7 +380,7 @@ Data Structures
 
    .. member:: int vol_number
 
-      Identification number of the stripe (:class:`Vol`)
+      Identification number of the stripe (:class:`StripeSM`)
 
    .. member:: uint64_t size
 
@@ -382,7 +390,7 @@ Data Structures
 
       The disk containing the stripe
 
-   .. member:: Queue<DiskVolBlockQueue> dpb_queue
+   .. member:: Queue<DiskStripeBlockQueue> dpb_queue
 
 .. enum:: CacheType
 
@@ -392,7 +400,7 @@ Data Structures
 
 .. class:: CacheVol
 
-   A :term:`cache volume` as described in :file:`volume.config`. This class represents a single volume. :class:`CacheVol` comprises of stripes spread across Spans(disks)
+   A :term:`cache volume` as described in :file:`storage.yaml`. This class represents a single volume. :class:`CacheVol` comprises of stripes spread across Spans(disks)
 
    .. member:: int volume_number
 
@@ -407,21 +415,17 @@ Data Structures
 
    .. member:: int num_vols
 
-      Number of stripes(:class:`Vol`) contained in this volume
+      Number of stripes(:class:`StripeSM`) contained in this volume
 
-   .. member:: Vol** vols
+   .. member:: StripeSM** vols
 
-      :class:`Vol` represents a single stripe in the disk. vols contains all the stripes this volume is made up of
+      :class:`StripeSM` represents a single stripe in the disk. vols contains all the stripes this volume is made up of
 
-   .. member:: DiskVol** disk_vols
+   .. member:: DiskStripe** disk_vols
 
       disk_vols contain references to the disks of all the stripes in this volume
 
    .. member:: LINK<CacheVol> link
-
-   .. member:: RecRawStatBlock vol_rsb
-
-      per volume stat
 
 .. class:: ConfigVol
 
@@ -449,13 +453,17 @@ Data Structures
 
     .. member:: int num_volumes
 
-       Total number of volumes specified in volume.config
+       Total number of volumes specified in storage.yaml
 
     .. member:: int num_http_volumes
 
-       Total number of volumes specified in volume.config for HTTP scheme
+       Total number of volumes specified in storage.yaml for HTTP scheme
 
     .. member:: Queue<ConfigVol> cp_queue
+
+.. union:: CryptoHash
+
+   Used for cache keys, along with other cache related operations.
 
 .. class:: Cache
 
@@ -466,12 +474,12 @@ Data Structures
       A generic class:`CacheHostRecord` that contains all cache volumes that are not explicitly
       assigned in :file:`hosting.config`.
 
-   .. function:: Vol * key_to_vol(const char * key, const char * host, int host_len)
+   .. function:: StripeSM * key_to_stripe(CryptoHash * key, const char * host, int host_len)
 
-      Compute the stripe (:code:`Vol*`) for a cache :arg:`key` and :arg:`host`. The :arg:`host` is
+      Compute the stripe (:code:`StripeSM *`) for a cache :arg:`key` and :arg:`host`. The :arg:`host` is
       used to find the appropriate :class:`CacheHostRecord` instance. From there the stripe
       assignment slot is determined by taking bits 64..83 (20 bits) of the cache :arg:`key` modulo
-      the stripe assignment array count (:code:`VOL_HASH_TABLE_SIZE`). These bits are the third 32
+      the stripe assignment array count (:code:`STRIPE_HASH_TABLE_SIZE`). These bits are the third 32
       bit slice of the :arg:`key` less the bottom :code:`DIR_TAG_WIDTH` (12) bits.
 
 .. rubric:: Footnotes

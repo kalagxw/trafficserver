@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -35,7 +35,7 @@
 
 /* TODO use native aiocb where possible */
 
-#define LIO_READ 0x1
+#define LIO_READ  0x1
 #define LIO_WRITE 0x2
 
 struct ink_aiocb {
@@ -46,9 +46,7 @@ struct ink_aiocb {
   void *aio_buf; /* buffer location */
 #endif
   size_t aio_nbytes; /* length of transfer */
-  off_t aio_offset;  /* file offset */
+  off_t  aio_offset; /* file offset */
 
   int aio_lio_opcode; /* listio operation */
-  int aio_state;      /* state flag for List I/O */
-  int aio__pad[1];    /* extension padding */
 };

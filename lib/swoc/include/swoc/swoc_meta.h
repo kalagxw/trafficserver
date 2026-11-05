@@ -8,6 +8,7 @@
 #pragma once
 
 #include <type_traits>
+#include <utility>
 
 #include "swoc/swoc_version.h"
 
@@ -65,18 +66,18 @@ namespace swoc { inline namespace SWOC_VERSION_NS { namespace meta {
 template <unsigned N> struct CaseTag : /** @cond DOXYGEN_FAIL */ public CaseTag<N - 1> /** @endcond */ {
   constexpr CaseTag() {}
 
-  static constexpr unsigned value = N;
+  static constexpr unsigned value = N; ///< Case tag value.
 };
 
-/// Anchor the hierarchy.
+/// Case hierarchy anchor.
 template <> struct CaseTag<0> {
   constexpr CaseTag() {}
 
-  static constexpr unsigned value = 0;
+  static constexpr unsigned value = 0; ///< Case tag value.
 };
 
-/** This is the final case - it forces the super class hierarchy.
- * After defining the cases using the indexed case arguments, this is used to to perform the call.
+/** This is the final case - it forces the class hierarchy.
+ * After defining the cases using the indexed case arguments, this is used to perform the call.
  * To increase the hierarchy depth, change the template argument to a larger number.
  */
 static constexpr CaseTag<9> CaseArg{};
@@ -112,6 +113,42 @@ static constexpr CaseTag<9> CaseArg{};
  */
 template <typename T> T TypeFunc();
 
+/** Template parameter eraser.
+ *
+ * @tparam T Parameter to erase (pass explicitly)
+ * @tparam U Parameter for forwarded value (implicit)
+ * @param u Forward value
+ * @return @a u
+ *
+ * This has no effect on @a u but fools the compiler in to thinking @a T has been used.
+ * This avoids metaprogramming issues with unused template parameters.
+ *
+ * Suppose an API has changed a function from "cheer_for_delain" to "cheer_delain". To handle this
+ * the metacase support is used, but there is no apparent template parameter. A fake one can be used
+ * and defaulted to @c void. But that creates the unused template parameter warning. This is fixed
+ * by doing something to erase the template parameter @a V while forwarding parameter @a x. The result
+ * is a function @c f that calls the correct function automatically. Note this can't be in the body of
+ * the function because even for SFINAE the function body must compile and the variant with the wrong
+ * function will fail.
+ *
+ * @code
+ *   template <typename V = void>
+ *   auto f(UDT x, swoc::meta::CaseTag<0>) -> decltype(cheer_for_delain(eraser<V>(x)))
+ *   { return cheer_for_delain(eraser<V>(x));  }
+ *
+ *   template <typename V = void>
+ *   auto f(UDT x, swoc::meta::CaseTag<1>) -> decltype(cheer_delain(eraser<V>(x)))
+ *   { return cheer_delain(eraser<V>(x)); }
+ *
+ *   f(x, swoc::meta::CaseArg); // Invoke the correctly named function
+ * @endcode
+ */
+template <typename T, typename U>
+constexpr auto
+eraser(U &&u) -> U {
+  return std::forward<U>(u);
+}
+
 /** Support for variable parameter lambdas.
  *
  * @tparam Args Lambdas to combine.
@@ -128,7 +165,9 @@ template <typename T> T TypeFunc();
  *   }, v);
  * @endcode
  */
-template <typename... Args> struct vary : public Args... { using Args::operator()...; };
+template <typename... Args> struct vary : public Args... {
+  using Args::operator()...;
+};
 /// Template argument deduction guide (C++17 required).
 template <typename... Args> vary(Args...) -> vary<Args...>;
 
@@ -141,7 +180,7 @@ template <typename... Args> vary(Args...) -> vary<Args...>;
  * @c enable_if to enable a function / method only if the argument type is one of a fixed set.
  * @code
  *   template < typename T > auto f(T const& t)
- *     -> std::enable_if_t<swoc::meta::is_any_of<T, int, float, bool>::value, void>
+ *     -> std::enable_if_t<swoc::meta::is_any_of<T, int, float, bool>::value, void>::value
  *   { ... }
  */
 template <typename T, typename... Types> struct is_any_of {
@@ -197,5 +236,59 @@ template <typename... Types> struct type_list {
    */
   template <typename T> static constexpr bool contains = is_any_of<T, Types...>::value;
 };
+
+/** Scoped value change.
+ *
+ * The purpose of this class is to change the value of a variable in a scope and then change it
+ * back when the scope is exited. The old value will be moved to a cache variable and then moved
+ * back when the instance is destructed. This is very useful to temporarily tweak global variables
+ * which having to know what the current value is.
+ *
+ * @code
+ * {
+ *   let save(var, value);
+ *   // var now has value.
+ * }
+ * // var now has original value.
+ * @endcode
+ *
+ * @tparam T Type of variable to scope.
+ */
+template <typename T> struct let {
+  using self_type = let;
+
+  let(self_type const &that)              = delete;
+  self_type &operator=(self_type const &) = delete;
+
+  T &_var;  ///< Reference to scoped variable.
+  T _value; ///< Original value.
+
+  /** Construct a scope.
+   *
+   * @param var Variable to scope.
+   * @param value temporary value to assign.
+   */
+  let(T &var, T const &value);
+
+  /** Construct a scope.
+   *
+   * @param var Variable to scope.
+   * @param value temporary value to assign.
+   */
+  let(T &var, T &&value);
+
+  ~let();
+};
+
+template <typename T> let<T>::let(T &var, T const &value) : _var(var), _value(std::move(var)) {
+  _var = value;
+}
+template <typename T> let<T>::let(T &var, T &&value) : _var(var), _value(std::move(var)) {
+  _var = std::move(value);
+}
+
+template <typename T> let<T>::~let() {
+  _var = std::move(_value);
+}
 
 }}} // namespace swoc::SWOC_VERSION_NS::meta

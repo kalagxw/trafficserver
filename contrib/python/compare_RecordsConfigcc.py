@@ -45,7 +45,7 @@ rc_in = {}  # records.config.in values
 rc_doc = {}  # documented values
 
 # Process RecordsConfig.cc
-with open(f"{src_dir}/mgmt/RecordsConfig.cc") as fh:
+with open(f"{src_dir}/src/mgmt/RecordsConfig.cc") as fh:
     cc_re = re.compile(r'\{RECT_(?:CONFIG|LOCAL), "([^"]+)", RECD_([A-Z]+), (.+?), ')
     for line in fh:
         m = cc_re.search(line)
@@ -101,7 +101,6 @@ if len(defaults) > 0:
     print("Incorrectly documented defaults:")
     for d in sorted(defaults):
         print("\t%s %s -> %s" % (d, "%s %s" % rc_cc[d], "%s %s" % rc_doc[d]))
-
 
 # Search for stale documentation ...
 stale = [k for k in rc_doc if k not in rc_cc]

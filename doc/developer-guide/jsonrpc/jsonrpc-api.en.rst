@@ -1,0 +1,2156 @@
+.. Licensed to the Apache Software Foundation (ASF) under one
+   or more contributor license agreements.  See the NOTICE file
+   distributed with this work for additional information
+   regarding copyright ownership.  The ASF licenses this file
+   to you under the Apache License, Version 2.0 (the
+   "License"); you may not use this file except in compliance
+   with the License.  You may obtain a copy of the License at
+
+   http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing,
+   software distributed under the License is distributed on an
+   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+   KIND, either express or implied.  See the License for the
+   specific language governing permissions and limitations
+   under the License.
+
+.. include:: ../../common.defs
+
+.. highlight:: cpp
+.. default-domain:: cpp
+
+.. |RPC| replace:: JSONRPC 2.0
+
+.. _JSONRPC: https://www.jsonrpc.org/specification
+.. _JSON: https://www.json.org/json-en.html
+
+.. |str| replace:: ``string``
+.. |arraynum| replace:: ``array[number]``
+.. |arraynumstr| replace:: ``array[number|string]``
+.. |arraystr| replace:: ``array[string]``
+.. |num| replace:: *number*
+.. |strnum| replace:: *string|number*
+.. |object| replace:: *object*
+.. |array| replace:: *array*
+.. |optional| replace:: ``optional``
+.. |method| replace:: ``method``
+.. |notification| replace:: ``notification``
+.. |arrayrecord| replace:: ``array[record]``
+.. |arrayerror| replace:: ``array[errors]``
+
+.. _jsonrpc-api:
+
+API
+***
+
+.. _jsonrpc-api-description:
+
+Description
+===========
+
+|TS| Implements and exposes management calls using a JSONRPC API.  This API is base on the following two things:
+
+* `JSON  <https://www.json.org/json-en.html>`_  format. Lightweight data-interchange format. It is easy for humans to read and write.
+  It is easy for machines to parse and generate. It's basically a  collection of name/value pairs.
+
+* `JSONRPC 2.0 <https://www.jsonrpc.org/specification>`_ protocol. Stateless, light-weight remote procedure call (RPC) protocol.
+  Primarily this specification defines several data structures and the rules around their processing.
+
+
+In order for programs to communicate with |TS|, the server exposes a ``JSONRRPC 2.0`` API where programs can communicate with it.
+
+
+.. _admin-jsonrpc-api:
+
+Administrative API
+==================
+
+This section describes how to interact with the administrative RPC API to interact with |TS|
+
+..
+   _This: We should explain how to deal with permission once it's implemented.
+
+
+
+.. _Records:
+
+Records
+-------
+
+When interacting with the admin api, there are a few structures that need to be understood, this section will describe each of them.
+
+
+.. _RecordRequest:
+
+RPC Record Request
+~~~~~~~~~~~~~~~~~~
+
+To obtain information regarding a particular record(s) from |TS|, we should use the following fields in an *unnamed* json structure.
+
+
+====================== ============= ================================================================================================================
+Field                  Type          Description
+====================== ============= ================================================================================================================
+``record_name``        |str|         The name we want to query from |TS|. This is |optional| if ``record_name_regex`` is used.
+``record_name_regex``  |str|         The regular expression we want to query from |TS|. This is |optional| if ``record_name`` is used.
+``rec_types``          |arraynumstr| |optional| A list of types that should be used to match against the found record. These types refer to ``RecT``.
+                                       Other values (in decimal) than the ones defined by the ``RecT`` ``enum`` will be ignored. If no type is
+                                       specified, the server will not match the type against the found record.
+====================== ============= ================================================================================================================
+
+.. note::
+
+   If ``record_name`` and ``record_name_regex`` are both provided, the server will not use any of them. Only one should be provided.
+
+
+Example:
+
+   #. Single record:
+
+   .. code-block:: json
+
+      {
+         "id":"2947819a-8563-4f21-ba45-bde73210e387",
+         "jsonrpc":"2.0",
+         "method":"admin_lookup_records",
+         "params":[
+            {
+               "record_name":"proxy.config.exec_thread.autoconfig.scale",
+               "rec_types":[
+                  1,
+                  16
+               ]
+            }
+         ]
+      }
+
+   #. Multiple records:
+
+   .. code-block:: json
+      :emphasize-lines: 5-12
+
+      {
+         "id": "ded7018e-0720-11eb-abe2-001fc69cc946",
+         "jsonrpc": "2.0",
+         "method": "admin_lookup_records",
+         "params": [{
+               "record_name": "proxy.config.exec_thread.autoconfig.scale"
+            },
+            {
+               "record_name": "proxy.config.log.rolling_interval_sec",
+               "rec_types": [1]
+            }
+         ]
+      }
+
+   #. Batch Request
+
+   .. code-block:: json
+
+      [
+         {
+            "id": "ded7018e-0720-11eb-abe2-001fc69cc946",
+            "jsonrpc": "2.0",
+            "method": "admin_lookup_records",
+            "params": [{
+               "record_name_regex": "proxy.config.exec_thread.autoconfig.scale",
+               "rec_types": [1]
+            }]
+         }, {
+            "id": "dam7018e-0720-11eb-abe2-001fc69dd123",
+            "jsonrpc": "2.0",
+            "method": "admin_lookup_records",
+            "params": [{
+               "record_name_regex": "proxy.config.log.rolling_interval_sec",
+               "rec_types": [1]
+            }]
+         }
+      ]
+
+
+.. _RecordResponse:
+
+
+RPC Record Response
+~~~~~~~~~~~~~~~~~~~
+
+When querying for a record(s), in the majority of the cases the record api will respond with the following json structure.
+
+=================== ==================== ========================================================================
+Field               Type                 Description
+=================== ==================== ========================================================================
+``recordList``      |arrayrecord|         A list of record |object|. See `RecordRequestObject`_
+``errorList``       |arrayerror|          A list of error |object|. See `RecordErrorObject`_
+=================== ==================== ========================================================================
+
+
+.. _RecordErrorObject:
+
+RPC Record Error Object
+~~~~~~~~~~~~~~~~~~~~~~~
+
+All errors that are found during a record query, will be returned back to the caller in the ``error_list`` field as part of the `RecordResponse`_ object.
+The record errors have the following fields.
+
+
+=================== ============= ===========================================================================
+Field               Type          Description
+=================== ============= ===========================================================================
+``code``            |str|         |optional| An error code that should be used to get a description of the error.(Add error codes)
+``record_name``     |str|         |optional| The associated record name, this may be omitted sometimes.
+``message``         |str|         |optional| A descriptive message. The server can omit this value.
+=================== ============= ===========================================================================
+
+
+Example:
+
+   .. code-block:: json
+      :linenos:
+
+      {
+         "code": "2007",
+         "record_name": "proxy.config.exec_thread.autoconfig.scale"
+      }
+
+
+Examples:
+
+#. Request a non existing record among with an invalid type for a record:
+
+   .. code-block:: json
+      :linenos:
+
+      {
+         "id": "ded7018e-0720-11eb-abe2-001fc69cc946",
+         "jsonrpc": "2.0",
+         "method": "admin_lookup_records",
+         "params": [
+            {
+                  "record_name": "non.existing.record"
+            },
+            {
+                  "record_name": "proxy.process.http.total_client_connections_ipv4",
+                  "rec_types": [1]
+            }
+         ]
+      }
+
+   Line ``7`` requests a non existing record and in line ``11`` we request a type that does not match the record's type.
+
+   .. code-block:: json
+      :linenos:
+
+      {
+         "jsonrpc":"2.0",
+         "result":{
+            "errorList":[
+               {
+                  "code":"2000",
+                  "record_name":"non.existing.record"
+               },
+               {
+                  "code":"2007",
+                  "record_name":"proxy.process.http.total_client_connections_ipv4"
+               }
+            ]
+         },
+         "id":"ded7018e-0720-11eb-abe2-001fc69cc946"
+      }
+
+   In this case we get the response indicating that the requested fields couldn't be retrieved. See `RecordErrorObject`_ for more details.
+
+   The error list can also be included among with a recordList
+
+   .. code-block:: json
+      :linenos:
+
+      {
+         "jsonrpc":"2.0",
+         "result":{
+            "recordList":[]
+            ,"errorList":[
+               {
+                  "code":"2000",
+                  "record_name":"non.existing.record"
+               },
+               {
+                  "code":"2007",
+                  "record_name":"proxy.process.http.total_client_connections_ipv4"
+               }
+            ]
+         },
+         "id":"ded7018e-0720-11eb-abe2-001fc69cc946"
+      }
+
+   .. note::
+
+      If there is no errors to report, the "errorList" field will be represented as an empty  list (``[]``).
+
+.. _RecordErrorObject-Enum:
+
+
+JSONRPC Record Errors
+~~~~~~~~~~~~~~~~~~~~~
+
+The following errors could be generated when requesting record from the server.
+
+.. class:: RecordError
+
+   .. enumerator:: RECORD_NOT_FOUND = 2000
+
+      Record not found.
+
+   .. enumerator:: RECORD_NOT_CONFIG = 2001
+
+      Record is not a configuration type.
+
+   .. enumerator:: RECORD_NOT_METRIC = 2002
+
+      Record is not a metric type.
+
+   .. enumerator:: INVALID_RECORD_NAME = 2003
+
+      Invalid Record Name.
+
+   .. enumerator:: VALIDITY_CHECK_ERROR = 2004
+
+      Validity check failed.
+
+   .. enumerator:: GENERAL_ERROR = 2005
+
+      Error reading the record.
+
+   .. enumerator:: RECORD_WRITE_ERROR = 2006
+
+      Generic error while writing the record.
+
+   .. enumerator:: REQUESTED_TYPE_MISMATCH = 2007
+
+      The requested record's type does not match against the passed type list.
+
+   .. enumerator:: INVALID_INCOMING_DATA = 2008
+
+      This could be caused by an invalid value in the incoming request which may cause the parser to fail.
+
+
+.. _RecordRequestObject:
+
+RPC Record Object
+~~~~~~~~~~~~~~~~~
+
+This is mapped from a ``RecRecord``, when requesting for a record the following information will be populated into a json |object|.
+The ``record`` structure has the following members.
+
+=================== ======== ==================================================================
+Record Field        Type     Description
+=================== ======== ==================================================================
+``current_value``   |str|    Current value that is held by the record.
+``default_value``   |str|    Record's default value.
+``name``            |str|    Record's name
+``order``           |str|    Record's order
+``overridable``     |str|    Records's overridable configuration.
+``raw_stat_block``  |str|    Raw Stat Block Id.
+``record_class``    |str|    Record type. Mapped from ``RecT``
+``record_type``     |str|    Record's data type. Mapped from RecDataT
+``version``         |str|    Record's version.
+``stats_meta``      |object| Stats metadata `stats_meta`_
+``config_meta``     |object| Config metadata `config_meta`_
+=================== ======== ==================================================================
+
+* it will be either ``config_meta`` or ``stats_meta`` object, but never both*
+
+
+.. _config_meta:
+
+Config Metadata
+
+=================== ======== ==================================================================
+Record Field        Type     Description
+=================== ======== ==================================================================
+`access_type`       |str|    Access type. This is mapped from ``TSRecordAccessType``.
+`check_expr`        |str|    Syntax checks regular expressions.
+`checktype`         |str|    Check type, This is mapped from ``RecCheckT``.
+`source`            |str|    Source of the configuration value. Mapped from RecSourceT
+`update_status`     |str|    Update status flag.
+`update_type`       |str|    How the records get updated. Mapped from RecUpdateT
+=================== ======== ==================================================================
+
+
+.. _stats_meta:
+
+Stats Metadata (TBC)
+
+=================== ======== ==================================================================
+Record Field        Type     Description
+=================== ======== ==================================================================
+`persist_type`      |str|    Persistent type. This is mapped from ``RecPersistT``
+=================== ======== ==================================================================
+
+
+Example with config meta:
+
+   .. code-block:: json
+      :linenos:
+
+      {
+         "record":{
+            "record_name":"proxy.config.diags.debug.tags",
+            "record_type":"3",
+            "version":"0",
+            "raw_stat_block":"0",
+            "order":"421",
+            "config_meta":{
+               "access_type":"0",
+               "update_status":"0",
+               "update_type":"1",
+               "checktype":"0",
+               "source":"3",
+               "check_expr":"null"
+            },
+            "record_class":"1",
+            "overridable":"false",
+            "data_type":"STRING",
+            "current_value":"rpc",
+            "default_value":"http|dns"
+         }
+      }
+
+Example with stats meta:
+
+   .. code-block:: json
+      :linenos:
+
+         {
+            "record": {
+               "current_value": "0",
+               "data_type": "COUNTER",
+               "default_value": "0",
+               "order": "8",
+               "overridable": "false",
+               "raw_stat_block": "10",
+               "record_class": "2",
+               "record_name": "proxy.process.http.total_client_connections_ipv6",
+               "record_type": "4",
+               "stat_meta": {
+                  "persist_type": "1"
+               },
+               "version": "0"
+            }
+         }
+
+.. _jsonrpc-admin-api:
+
+JSONRPC API
+===========
+
+* `admin_cache_clear`_
+
+* `admin_lookup_records`_
+
+
+* `admin_config_set_records`_
+
+* `admin_config_reload`_
+
+* `admin_host_set_status`_
+
+* `admin_hostdb_clear`_
+
+* `admin_server_stop_drain`_
+
+* `admin_server_start_drain`_
+
+* `admin_plugin_send_basic_msg`_
+
+* `admin_storage_get_device_status`_
+
+* `admin_storage_set_device_offline`_
+
+* `show_registered_handlers`_
+
+* `get_service_descriptor`_
+
+* `filemanager.get_files_registry`_
+
+* `get_connection_tracker_info`_
+
+
+Cache
+=====
+
+.. _admin_cache_clear:
+
+admin_cache_clear
+-----------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+Invalidate cached HTTP objects in the global cache-generation namespace without restarting |TS|. The method advances
+:ts:cv:`proxy.config.http.cache.generation`, causing subsequent cache lookups to use a new key namespace. Remap rules that override
+this configuration have independent namespaces and are not affected. The invalidated data remains on cache storage until it is
+overwritten through normal cache operation. The configuration change applies to the running process and is not persisted to
+:file:`records.yaml`.
+
+Parameters
+~~~~~~~~~~
+
+* ``params``: Omitted
+
+Result
+~~~~~~
+
+The response will contain the default `success_response` or an error. :ref:`jsonrpc-node-errors`.
+
+Examples
+~~~~~~~~
+
+Request:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "9db0608c-b696-46f4-b865-1b5dc8a80d38",
+      "jsonrpc": "2.0",
+      "method": "admin_cache_clear"
+   }
+
+Response:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "jsonrpc": "2.0",
+      "result": "success",
+      "id": "9db0608c-b696-46f4-b865-1b5dc8a80d38"
+   }
+
+.. _jsonapi-management-records:
+
+
+Records
+=======
+
+.. _admin_lookup_records:
+
+
+admin_lookup_records
+--------------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+Obtain  record(s) from TS.
+
+
+Parameters
+~~~~~~~~~~
+
+* ``params``: A list of `RecordRequest`_ objects.
+
+
+Result
+~~~~~~
+
+A list of `RecordResponse`_ . In case of any error obtaining the requested record, the `RecordErrorObject`_ |object| will be included.
+
+
+Examples
+~~~~~~~~
+
+#. Request a configuration record, no errors:
+
+   .. code-block:: json
+
+      {
+         "id":"b2bb16a5-135a-4c84-b0a7-8d31ebd82542",
+         "jsonrpc":"2.0",
+         "method":"admin_lookup_records",
+         "params":[
+            {
+               "record_name":"proxy.config.log.rolling_interval_sec",
+               "rec_types":[
+                  "1",
+                  "16"
+               ]
+            }
+         ]
+      }
+
+Response:
+
+   .. code-block:: json
+
+      {
+         "jsonrpc":"2.0",
+         "result":{
+            "recordList":[
+               {
+                  "record":{
+                     "record_name":"proxy.config.log.rolling_interval_sec",
+                     "record_type":"1",
+                     "version":"0",
+                     "raw_stat_block":"0",
+                     "order":"410",
+                     "config_meta":{
+                        "access_type":"0",
+                        "update_status":"0",
+                        "update_type":"1",
+                        "checktype":"1",
+                        "source":"3",
+                        "check_expr":"^[0-9]+$"
+                     },
+                     "record_class":"1",
+                     "overridable":"false",
+                     "data_type":"INT",
+                     "current_value":"86400",
+                     "default_value":"86400"
+                  }
+               }
+            ]
+            ,"errorList":[]
+         },
+         "id":"b2bb16a5-135a-4c84-b0a7-8d31ebd82542"
+      }
+
+
+#. Request a configuration record, some errors coming back:
+
+   .. code-block:: json
+
+      {
+         "id": "ded7018e-0720-11eb-abe2-001fc69cc946",
+         "jsonrpc": "2.0",
+         "method": "admin_lookup_records",
+         "params": [
+            {
+               "rec_types": [1],
+               "record_name": "proxy.config.log.rolling_interval_sec"
+            },
+            {
+               "record_name": "proxy.config.log.rolling_interv"
+            }
+         ]
+      }
+
+
+Response:
+
+   .. code-block:: json
+
+      {
+         "jsonrpc":"2.0",
+         "result":{
+            "recordList":[
+               {
+                  "record":{
+                     "record_name":"proxy.config.log.rolling_interval_sec",
+                     "record_type":"1",
+                     "version":"0",
+                     "raw_stat_block":"0",
+                     "order":"410",
+                     "config_meta":{
+                        "access_type":"0",
+                        "update_status":"0",
+                        "update_type":"1",
+                        "checktype":"1",
+                        "source":"3",
+                        "check_expr":"^[0-9]+$"
+                     },
+                     "record_class":"1",
+                     "overridable":"false",
+                     "data_type":"INT",
+                     "current_value":"86400",
+                     "default_value":"86400"
+                  }
+               }
+            ],
+            "errorList":[
+               {
+                  "code":"2000",
+                  "record_name":"proxy.config.log.rolling_interv"
+               }
+            ]
+         },
+         "id":"ded7018e-0720-11eb-abe2-001fc69cc946"
+      }
+
+
+Request using a `regex` instead of the full name.
+
+.. note::
+
+   Regex lookups use ``record_name_regex` and not ``record_name``. Check `RecordRequestObject`_ .
+
+Examples
+~~~~~~~~
+
+#. Request a mix(config and stats) of records record using a regex, no errors:
+
+   .. code-block:: json
+
+      {
+         "id": "ded7018e-0720-11eb-abe2-001fc69cc946",
+         "jsonrpc": "2.0",
+         "method": "admin_lookup_records",
+         "params": [
+            {
+                  "rec_types": [1],
+                  "record_name_regex": "proxy.config.exec_thread.autoconfig.sca*"
+            },
+            {
+                  "rec_types": [2],
+                  "record_name_regex": "proxy.process.http.total_client_connections_ipv"
+            }
+         ]
+      }
+
+
+   Response:
+
+   .. code-block:: json
+
+      {
+         "jsonrpc":"2.0",
+         "result":{
+            "recordList":[
+               {
+                  "record":{
+                     "record_name":"proxy.config.exec_thread.autoconfig.scale",
+                     "record_type":"2",
+                     "version":"0",
+                     "raw_stat_block":"0",
+                     "order":"355",
+                     "config_meta":{
+                        "access_type":"2",
+                        "update_status":"0",
+                        "update_type":"2",
+                        "checktype":"0",
+                        "source":"3",
+                        "check_expr":"null"
+                     },
+                     "record_class":"1",
+                     "overridable":"false",
+                     "data_type":"FLOAT",
+                     "current_value":"1",
+                     "default_value":"1"
+                  }
+               },
+               {
+                  "record":{
+                     "record_name":"proxy.process.http.total_client_connections_ipv4",
+                     "record_type":"4",
+                     "version":"0",
+                     "raw_stat_block":"9",
+                     "order":"7",
+                     "stat_meta":{
+                        "persist_type":"1"
+                     },
+                     "record_class":"2",
+                     "overridable":"false",
+                     "data_type":"COUNTER",
+                     "current_value":"0",
+                     "default_value":"0"
+                  }
+               },
+               {
+                  "record":{
+                     "record_name":"proxy.process.http.total_client_connections_ipv6",
+                     "record_type":"4",
+                     "version":"0",
+                     "raw_stat_block":"10",
+                     "order":"8",
+                     "stat_meta":{
+                        "persist_type":"1"
+                     },
+                     "record_class":"2",
+                     "overridable":"false",
+                     "data_type":"COUNTER",
+                     "current_value":"0",
+                     "default_value":"0"
+                  }
+               }
+            ]
+            ,"errorList":[]
+         },
+         "id":"ded7018e-0720-11eb-abe2-001fc69cc946"
+      }
+
+
+
+#. Request a configuration record using a regex with some errors coming back:
+
+   .. code-block:: json
+      :linenos:
+
+      {
+         "id": "ded7018e-0720-11eb-abe2-001fc69cc946",
+         "jsonrpc": "2.0",
+         "method": "admin_lookup_records",
+         "params": [
+            {
+                  "rec_types": [1],
+                  "record_name_regex": "proxy.config.exec_thread.autoconfig.sca*"
+            },
+            {
+                  "rec_types": [987],
+                  "record_name_regex": "proxy.process.http.total_client_connections_ipv"
+            }
+         ]
+      }
+
+
+   Note the invalid ``rec_type`` at line ``11``
+
+   Response:
+
+   .. code-block:: json
+      :linenos:
+
+      {
+         "jsonrpc":"2.0",
+         "result":{
+            "recordList":[
+               {
+                  "record":{
+                     "record_name":"proxy.config.exec_thread.autoconfig.scale",
+                     "record_type":"2",
+                     "version":"0",
+                     "raw_stat_block":"0",
+                     "order":"355",
+                     "config_meta":{
+                        "access_type":"2",
+                        "update_status":"0",
+                        "update_type":"2",
+                        "checktype":"0",
+                        "source":"3",
+                        "check_expr":"null"
+                     },
+                     "record_class":"1",
+                     "overridable":"false",
+                     "data_type":"FLOAT",
+                     "current_value":"1",
+                     "default_value":"1"
+                  }
+               }
+            ],
+            "errorList":[
+               {
+                  "code":"2008",
+                  "message":"Invalid request data provided"
+               }
+            ]
+         },
+         "id":"ded7018e-0720-11eb-abe2-001fc69cc946"
+      }
+
+
+
+   We get a valid record that was found based on the passed criteria, ``proxy.config.exec_thread.autoconfig.sca*`` and the ``rec_type`` *1*.
+   Also we get a particular error that was caused by the invalid rec types ``987``
+
+
+#. Request all config records
+
+   .. code-block:: json
+      :linenos:
+
+      {
+         "id": "ded7018e-0720-11eb-abe2-001fc69cc946",
+         "jsonrpc": "2.0",
+         "method": "admin_lookup_records",
+         "params": [{
+
+            "record_name_regex": ".*",
+            "rec_types": [1, 16]
+
+         }]
+
+      }
+
+
+
+   *Note the `.*` regex we use to match them all. `rec_types` refer to ``RecT` , which in this case we are interested in `CONFIG`
+   records and `LOCAL` records.*
+
+
+   Response:
+
+   All the configuration records. See `RecordResponse`_. The JSONRPC record handler is not limiting the response size.
+
+
+.. note::
+
+   It will retrieve ALL the configuration records, keep in mind that it might be a large response.
+
+
+
+.. _admin_config_set_records:
+
+admin_config_set_records
+------------------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+Set a value for a particular record.
+
+
+
+Parameters
+~~~~~~~~~~
+
+=================== ============= ================================================================================================================
+Field               Type          Description
+=================== ============= ================================================================================================================
+``record_name``     |str|         The name of the record that wants to be updated.
+``new_value``       |str|         The associated record value. Use always a |str| as the internal library will translate to the appropriate type.
+=================== ============= ================================================================================================================
+
+
+Example:
+
+   .. code-block:: json
+
+      [
+        {
+            "record_name": "proxy.config.exec_thread.autoconfig.scale",
+            "record_value": "1.5"
+        }
+      ]
+
+
+Result
+~~~~~~
+
+A list of updated record names. :ref:`RecordErrorObject-Enum` will be included.
+
+Examples
+~~~~~~~~
+
+
+Request:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "a32de1da-08be-11eb-9e1e-001fc69cc946",
+      "jsonrpc": "2.0",
+      "method": "admin_config_set_records",
+      "params": [
+         {
+               "record_name": "proxy.config.exec_thread.autoconfig.scale",
+               "record_value": "1.3"
+         }
+      ]
+   }
+
+
+Response:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "jsonrpc":"2.0",
+      "result":[
+         {
+            "record_name":"proxy.config.exec_thread.autoconfig.scale"
+         }
+      ],
+      "id":"a32de1da-08be-11eb-9e1e-001fc69cc946"
+   }
+
+.. _admin_config_reload:
+
+admin_config_reload
+-------------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+Initiate a configuration reload. This method returns immediately — the actual reload runs
+asynchronously on background threads (``ET_TASK``). The response contains a **token** that the
+caller uses to track the reload's progress and query its final status via
+:ref:`get_reload_config_status`.
+
+This method supports two modes:
+
+- **File-based reload** (default) — re-reads all registered configuration files from disk and invokes
+  their handlers for any files whose modification time has changed.
+- **Inline reload** — when the ``configs`` parameter is present, the supplied YAML content is passed
+  directly to the targeted handler(s) at runtime. Inline content is **not persisted to disk** — a
+  server restart will revert to the file-based configuration.
+
+Each reload is assigned a **token** that can be used to query its status via
+:ref:`get_reload_config_status`. If no token is provided, the server generates one automatically.
+
+Only one reload can be active at a time. If a reload is already in progress, the request is rejected
+unless ``force`` is set to ``true``.
+
+For more information about the configuration reload framework, see
+:ref:`config-reload-framework`.
+
+
+Parameters
+~~~~~~~~~~
+
+All parameters are optional.
+
+=================== ============= ================================================================================================================
+Field               Type          Description
+=================== ============= ================================================================================================================
+``token``           |str|         Custom token for this reload. Must be unique. If omitted, the server generates one (e.g. ``rldtk-<timestamp>``).
+``force``           ``bool``      Force a new reload even if one is in progress. Default: ``false``. Use with caution.
+``configs``         ``object``    YAML content for inline reload. Each key is a registry key (e.g. ``ip_allow``, ``sni``), and each value is the
+                                  full configuration content for that handler. When present, triggers an inline reload instead of a file-based one.
+=================== ============= ================================================================================================================
+
+
+Result
+~~~~~~
+
+On success, the response contains:
+
+=================== ============= ================================================================================================================
+Field               Type          Description
+=================== ============= ================================================================================================================
+``token``           |str|         The token assigned to this reload (server-generated or the one provided in the request).
+``message``         ``array``     Human-readable status messages.
+``created_time``    |str|         Timestamp when the reload task was created.
+=================== ============= ================================================================================================================
+
+If a reload is already in progress (and ``force`` is not set), the response includes an ``errors`` array
+with code ``RELOAD_IN_PROGRESS`` and the ``tasks`` array with the current reload's status.
+
+
+Examples
+~~~~~~~~
+
+
+**File-based reload (default):**
+
+Request:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "89fc5aea-0740-11eb-82c0-001fc69cc946",
+      "jsonrpc": "2.0",
+      "method": "admin_config_reload",
+      "params": {
+         "token": "deploy-v2.1"
+      }
+   }
+
+
+Response:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "jsonrpc": "2.0",
+      "result": {
+         "token": "deploy-v2.1",
+         "message": ["Reload task scheduled"],
+         "created_time": "2025 Feb 17 12:00:00"
+      },
+      "id": "89fc5aea-0740-11eb-82c0-001fc69cc946"
+   }
+
+
+**Inline reload (with ``configs``):**
+
+The ``configs`` parameter is a map where each key is a **registry key** (e.g. ``ip_allow``, ``sni``)
+and each value is the **config content** — the inner data, not the full file structure. For example,
+``ip_allow.yaml`` on disk wraps rules under an ``ip_allow:`` top-level key, but when injecting via
+RPC, you pass the rules array directly. The handler receives this content via
+``ctx.supplied_yaml()`` and is responsible for using it without the file's wrapper key.
+
+Request:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "b1c2d3e4-0001-0001-0001-000000000001",
+      "jsonrpc": "2.0",
+      "method": "admin_config_reload",
+      "params": {
+         "token": "update-ip-and-sni",
+         "configs": {
+            "ip_allow": [
+               {
+                  "apply": "in",
+                  "ip_addrs": "0.0.0.0/0",
+                  "action": "allow",
+                  "methods": "ALL"
+               }
+            ],
+            "sni": [
+               {
+                  "fqdn": "*.example.com",
+                  "verify_client": "NONE"
+               }
+            ]
+         }
+      }
+   }
+
+Response:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "jsonrpc": "2.0",
+      "result": {
+         "token": "update-ip-and-sni",
+         "message": ["Inline reload scheduled"],
+         "created_time": "2025 Feb 17 14:30:10"
+      },
+      "id": "b1c2d3e4-0001-0001-0001-000000000001"
+   }
+
+.. note::
+
+   Inline reload requires the target config handler to support ``ConfigSource::FileAndRpc``.
+   Handlers that only support ``ConfigSource::FileOnly`` will return an error for the
+   corresponding key.
+
+
+**Reload already in progress:**
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "jsonrpc": "2.0",
+      "result": {
+         "errors": [
+            {
+               "message": "Reload ongoing with token 'deploy-v2.1'",
+               "code": 1
+            }
+         ],
+         "tasks": []
+      },
+      "id": "89fc5aea-0740-11eb-82c0-001fc69cc946"
+   }
+
+
+.. _get_reload_config_status:
+
+get_reload_config_status
+------------------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+Query the status of configuration reloads. Can retrieve a specific reload by token, or the last
+``N`` reloads from the history.
+
+Each reload status includes an overall result, a task tree with per-handler status, durations,
+and optional log messages.
+
+
+Parameters
+~~~~~~~~~~
+
+All parameters are optional. If neither is provided, returns the most recent reload.
+
+=================== ============= ================================================================================================================
+Field               Type          Description
+=================== ============= ================================================================================================================
+``token``           |str|         Token of the reload to query. Takes precedence over ``count`` if both are provided.
+``count``           ``number``    Number of recent reloads to return. Use ``0`` to return the full history. Default: ``1``.
+=================== ============= ================================================================================================================
+
+``traffic_ctl`` maps ``--count all`` to ``count: 0`` in the RPC request. The server keeps a
+rolling history of the last 100 reloads — when the limit is reached, the oldest entry is evicted
+to make room for new ones. ``count: 0`` returns the full history, most recent first.
+
+
+Result
+~~~~~~
+
+The response contains a ``tasks`` array. Each element represents a reload operation with the following
+structure:
+
+======================= ============= ===================================================================
+Field                   Type          Description
+======================= ============= ===================================================================
+``config_token``        |str|         The reload token.
+``status``              |str|         Overall status: ``success``, ``fail``, ``in_progress``, ``timeout``.
+``description``         |str|         Human-readable description.
+``config_key``          |str|         Registry key used for deduplication (empty for main tasks).
+``filename``            |str|         Associated filename (empty for the main task).
+``meta``                ``object``    Metadata: ``created_time_ms``, ``last_updated_time_ms``, ``main_task``.
+``log``                 ``array``     Log messages from the handler.
+``sub_tasks``           ``array``     Nested sub-tasks (same structure, recursive).
+======================= ============= ===================================================================
+
+
+Examples
+~~~~~~~~
+
+
+**Query a specific reload by token:**
+
+Request:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "f1e2d3c4-0001-0001-0001-000000000001",
+      "jsonrpc": "2.0",
+      "method": "get_reload_config_status",
+      "params": {
+         "token": "deploy-v2.1"
+      }
+   }
+
+Response:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "jsonrpc": "2.0",
+      "result": {
+         "tasks": [
+            {
+               "config_token": "deploy-v2.1",
+               "status": "success",
+               "description": "Main reload task - 2025 Feb 17 12:00:00",
+               "config_key": "",
+               "filename": "",
+               "meta": {
+                  "created_time_ms": "1739808000123",
+                  "last_updated_time_ms": "1739808000368",
+                  "main_task": "true"
+               },
+               "logs": [],
+               "sub_tasks": [
+                  {
+                     "config_token": "deploy-v2.1",
+                     "status": "success",
+                     "description": "ip_allow",
+                     "config_key": "ip_allow",
+                     "filename": "/opt/ats/etc/trafficserver/ip_allow.yaml",
+                     "meta": {
+                        "created_time_ms": "1739808000200",
+                        "last_updated_time_ms": "1739808000218",
+                        "main_task": "false"
+                     },
+                     "logs": ["Finished loading"],
+                     "sub_tasks": []
+                  }
+               ]
+            }
+         ]
+      },
+      "id": "f1e2d3c4-0001-0001-0001-000000000001"
+   }
+
+
+**Query reload history (last 3):**
+
+Request:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "a1b2c3d4-0001-0001-0001-000000000002",
+      "jsonrpc": "2.0",
+      "method": "get_reload_config_status",
+      "params": {
+         "count": 3
+      }
+   }
+
+Response contains up to 3 entries in the ``tasks`` array.
+
+
+**Token not found:**
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "jsonrpc": "2.0",
+      "result": {
+         "errors": [
+            {
+               "message": "Token 'nonexistent' not found",
+               "code": 4
+            }
+         ],
+         "token": "nonexistent"
+      },
+      "id": "f1e2d3c4-0001-0001-0001-000000000001"
+   }
+
+
+Host
+====
+
+.. _admin_host_set_status:
+
+admin_host_set_status
+---------------------
+
+Description
+~~~~~~~~~~~
+
+A record to track status is created for each host. The name is the host fqdn.
+This record contains the overall status and the status for each reason.
+The records may be viewed using the `admin_host_get_status` rpc api.
+
+Parameters
+~~~~~~~~~~
+
+
+=================== ============= =================================================================================================
+Field               Type          Description
+=================== ============= =================================================================================================
+``operation``       |str|         The name of the record that is meant to be updated.
+``host``            |arraystr|    A list of hosts that we want to interact with.
+``reason``          |str|         Reason for the operation.
+``time``            |str|         Set the duration of an operation to ``count`` seconds. A value of ``0`` means no duration, the
+                                  condition persists until explicitly changed. The default is ``0`` if an operation requires a time
+                                  and none is provided by this option. optional when ``op=up``
+=================== ============= =================================================================================================
+
+operation:
+
+=================== ============= =================================================================================================
+Field               Type          Description
+=================== ============= =================================================================================================
+``up``              |str|         Marks the listed hosts as ``up`` so that they will be available for use as a next hop parent. Use
+                                  ``reason`` to mark the host reason code. The 'self_detect' is an internal reason code
+                                  used by parent selection to mark down a parent when it is identified as itself and
+``down``            |str|         Marks the listed hosts as down so that they will not be chosen as a next hop parent. If
+                                  ``time`` is included the host is marked down for the specified number of seconds after
+                                  which the host will automatically be marked up. A host is not marked up until all reason codes
+                                  are cleared by marking up the host for the specified reason code.
+=================== ============= =================================================================================================
+
+reason:
+
+=================== ============= =================================================================================================
+Field               Type          Description
+=================== ============= =================================================================================================
+``active``          |str|         Set the active health check reason.
+``local``           |str|         Set the local health check reason.
+``manual``          |str|         Set the administrative reason. This is the default reason if a reason is needed and not provided
+                                  by this option. If an invalid reason is provided ``manual`` will be defaulted.
+=================== ============= =================================================================================================
+
+Internally the reason can be ``self_detect`` if
+:ts:cv:`proxy.config.http.parent_proxy.self_detect` is set to the value 2 (the default). This is
+used to prevent parent selection from creating a loop by selecting itself as the upstream by
+marking this reason as "down" in that case.
+
+.. note::
+
+   The up / down status values are independent, and a host is consider available if and only if
+   all of the statuses are "up".
+
+
+Result
+~~~~~~
+
+The response will contain the default `success_response`  or an error. :ref:`jsonrpc-node-errors`.
+
+
+Examples
+~~~~~~~~
+
+Request:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "c6d56fba-0cbd-11eb-926d-001fc69cc946",
+      "jsonrpc": "2.0",
+      "method": "admin_host_set_status",
+      "params": {
+         "operation": "up",
+         "host": ["host1"],
+         "reason": "manual",
+         "time": "100"
+      }
+   }
+
+
+Response:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "jsonrpc": "2.0",
+      "result": "success",
+      "id": "c6d56fba-0cbd-11eb-926d-001fc69cc946"
+   }
+
+
+
+Getting the host status
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Get the current status of the specified hosts with respect to their use as targets for parent selection. This returns the serialized
+information for the host.
+
+Request:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "ded7018e-0720-11eb-abe2-001fc69cc946",
+      "jsonrpc": "2.0",
+      "method": "admin_host_get_status",
+      "params": [
+            "host1.mycdn.net"
+       ]
+   }
+
+Response:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "jsonrpc": "2.0",
+      "id": "ded7018e-0720-11eb-abe2-001fc69cc946",
+      "result": {
+         "statusList": [{
+            "hostname": "host1.mycdn.net",
+            "status": "HOST_STATUS_DOWN,ACTIVE:UP:0:0,LOCAL:UP:0:0,MANUAL:UP:0:0,SELF_DETECT:DOWN:1646248306"
+            }
+         ]
+         ,"errorList":[]
+      }
+   }
+
+
+HostDB
+======
+
+.. _admin_hostdb_clear:
+
+admin_hostdb_clear
+------------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+Remove all cached DNS resolution records from HostDB. Entries loaded from the host file remain. In-flight transactions retain their
+current resolution, while subsequent transactions resolve their upstream hosts again.
+
+Parameters
+~~~~~~~~~~
+
+* ``params``: Omitted
+
+Result
+~~~~~~
+
+The response will contain the default `success_response` or an error. :ref:`jsonrpc-node-errors`.
+
+Examples
+~~~~~~~~
+
+Request:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "dc8b7f1e-2521-4bc0-b0ed-5e3ec751599d",
+      "jsonrpc": "2.0",
+      "method": "admin_hostdb_clear"
+   }
+
+Response:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "jsonrpc": "2.0",
+      "result": "success",
+      "id": "dc8b7f1e-2521-4bc0-b0ed-5e3ec751599d"
+   }
+
+
+.. _admin_server_stop_drain:
+
+admin_server_stop_drain
+-----------------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+Stop the process of draining connections. See :ref:`admin-graceful-shutdown` for more information.
+
+Parameters
+~~~~~~~~~~
+
+* ``params``: Omitted
+
+Result
+~~~~~~
+
+The response will contain the default `success_response`  or an error. :ref:`jsonrpc-node-errors`.
+
+
+Examples
+~~~~~~~~
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "35f0b246-0cc4-11eb-9a79-001fc69cc946",
+      "jsonrpc": "2.0",
+      "method": "admin_server_stop_drain"
+   }
+
+
+
+.. _admin_server_start_drain:
+
+admin_server_start_drain
+------------------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+Drain TS connections. See :ref:`admin-graceful-shutdown` for more information.
+
+Parameters
+~~~~~~~~~~
+
+======================= ============= ================================================================================================================
+Field                   Type          Description
+======================= ============= ================================================================================================================
+``no_new_connections``  |str|         Wait for new connections down to threshold before starting draining, ``yes|true|1``. Not yet supported
+======================= ============= ================================================================================================================
+
+
+Result
+~~~~~~
+
+The response will contain the default `success_response`  or an error. :ref:`jsonrpc-node-errors`.
+
+.. note::
+
+   If the Server is already running a proper error will be sent back to the client.
+
+Examples
+~~~~~~~~
+
+Request:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "30700808-0cc4-11eb-b811-001fc69cc946",
+      "jsonrpc": "2.0",
+      "method": "admin_server_start_drain",
+      "params": {
+         "no_new_connections": "yes"
+      }
+   }
+
+
+Response could be either:
+
+#. The response will contain the default `success_response`
+
+#. Response from a server that is already in drain mode. The annotation is a warning, see
+   :ref:`jsonrpc-node-errors-severity`.
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "jsonrpc": "2.0",
+      "id": "30700808-0cc4-11eb-b811-001fc69cc946",
+      "error": {
+
+         "code": 9,
+         "message": "Error during execution",
+         "data": [{
+
+            "code": 3000,
+            "severity": 4,
+            "message": "Server already draining."
+            }]
+
+      }
+
+   }
+
+
+.. _admin_plugin_send_basic_msg:
+
+admin_plugin_send_basic_msg
+---------------------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+Interact with plugins. Send a message to plugins. All plugins that have hooked the ``TSLifecycleHookID::TS_LIFECYCLE_MSG_HOOK`` will receive a callback for that hook.
+The :arg:`tag` and :arg:`data` will be available to the plugin hook processing. It is expected that plugins will use :arg:`tag` to select relevant messages and determine the format of the :arg:`data`.
+
+
+Parameters
+~~~~~~~~~~
+
+======================= ============= ================================================================================================================
+Field                   Type          Description
+======================= ============= ================================================================================================================
+``tag``                 |str|         A tag name that will be read by the interested plugin
+``data``                |str|         Data to be send, this is |optional|
+======================= ============= ================================================================================================================
+
+
+Result
+~~~~~~
+
+The response will contain the default `success_response`  or an error. :ref:`jsonrpc-node-errors`.
+
+If plugins are not yet ready to handle any messages, then the following error will be set:
+
+.. code-block:: json
+
+   {
+      "error": {
+         "code": 9,
+         "message": "Error during execution",
+         "data": [
+            {
+            "code": 5000,
+            "message": "Plugin is not yet ready to handle any messages."
+            }
+         ]
+      }
+   }
+
+
+Examples
+~~~~~~~~
+
+   .. code-block:: json
+      :linenos:
+
+      {
+         "id": "19095bf2-0d3b-11eb-b41a-001fc69cc946",
+         "jsonrpc": "2.0",
+         "method": "admin_plugin_send_basic_msg",
+         "params": {
+            "data": "ping",
+            "tag": "pong"
+         }
+      }
+
+
+
+
+.. _admin_storage_get_device_status:
+
+admin_storage_get_device_status
+-------------------------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+Show the storage configuration.
+
+Parameters
+~~~~~~~~~~
+
+A list of |str| names for the specific storage we want to interact with. The storage identification used in the param list should match
+exactly a path  specified in :file:`storage.yaml`.
+
+Result
+~~~~~~
+
+cachedisk
+
+======================= ============= =============================================================================================
+Field                   Type          Description
+======================= ============= =============================================================================================
+``path``                |str|         Storage identification.  The storage is identified by :arg:`path` which must match exactly a
+                                       path specified in :file:`storage.yaml`.
+``status``              |str|         Disk status. ``online`` or ``offline``
+``error_count``         |str|         Number of errors on the particular disk.
+======================= ============= =============================================================================================
+
+
+Examples
+~~~~~~~~
+
+Request:
+
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "8574edba-0d40-11eb-b2fb-001fc69cc946",
+      "jsonrpc": "2.0",
+      "method": "admin_storage_get_device_status",
+      "params": ["/some/path/to/ats/trafficserver/cache.db", "/some/path/to/ats/var/to_remove/cache.db"]
+   }
+
+
+Response:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "jsonrpc": "2.0",
+      "result": [{
+            "cachedisk": {
+               "path": "/some/path/to/ats/trafficserver/cache.db",
+               "status": "online",
+               "error_count": "0"
+            }
+         },
+         {
+            "cachedisk": {
+               "path": "/some/path/to/ats/var/to_remove/cache.db",
+               "status": "online",
+               "error_count": "0"
+            }
+         }
+      ],
+      "id": "8574edba-0d40-11eb-b2fb-001fc69cc946"
+   }
+
+
+
+.. _admin_storage_set_device_offline:
+
+admin_storage_set_device_offline
+--------------------------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+Mark a cache storage device as ``offline``. The storage is identified by :arg:`path` which must match exactly a path specified in
+:file:`storage.yaml`. This removes the storage from the cache and redirects requests that would have used this storage to
+other storage. This has exactly the same effect as a disk failure for that storage. This does not persist across restarts of the
+:program:`traffic_server` process.
+
+Parameters
+~~~~~~~~~~
+
+A list of |str| names for the specific storage we want to interact with. The storage identification used in the param list should match
+exactly a path  specified in :file:`storage.yaml`.
+
+Result
+~~~~~~
+
+A list of |object| which the following fields:
+
+
+=========================== ============= =============================================================================================
+Field                       Type          Description
+=========================== ============= =============================================================================================
+``path``                    |str|         Storage identification.  The storage is identified by :arg:`path` which must match exactly a
+                                          path specified in :file:`storage.yaml`.
+``has_online_storage_left`` |str|         A flag indicating if there is any online storage left after this operation.
+=========================== ============= =============================================================================================
+
+
+Examples
+~~~~~~~~
+
+Request:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "53dd8002-0d43-11eb-be00-001fc69cc946",
+      "jsonrpc": "2.0",
+      "method": "admin_storage_set_device_offline",
+      "params": ["/some/path/to/ats/var/to_remove/cache.db"]
+   }
+
+Response:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "jsonrpc": "2.0",
+      "result": [{
+         "path": "/some/path/to/ats/var/to_remove/cache.db",
+         "has_online_storage_left": "true"
+      }],
+      "id": "53dd8002-0d43-11eb-be00-001fc69cc946"
+   }
+
+
+.. _show_registered_handlers:
+
+show_registered_handlers
+------------------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+List all the registered RPC public handlers.
+
+Parameters
+~~~~~~~~~~
+
+* ``params``: Omitted
+
+Result
+~~~~~~
+
+An |object| with the following fields:
+
+
+================== ============= ===========================================
+Field              Type          Description
+================== ============= ===========================================
+``methods``        |str|         A list of exposed method handler names.
+``notifications``  |str|         A list of exposed notification handler names.
+================== ============= ===========================================
+
+
+Examples
+~~~~~~~~
+
+Request:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "f4477ac4-0d44-11eb-958d-001fc69cc946",
+      "jsonrpc": "2.0",
+      "method": "show_registered_handlers"
+   }
+
+
+Response:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "f4477ac4-0d44-11eb-958d-001fc69cc946",
+      "jsonrpc": "2.0",
+      "result": {
+         "methods": [
+               "admin_host_set_status",
+               "admin_server_stop_drain",
+               "admin_server_start_drain",
+               "admin_plugin_send_basic_msg",
+               "admin_lookup_records",
+               "admin_config_set_records",
+               "admin_storage_get_device_status",
+               "admin_storage_set_device_offline",
+               "admin_config_reload",
+               "show_registered_handlers"
+         ],
+         "notifications": []
+      }
+   }
+
+.. _get_service_descriptor:
+
+get_service_descriptor
+------------------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+List and describe all the registered RPC handler.
+
+Parameters
+~~~~~~~~~~
+
+* ``params``: Omitted
+
+Result
+~~~~~~
+
+An |object| with the following fields:
+
+
+``methods`` object
+
+=============== ============= ===========================================
+Field           Type          Description
+=============== ============= ===========================================
+``name``        |str|         Handler's name. Call name
+``type``        |str|         Either 'method' or 'notification'
+``provider``    |str|         Provider's information.
+``schema``      |str|         A json-schema definition
+=============== ============= ===========================================
+
+
+Examples
+~~~~~~~~
+
+Request:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id": "f4477ac4-0d44-11eb-958d-001fc69cc946",
+      "jsonrpc": "2.0",
+      "method": "get_service_descriptor"
+   }
+
+
+Response:
+
+.. code-block:: json
+   :linenos:
+
+   {
+   "jsonrpc":"2.0",
+   "result":{
+      "methods":[
+         {
+            "name":"admin_host_set_status",
+            "type":"method",
+            "provider":"Traffic Server JSONRPC 2.0 API",
+            "schema":{
+            }
+         },
+         {
+            "name":"some_plugin_call",
+            "type":"notification",
+            "provider":"ABC Plugin's details.",
+            "schema":{
+            }
+         }]
+      }
+   }
+
+
+
+.. _filemanager.get_files_registry:
+
+filemanager.get_files_registry
+------------------------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+Fetch the registered config files within ATS. All configured files in the system will be retrieved by this API. This basically drops
+the `FileManager` binding files. File Manager keeps track of all the configured files in |TS|.
+
+Parameters
+~~~~~~~~~~
+
+* ``params``: Omitted
+
+Result
+~~~~~~
+
+An list of |object| with the following fields:
+
+
+``config_registry`` object:
+
+======================= ============= ===========================================
+Field                   Type          Description
+======================= ============= ===========================================
+``file_path``           |str|         File path, includes the full path and the file name configured in the record config name(if it's the case)
+``config_record_name``  |str|         Internal record config variable name.
+``parent_config``       |str|         Parent's configuration file name. e.g. If a top level remap.config includes additional mapping files,
+                                      then the top level file will be set in this field.
+``root_access_needed``  |str|         Elevated access needed.
+``is_required``         |str|         If it's required by |TS|. This specifies if |TS| treat this file as required to start the system(e.g. storage.yaml)
+======================= ============= ===========================================
+
+
+Examples
+~~~~~~~~
+
+Request:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "id":"14c10697-5b09-40f6-b7e5-4be85f64aa5e",
+      "jsonrpc":"2.0",
+      "method":"filemanager.get_files_registry"
+   }
+
+
+Response:
+
+.. code-block:: json
+   :linenos:
+
+   {
+      "jsonrpc":"2.0",
+      "result":{
+         "config_registry":[
+            {
+               "file_path":"/home/xyz/ats/etc/trafficserver/sni.yaml",
+               "config_record_name":"proxy.config.ssl.servername.filename",
+               "parent_config":"N/A",
+               "root_access_needed":"false",
+               "is_required":"false"
+            },
+            {
+               "file_path":"/home/xyz/ats/etc/trafficserver/storage.yaml",
+               "config_record_name":"",
+               "parent_config":"N/A",
+               "root_access_needed":"false",
+               "is_required":"true"
+            },
+            {
+               "file_path":"/home/xyz/ats/etc/trafficserver/jsonrpc3.yaml",
+               "config_record_name":"proxy.config.jsonrpc.filename",
+               "parent_config":"N/A",
+               "root_access_needed":"false",
+               "is_required":"false"
+            }
+         ]
+      }
+   }
+
+.. _get_connection_tracker_info:
+
+get_connection_tracker_info
+----------------------------
+
+|method|
+
+Description
+~~~~~~~~~~~
+
+Get inbound and outbound connection tracking data from |TS|.
+
+Parameters
+~~~~~~~~~~
+
+======================= ============= ==================================================================================
+Field                   Type          Description
+======================= ============= ==================================================================================
+``table``               |str|         Specifies which group table to query, ``inbound`` or ``outbound``.  If value is
+                                      ``both`` then both tables will be added to the response. The default is ``outbound``.
+======================= ============= ==================================================================================
+
+You can query this api using `invoke` functionality from :ref:`traffic_ctl_rpc`.
+
+   .. code-block:: bash
+      :linenos:
+
+      $ traffic_ctl rpc invoke get_connection_tracker_info -p 'table: both'  -f json
+
+
+.. note::
+
+   JSON output can be formatted by any tool like `jq`.
+
+Result
+~~~~~~
+
+The response will contain inbound/outbound info or an error. :ref:`jsonrpc-node-errors`.
+
+Response examples
+~~~~~~~~~~~~~~~~~
+
+   .. code-block:: json
+      :linenos:
+
+      {
+         "id":"f4477ac4-0d44-11eb-958d-001fc69cc946",
+         "jsonrpc":"2.0",
+         "result":{
+            "outbound":{
+               "count":"1",
+               "list":[
+                  {
+                     "type":"both",
+                     "ip":"127.0.0.1:80",
+                     "fqdn":"127.0.0.1",
+                     "current":"8",
+                     "max":"8",
+                     "blocked":"0",
+                     "alert":"0"
+                  }
+               ]
+            },
+            "inbound":{
+               "count":"1",
+               "list":[
+                  {
+                     "type":"ip",
+                     "ip":"127.0.0.1:34226",
+                     "fqdn":"",
+                     "current":"2",
+                     "max":"0",
+                     "blocked":"0",
+                     "alert":"0"
+                  }
+               ]
+            }
+         }
+      }
+
+
+
+See also
+========
+
+:ref:`jsonrpc-node-errors`

@@ -22,30 +22,95 @@
  */
 
 #include <cstdio>
+#include <cstring>
 #include <cstdarg>
+#include <string>
+#include <map>
 
-#include "print_funcs.h"
+#include <ts/ts.h>
 
 static const int LINE_SIZE = 1024 * 1024;
 
-void
-Debug(const char *tag, const char *fmt, ...)
+namespace
 {
-  char buf[LINE_SIZE];
+bool fakeDebugLogEnabled;
+bool fakeErrorLogEnabled;
+} // namespace
+
+std::string gFakeDebugLog;
+std::string gFakeErrorLog;
+
+void
+enableFakeDebugLog()
+{
+  fakeDebugLogEnabled = true;
+  gFakeDebugLog.assign("");
+}
+
+void
+enableFakeErrorLog()
+{
+  fakeErrorLogEnabled = true;
+  gFakeErrorLog.assign("");
+}
+
+void
+DbgCtl::print(const char *tag, const char * /* file */, const char * /* function */, int /* line */, const char *fmt, ...)
+{
+  char    buf[LINE_SIZE];
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(buf, LINE_SIZE, fmt, ap);
   printf("Debug (%s): %s\n", tag, buf);
   va_end(ap);
+  if (fakeDebugLogEnabled) {
+    gFakeDebugLog.append(buf);
+  }
+}
+
+class DbgCtl::_RegistryAccessor
+{
+public:
+  // No mutex protection, assuming unit test is single threaded.
+  static std::map<char const *, bool> &
+  registry()
+  {
+    static std::map<char const *, bool> r;
+    return r;
+  }
+};
+
+std::atomic<int> DbgCtl::_config_mode{1};
+
+DbgCtl::_TagData const *
+DbgCtl::_new_reference(char const *tag)
+{
+  auto it{_RegistryAccessor::registry().find(tag)};
+  if (it == _RegistryAccessor::registry().end()) {
+    char *s = new char[std::strlen(tag) + 1]; // Never deleted - leaky singleton pattern.
+    std::strcpy(s, tag);
+    auto r{_RegistryAccessor::registry().emplace(s, true)}; // Tag is always enabled.
+    it = r.first;
+  }
+  return &(*it);
+}
+
+bool
+DbgCtl::_override_global_on()
+{
+  return false;
 }
 
 void
-Error(const char *fmt, ...)
+TSError(const char *fmt, ...) noexcept
 {
-  char buf[LINE_SIZE];
+  char    buf[LINE_SIZE];
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(buf, LINE_SIZE, fmt, ap);
   printf("Error: %s\n", buf);
   va_end(ap);
+  if (fakeErrorLogEnabled) {
+    gFakeErrorLog.append(buf);
+  }
 }

@@ -1,0 +1,74 @@
+/** @file
+
+  A brief file description
+
+  @par License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+
+/*****************************************************************************
+ *
+ *  ReverseProxy.h - Interface to code necessary for Reverse Proxy
+ *                     (which mostly consists of general purpose
+ *                       hostname substitution in URLs)
+ *
+ *
+ ****************************************************************************/
+
+#pragma once
+
+#include <memory>
+
+#include "records/RecProcess.h"
+
+#include "tscore/ink_defs.h"
+#include "proxy/http/HttpTransact.h"
+#include "proxy/http/remap/RemapPluginInfo.h"
+#include "proxy/http/remap/UrlRewrite.h"
+#include "proxy/http/remap/UrlMapping.h"
+#include "mgmt/config/ConfigContext.h"
+
+#include "tsutil/AtomicSharedPtr.h"
+
+#define EMPTY_PORT_MAPPING (int32_t) ~0
+
+class url_mapping;
+struct host_hdr_info;
+
+extern AtomicSharedPtr<UrlRewrite> rewrite_table;
+
+// Wrap a freshly built table in a shared_ptr with the standard UrlRewrite deleter.
+std::shared_ptr<UrlRewrite> make_managed_url_rewrite(std::unique_ptr<UrlRewrite> table);
+
+// API Functions
+int init_reverse_proxy();
+
+mapping_type request_url_remap_redirect(HTTPHdr *request_header, URL *redirect_url, UrlRewrite *table);
+bool         response_url_remap(HTTPHdr *response_header, UrlRewrite *table);
+
+// Reload Functions
+bool reloadUrlRewrite(ConfigContext ctx);
+bool urlRewriteVerify();
+
+// Synchronously drops rewrite_table.  Call from a Continuation context
+// before TSSystemState::shut_down_event_system() so plugin doneInstance()
+// has this_ethread() for TSMutexLock.
+void shutdown_url_rewrite();
+
+void init_remap_volume_host_records();
+int  url_rewrite_CB(const char *name, RecDataT data_type, RecData data, void *cookie);

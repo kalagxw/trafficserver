@@ -26,14 +26,14 @@
 using namespace atscppapi;
 
 struct atscppapi::AsyncTimerState {
-  TSCont cont_ = nullptr;
-  AsyncTimer::Type type_;
-  int period_in_ms_;
-  int initial_period_in_ms_;
-  TSThreadPool thread_pool_;
-  TSAction initial_timer_action_  = nullptr;
-  TSAction periodic_timer_action_ = nullptr;
-  AsyncTimer *timer_              = nullptr;
+  TSCont                                       cont_ = nullptr;
+  AsyncTimer::Type                             type_;
+  int                                          period_in_ms_;
+  int                                          initial_period_in_ms_;
+  TSThreadPool                                 thread_pool_;
+  TSAction                                     initial_timer_action_  = nullptr;
+  TSAction                                     periodic_timer_action_ = nullptr;
+  AsyncTimer                                  *timer_                 = nullptr;
   std::shared_ptr<AsyncDispatchControllerBase> dispatch_controller_{};
   AsyncTimerState(AsyncTimer::Type type, int period_in_ms, int initial_period_in_ms, TSThreadPool thread_pool, AsyncTimer *timer)
     : type_(type),
@@ -48,7 +48,7 @@ struct atscppapi::AsyncTimerState {
 namespace
 {
 int
-handleTimerEvent(TSCont cont, TSEvent event, void *edata)
+handleTimerEvent(TSCont cont, TSEvent /* event ATS_UNUSED */, void * /* edata ATS_UNUSED */)
 {
   AsyncTimerState *state = static_cast<AsyncTimerState *>(TSContDataGet(cont));
   if (state->initial_timer_action_) {

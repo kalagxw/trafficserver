@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -49,17 +49,6 @@
   the pointer was required by the standard.
 */
 
-/*
-#if defined(POSIX_THREAD)
-#include <pthread.h>
-#include <stdlib.h>
-#endif
-*/
-
-#ifdef __cplusplus
-extern "C" {
-#endif /* __cplusplus */
-
 void ink_queue_load_64(void *dst, void *src);
 
 #ifdef __x86_64__
@@ -68,11 +57,19 @@ void ink_queue_load_64(void *dst, void *src);
 #define INK_QUEUE_LD64(dst, src) (ink_queue_load_64((void *)&(dst), (void *)&(src)))
 #endif
 
+// passing a const volatile value of 0 works around a gcc bug
 #if TS_HAS_128BIT_CAS
-#define INK_QUEUE_LD(dst, src)                                                       \
-  do {                                                                               \
-    *(__int128_t *)&(dst) = __sync_val_compare_and_swap((__int128_t *)&(src), 0, 0); \
+#define INK_QUEUE_LD(dst, src)                                                                     \
+  do {                                                                                             \
+    const volatile __int128_t iqld0 = 0;                                                           \
+    *(__int128_t *)&(dst)           = __sync_val_compare_and_swap((__int128_t *)&(src), 0, iqld0); \
   } while (0)
+#elif TS_HAS_128BIT_CAS_LIBATOMIC
+// On targets with no inline 128-bit CAS (e.g. riscv64) libatomic may implement
+// the 16-byte __atomic builtins with internal locks. That is only correct
+// because every access to a shared head_p goes through INK_QUEUE_LD and
+// ink_atomic_cas, so all of them serialize on the same libatomic lock.
+#define INK_QUEUE_LD(dst, src) __atomic_load((__int128_t *)&(src), (__int128_t *)&(dst), __ATOMIC_SEQ_CST)
 #else
 #define INK_QUEUE_LD(dst, src) INK_QUEUE_LD64(dst, src)
 #endif
@@ -88,16 +85,16 @@ union head_p {
 #if (defined(__i386__) || defined(__arm__) || defined(__mips__)) && (SIZEOF_VOIDP == 4)
   typedef int32_t version_type;
   typedef int64_t data_type;
-#elif TS_HAS_128BIT_CAS
-  typedef int64_t version_type;
-  typedef __int128_t data_type;
+#elif TS_HAS_128BIT_CAS || TS_HAS_128BIT_CAS_LIBATOMIC
+  using version_type = int64_t;
+  using data_type    = __int128_t;
 #else
-  typedef int64_t version_type;
-  typedef int64_t data_type;
+  using version_type = int64_t;
+  using data_type    = int64_t;
 #endif
 
   struct {
-    void *pointer;
+    void        *pointer;
     version_type version;
   } s;
 
@@ -121,10 +118,10 @@ union head_p {
 
 #ifdef DEBUG
 #define FROM_PTR(_x) (void *)(((uintptr_t)_x) + 1)
-#define TO_PTR(_x) (void *)(((uintptr_t)_x) - 1)
+#define TO_PTR(_x)   (void *)(((uintptr_t)_x) - 1)
 #else
 #define FROM_PTR(_x) ((void *)(_x))
-#define TO_PTR(_x) ((void *)(_x))
+#define TO_PTR(_x)   ((void *)(_x))
 #endif
 
 #if (defined(__i386__) || defined(__arm__) || defined(__mips__)) && (SIZEOF_VOIDP == 4)
@@ -133,7 +130,7 @@ union head_p {
 #define SET_FREELIST_POINTER_VERSION(_x, _p, _v) \
   (_x).s.pointer = _p;                           \
   (_x).s.version = _v
-#elif TS_HAS_128BIT_CAS
+#elif TS_HAS_128BIT_CAS || TS_HAS_128BIT_CAS_LIBATOMIC
 #define FREELIST_POINTER(_x) (_x).s.pointer
 #define FREELIST_VERSION(_x) (_x).s.version
 #define SET_FREELIST_POINTER_VERSION(_x, _p, _v) \
@@ -161,8 +158,8 @@ union head_p {
   ((void *)((((intptr_t)(_x).data) & 0x0000FFFFFFFFFFFFLL) | ((~((((intptr_t)(_x).data) >> 63) - 1)) << 48)))
 #endif
 
-#define FREELIST_VERSION(_x) ((((intptr_t)(_x).data) & 0x7FFF000000000000LL) >> 48)
-#define SET_FREELIST_POINTER_VERSION(_x, _p, _v) (_x).data = ((((intptr_t)(_p)) & 0x8000FFFFFFFFFFFFLL) | (((_v)&0x7FFFLL) << 48))
+#define FREELIST_VERSION(_x)                     ((((intptr_t)(_x).data) & 0x7FFF000000000000LL) >> 48)
+#define SET_FREELIST_POINTER_VERSION(_x, _p, _v) (_x).data = ((((intptr_t)(_p)) & 0x8000FFFFFFFFFFFFLL) | (((_v) & 0x7FFFLL) << 48))
 #elif defined(__aarch64__)
 /* Layout of FREELIST_POINTER
  *
@@ -180,55 +177,54 @@ union head_p {
   ((void *)((((intptr_t)(_x).data) & 0x000FFFFFFFFFFFFFLL) | ((~((((intptr_t)(_x).data) >> 63) - 1)) << 52)))
 #endif
 
-#define FREELIST_VERSION(_x) ((((intptr_t)(_x).data) & 0x7FF0000000000000LL) >> 52)
-#define SET_FREELIST_POINTER_VERSION(_x, _p, _v) (_x).data = ((((intptr_t)(_p)) & 0x800FFFFFFFFFFFFFLL) | (((_v)&0x7FFLL) << 52))
+#define FREELIST_VERSION(_x)                     ((((intptr_t)(_x).data) & 0x7FF0000000000000LL) >> 52)
+#define SET_FREELIST_POINTER_VERSION(_x, _p, _v) (_x).data = ((((intptr_t)(_p)) & 0x800FFFFFFFFFFFFFLL) | (((_v) & 0x7FFLL) << 52))
 #else
 #error "unsupported processor"
 #endif
 
 struct _InkFreeList {
-  head_p head;
+  head_p      head;
   const char *name;
-  uint32_t type_size, chunk_size, used, allocated, alignment;
-  uint32_t allocated_base, used_base;
-  int advice;
+  uint32_t    type_size, chunk_size, used, allocated, alignment;
+  uint32_t    allocated_base, used_base;
+  uint32_t    hugepages_failure;
+  bool        use_hugepages;
+  int         advice;
 };
 
-typedef struct ink_freelist_ops InkFreeListOps;
-typedef struct _InkFreeList InkFreeList;
+using InkFreeListOps = struct ink_freelist_ops;
+using InkFreeList    = struct _InkFreeList;
 
 const InkFreeListOps *ink_freelist_malloc_ops();
 const InkFreeListOps *ink_freelist_freelist_ops();
-void ink_freelist_init_ops(int nofl_class, int nofl_proxy);
+void                  ink_freelist_init_ops(int nofl_class, int nofl_proxy);
 
 /*
  * alignment must be a power of 2
  */
-InkFreeList *ink_freelist_create(const char *name, uint32_t type_size, uint32_t chunk_size, uint32_t alignment);
+InkFreeList *ink_freelist_create(const char *name, uint32_t type_size, uint32_t chunk_size, uint32_t alignment,
+                                 bool use_hugepages = false);
 
-void ink_freelist_init(InkFreeList **fl, const char *name, uint32_t type_size, uint32_t chunk_size, uint32_t alignment);
-void ink_freelist_madvise_init(InkFreeList **fl, const char *name, uint32_t type_size, uint32_t chunk_size, uint32_t alignment,
-                               int advice);
+void  ink_freelist_init(InkFreeList **fl, const char *name, uint32_t type_size, uint32_t chunk_size, uint32_t alignment,
+                        bool use_hugepages);
+void  ink_freelist_madvise_init(InkFreeList **fl, const char *name, uint32_t type_size, uint32_t chunk_size, uint32_t alignment,
+                                bool use_hugepages, int advice);
 void *ink_freelist_new(InkFreeList *f);
-void ink_freelist_free(InkFreeList *f, void *item);
-void ink_freelist_free_bulk(InkFreeList *f, void *head, void *tail, size_t num_item);
-void ink_freelists_dump(FILE *f);
-void ink_freelists_dump_baselinerel(FILE *f);
-void ink_freelists_snap_baseline();
+void  ink_freelist_free(InkFreeList *f, void *item);
+void  ink_freelist_free_bulk(InkFreeList *f, void *head, void *tail, size_t num_item);
+void  ink_freelists_dump(FILE *f);
+void  ink_freelists_dump_baselinerel(FILE *f);
+void  ink_freelists_snap_baseline();
 
 struct InkAtomicList {
   InkAtomicList() {}
-  head_p head{};
-  const char *name = nullptr;
-  uint32_t offset  = 0;
+  head_p      head{};
+  const char *name   = nullptr;
+  uint32_t    offset = 0;
 };
 
-#if !defined(INK_QUEUE_NT)
 #define INK_ATOMICLIST_EMPTY(_x) (!(TO_PTR(FREELIST_POINTER((_x.head)))))
-#else
-/* ink_queue_nt.c doesn't do the FROM/TO pointer swizzling */
-#define INK_ATOMICLIST_EMPTY(_x) (!((FREELIST_POINTER((_x.head)))))
-#endif
 
 // WARNING: the "name" string is not copied, it has to be a statically-stored constant string.
 //
@@ -244,7 +240,3 @@ void *ink_atomiclist_popall(InkAtomicList *l);
  * WARNING WARNING WARNING WARNING WARNING WARNING WARNING
  */
 void *ink_atomiclist_remove(InkAtomicList *l, void *item);
-
-#ifdef __cplusplus
-}
-#endif /* __cplusplus */

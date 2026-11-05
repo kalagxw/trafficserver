@@ -1,0 +1,368 @@
+/** @file
+
+  A brief file description
+
+  @par License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+
+#pragma once
+#include "iocore/cache/CacheDefs.h"
+#include "mgmt/config/ConfigContext.h"
+#include "records/RecCore.h"
+#include "tscore/MatcherUtils.h"
+#include "tscore/HostLookup.h"
+#include "tsutil/Bravo.h"
+#include "tscore/Filenames.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+#define CACHE_MEM_FREE_TIMEOUT HRTIME_SECONDS(1)
+
+class StripeSM;
+struct CacheVol;
+
+struct CacheHostResult;
+struct Cache;
+
+struct CacheHostRecord {
+  int Init(CacheType typ);
+  int Init(matcher_line *line_info, CacheType typ);
+
+  void UpdateMatch(CacheHostResult *r);
+  void Print() const;
+
+  ~CacheHostRecord()
+  {
+    ats_free(stripes);
+    ats_free(vol_hash_table);
+    ats_free(cp);
+  }
+
+  CacheType       type           = CacheType::NONE;
+  StripeSM      **stripes        = nullptr;
+  int             num_vols       = 0;
+  unsigned short *vol_hash_table = nullptr;
+  CacheVol      **cp             = nullptr;
+  int             num_cachevols  = 0;
+
+  CacheHostRecord() {}
+};
+
+void             build_vol_hash_table(CacheHostRecord *cp);
+CacheHostRecord *createCacheHostRecord(const char *volume_str, char *errbuf, size_t errbufsize);
+void             destroyCacheHostRecord(CacheHostRecord *rec);
+
+struct CacheHostResult {
+  CacheHostRecord *record = nullptr;
+
+  CacheHostResult() {}
+};
+
+class CacheHostMatcher
+{
+public:
+  CacheHostMatcher(const char *name, CacheType typ);
+  ~CacheHostMatcher();
+
+  void AllocateSpace(int num_entries);
+  void NewEntry(matcher_line *line_info);
+
+  void Match(std::string_view rdata, CacheHostResult *result) const;
+  void Print() const;
+
+  int
+  getNumElements() const
+  {
+    return num_el;
+  }
+  CacheHostRecord *
+  getDataArray() const
+  {
+    return data_array;
+  }
+  HostLookup *
+  getHLookup() const
+  {
+    return host_lookup.get();
+  }
+
+private:
+  static void                 PrintFunc(void *opaque_data);
+  std::unique_ptr<HostLookup> host_lookup; // Data structure to do the lookups
+  CacheHostRecord            *data_array;  // array of all data items
+  int                         array_len;   // the length of the arrays
+  int                         num_el;      // the number of items in the tree
+  CacheType                   type;
+};
+
+// ReplaceablePtr provides threadsafe access to an object which may be replaced.
+//
+// Access is provided via ScopedReader and ScopedWriter classes, which acquire
+// shared (read) and exclusive (write) locks respectively on construction and
+// release them upon destruction.
+//
+// The underlying object may be replaced by a concurrent thread via 'reset',
+// which acquires an exclusive lock before setting the internal pointer. This
+// takes ownership of the given pointer. If this already has ownership of
+// another pointer, that object is destroyed and its memory freed.
+//
+// Direct access without acquiring the lock is intentionally not provided, to
+// prevent accidental usage without locking, or forgetting to release the lock.
+//
+// This may not be copied. To use, construct with one owner, and pass a pointer
+// to other users.
+//
+template <typename T> class ReplaceablePtr
+{
+public:
+  ReplaceablePtr() {}
+  virtual ~ReplaceablePtr() {}
+
+  // reset acquires an exclusive (write) lock and updates the internal pointer
+  // with t.
+  // If an existing pointer is owned, the object is destructed and its memory
+  // freed.
+  void
+  reset(T *t)
+  {
+    std::scoped_lock l(m);
+    h.reset(t);
+  }
+
+  // ScopedReader constructs an object which is allowed to read from a
+  // ReplaceablePtr.
+  //
+  // The lifetime of the ReplaceablePtr must exceed the lifetime of this.
+  // The shared (read) lock is immediately acquired  upon construction of this,
+  // and released upon destruction.
+  class ScopedReader
+  {
+  public:
+    ScopedReader(ReplaceablePtr<T> *ptr) : ptr(ptr) { ptr->m.lock_shared(_token); }
+    ~ScopedReader() { ptr->m.unlock_shared(_token); }
+
+    const T *
+    operator->()
+    {
+      return ptr->h.get();
+    }
+
+    const T *
+    get()
+    {
+      return ptr->h.get();
+    }
+
+  private:
+    ScopedReader(const ScopedReader &)            = delete;
+    ScopedReader &operator=(const ScopedReader &) = delete;
+
+    ReplaceablePtr<T> *ptr;
+    ts::bravo::Token   _token = 0;
+  };
+
+  // ScopedWriter constructs an object which is allowed to read and modify the
+  // object pointed to by a ReplaceablePtr.
+  //
+  // The lifetime of the ReplaceablePtr must exceed the lifetime of this.
+  //
+  // An exclusive (write) lock is immediately acquired  upon construction of
+  // this, and released upon destruction.
+  class ScopedWriter
+  {
+  public:
+    ScopedWriter(ReplaceablePtr<T> *ptr) : ptr(ptr) { ptr->m.lock(); }
+    ~ScopedWriter() { ptr->m.unlock(); }
+
+    T *
+    operator->()
+    {
+      return ptr->h.get();
+    }
+
+    T *
+    get()
+    {
+      return ptr->h.get();
+    }
+
+  private:
+    ScopedWriter(const ScopedWriter &)            = delete;
+    ScopedWriter &operator=(const ScopedWriter &) = delete;
+
+    ReplaceablePtr<T> *ptr;
+  };
+
+private:
+  ReplaceablePtr(const ReplaceablePtr &)            = delete;
+  ReplaceablePtr &operator=(const ReplaceablePtr &) = delete;
+
+  std::unique_ptr<T>      h = nullptr;
+  ts::bravo::shared_mutex m;
+
+  friend class ReplaceablePtr::ScopedReader;
+};
+
+class CacheHostTable
+{
+public:
+  // Parameter name must not be deallocated before this
+  //  object is
+  CacheHostTable(Cache *c, CacheType typ, ConfigContext ctx = {});
+  ~CacheHostTable();
+
+  int BuildTable(const char *config_file_path, ConfigContext ctx = {});
+  int BuildTableFromString(const char *config_file_path, char *str, ConfigContext ctx = {});
+
+  void Match(std::string_view rdata, CacheHostResult *result) const;
+  void Print() const;
+
+  // Getters for Cache::key_to_stripe access
+  const CacheHostRecord *
+  getGenHostRec() const
+  {
+    return &gen_host_rec;
+  }
+
+  int
+  getNumEntries() const
+  {
+    return m_numEntries;
+  }
+
+  int
+  getGenHostRecCacheVols() const
+  {
+    return gen_host_rec.num_cachevols;
+  }
+
+  CacheHostMatcher *
+  getHostMatcher() const
+  {
+    return hostMatch.get();
+  }
+
+  CacheType
+  getType() const
+  {
+    return type;
+  }
+
+  Cache *
+  getCache() const
+  {
+    return cache;
+  }
+
+private:
+  static int config_callback(const char *, RecDataT, RecData, void *);
+
+  CacheType                         type         = CacheType::HTTP;
+  Cache                            *cache        = nullptr;
+  int                               m_numEntries = 0;
+  CacheHostRecord                   gen_host_rec;
+  std::unique_ptr<CacheHostMatcher> hostMatch    = nullptr;
+  const matcher_tags                config_tags  = {"hostname", "domain", nullptr, nullptr, nullptr, nullptr, false};
+  const char                       *matcher_name = "unknown"; // Used for Debug/Warning/Error messages
+};
+
+/**
+  List of volumes in the storage.yaml
+ */
+struct ConfigVol {
+  struct Size {
+    int64_t absolute_value = 0;
+    bool    in_percent     = false;
+    int     percent        = 0;
+
+    bool is_empty() const;
+  };
+
+  struct Span {
+    std::string use{};
+    Size        size{};
+  };
+  using Spans = std::vector<Span>;
+
+  int       number           = 0;
+  CacheType scheme           = CacheType::NONE;
+  bool      ramcache_enabled = true;
+  Size      size{};
+  Spans     spans{};
+
+  int     avg_obj_size     = -1;
+  int     fragment_size    = -1;
+  int64_t ram_cache_size   = -1; // Per-volume RAM cache size (-1 = use shared allocation)
+  int64_t ram_cache_cutoff = -1; // Per-volume RAM cache cutoff (-1 = use global cutoff)
+
+  CacheVol *cachep = nullptr;
+  LINK(ConfigVol, link);
+};
+
+struct ConfigVolumes {
+  ConfigVolumes() = default;
+  ~ConfigVolumes() { clear_all(); }
+
+  // Move constructor
+  ConfigVolumes(ConfigVolumes &&other) noexcept : num_volumes(other.num_volumes), cp_queue(std::move(other.cp_queue))
+  {
+    // Reset the source object to prevent double deletion
+    other.num_volumes = 0;
+    other.cp_queue.clear();
+  }
+
+  // Move assignment operator
+  ConfigVolumes &
+  operator=(ConfigVolumes &&other) noexcept
+  {
+    if (this != &other) {
+      // Clear current contents
+      clear_all();
+      // Move from other
+      num_volumes = other.num_volumes;
+      cp_queue    = std::move(other.cp_queue);
+      // Reset the source object to prevent double deletion
+      other.num_volumes = 0;
+      other.cp_queue.clear();
+    }
+    return *this;
+  }
+
+  // Delete copy constructor and copy assignment to prevent accidental copying
+  ConfigVolumes(const ConfigVolumes &)            = delete;
+  ConfigVolumes &operator=(const ConfigVolumes &) = delete;
+
+  int              num_volumes = 0;
+  Queue<ConfigVol> cp_queue{};
+
+  void complement();
+  void
+  clear_all()
+  {
+    // remove all the volumes from the queue
+    for (int i = 0; i < num_volumes; i++) {
+      ConfigVol *v = cp_queue.pop();
+      delete v;
+    }
+    // reset count variables
+    num_volumes = 0;
+  }
+};

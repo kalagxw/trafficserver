@@ -2,7 +2,7 @@
 
   A brief file prefix
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -47,7 +47,7 @@ const std::string LAYOUT_MANDIR        = "mandir";
 const std::string LAYOUT_INFODIR       = "infodir";
 const std::string LAYOUT_CACHEDIR      = "cachedir";
 
-typedef std::unordered_map<std::string, std::string> RunrootMapType;
+using RunrootMapType = std::unordered_map<std::string, std::string>;
 
 // some checks for directory exist or is it a directory
 // this is a temporary approach and will be replaced

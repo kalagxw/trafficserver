@@ -18,17 +18,9 @@
 #include "swoc/swoc_version.h"
 #include "swoc/TextView.h"
 #include "swoc/MemSpan.h"
+#include "swoc/bwf_fwd.h"
 
 namespace swoc { inline namespace SWOC_VERSION_NS {
-namespace bwf {
-struct Spec;
-
-class Format;
-
-class NameBinding;
-
-class ArgPack;
-} // namespace bwf
 
 /** Wrapper for operations on a buffer.
  *
@@ -61,17 +53,19 @@ public:
    */
   virtual BufferWriter &write(void const *data, size_t length);
 
-  /** Add the contents of @a sv to the buffer, up to the size of the view.
+  /** Write data to the buffer.
+   *
+   * @param span Data source.
+   * @return @a this
+   *
+   * Data from @a span is written directly to the buffer, and clipped to the size of the buffer.
+   *
+   * @internal The char poointer overloads protect this method in order to protect against including
+   * the terminal nul in the destination buffer.
+   */
+  BufferWriter &write(MemSpan<void const> span);
 
-      Data is added only up to the remaining room in the buffer. If the remaining capacity is
-      exceeded (i.e. data is not written to the output), the instance is put in to an error
-      state. In either case the value for @c extent is incremented by the size of @a sv.
-
-      @return @c *this
-  */
-  BufferWriter &write(const std::string_view &sv);
-
-  /// Address of the first byte in the output buffer.
+  /// @return Pointer to first byte in buffer.
   virtual const char *data() const = 0;
 
   /// Get the error state.
@@ -183,7 +177,7 @@ public:
    * @note This must be declared here, but the implementation is in @c bwf_base.h. That file does
    * not need to be included if formatted output is not used.
    */
-  template <typename... Args> BufferWriter &print(const TextView &fmt, Args &&... args);
+  template <typename... Args> BufferWriter &print(const TextView &fmt, Args &&...args);
 
   /** Formatted output to the buffer.
    *
@@ -205,7 +199,7 @@ public:
    * @param args Arguments for the format string.
    * @return @a this.
    */
-  template <typename... Args> BufferWriter &print(const bwf::Format &fmt, Args &&... args);
+  template <typename... Args> BufferWriter &print(const bwf::Format &fmt, Args &&...args);
 
   /** Formatted output to the buffer.
    *
@@ -269,6 +263,28 @@ public:
    * format string @a fmt contains only references to those names, not to any arguments.
    */
   template <typename Binding> BufferWriter &print_n(Binding const &names, TextView const &fmt);
+
+  /** Write formattted data.
+   *
+   * @tparam T Data type.
+   * @param spec Format specifier.
+   * @param t Instance to print.
+   * @return @a this
+   *
+   * Essentially this forwards @a t to @c bwformat.
+   */
+  template <typename T> BufferWriter &format(bwf::Spec const &spec, T &&t);
+
+  /** Write formattted data.
+   *
+   * @tparam T Data type.
+   * @param spec Format specifier.
+   * @param t Instance to print.
+   * @return @a this
+   *
+   * Essentially this forwards @a t to @c bwformat.
+   */
+  template <typename T> BufferWriter &format(bwf::Spec const &spec, T const &t);
 
   /** IO stream operator.
    *
@@ -380,16 +396,19 @@ public:
   std::ostream &operator>>(std::ostream &stream) const override;
 
   /// @cond COVARY
-  template <typename... Rest> self_type &print(TextView fmt, Rest &&... rest);
+  template <typename... Rest> self_type &print(TextView fmt, Rest &&...rest);
 
   template <typename... Args> self_type &print_v(TextView fmt, std::tuple<Args...> const &args);
 
-  template <typename... Args> self_type &print(bwf::Format const &fmt, Args &&... args);
+  template <typename... Args> self_type &print(bwf::Format const &fmt, Args &&...args);
 
   template <typename... Args> self_type &print_v(bwf::Format const &fmt, std::tuple<Args...> const &args);
   /// @endcond
 
 protected:
+  // Used for derived classes where we don't want to throw exceptions.
+  FixedBufferWriter(char *buffer, size_t capacity, bool noexcept_flag) noexcept;
+
   char *const _buffer;   ///< Output buffer.
   size_t _capacity;      ///< Size of output buffer.
   size_t _attempted = 0; ///< Number of characters written, including those discarded due error condition.
@@ -424,7 +443,7 @@ template <size_t N> class LocalBufferWriter : public FixedBufferWriter {
 
 public:
   /// Construct an empty writer.
-  LocalBufferWriter();
+  LocalBufferWriter() noexcept;
 
   LocalBufferWriter(const LocalBufferWriter &that) = delete;
 
@@ -448,9 +467,16 @@ BufferWriter::write(const void *data, size_t length) {
   return *this;
 }
 
+#if 0
 inline BufferWriter &
 BufferWriter::write(const std::string_view &sv) {
   return this->write(sv.data(), sv.size());
+}
+#endif
+
+inline BufferWriter &
+BufferWriter::write(MemSpan<void const> span) {
+  return this->write(span.data(), span.size());
 }
 
 inline char *
@@ -473,6 +499,9 @@ inline FixedBufferWriter::FixedBufferWriter(char *buffer, size_t capacity) : _bu
   if (_capacity != 0 && buffer == nullptr) {
     throw(std::invalid_argument{"FixedBufferWriter created with null buffer and non-zero size."});
   };
+}
+
+inline FixedBufferWriter::FixedBufferWriter(char *buffer, size_t capacity, bool /* noexcept_flag */) noexcept : _buffer(buffer), _capacity(capacity) {
 }
 
 inline FixedBufferWriter::FixedBufferWriter(MemSpan<void> const &span)
@@ -571,8 +600,7 @@ FixedBufferWriter::extent() const {
   return _attempted;
 }
 
-inline auto
-FixedBufferWriter::restrict(size_t n) -> self_type & {
+inline auto FixedBufferWriter::restrict(size_t n) -> self_type & {
   if (n > _capacity) {
     throw(std::invalid_argument{"FixedBufferWriter restrict value more than capacity"});
   }
@@ -624,7 +652,7 @@ inline FixedBufferWriter::operator swoc::TextView() const {
 }
 
 // --- LocalBufferWriter ---
-template <size_t N> LocalBufferWriter<N>::LocalBufferWriter() : super_type(_arr, N) {}
+template <size_t N> LocalBufferWriter<N>::LocalBufferWriter() noexcept : super_type(_arr, N, true) {}
 
 }} // namespace swoc::SWOC_VERSION_NS
 

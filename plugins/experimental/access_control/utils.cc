@@ -30,7 +30,7 @@
 #include "common.h"
 #include "utils.h"
 #include "tscore/ink_base64.h"
-#include "ink_autoconf.h"
+#include "tscore/ink_config.h"
 
 /* ******* Encoding/Decoding functions ******* */
 
@@ -48,10 +48,10 @@ hexEncode(const char *in, size_t inLen, char *out, size_t outLen)
 {
   const char *src    = in;
   const char *srcEnd = in + inLen;
-  char *dst          = out;
-  char *dstEnd       = out + outLen;
+  char       *dst    = out;
+  char       *dstEnd = out + outLen;
 
-  while (src < srcEnd && dst < dstEnd && 2 == sprintf(dst, "%02x", static_cast<unsigned char>(*src))) {
+  while (src < srcEnd && dst < dstEnd && 2 == snprintf(dst, outLen, "%02x", static_cast<unsigned char>(*src))) {
     dst += 2;
     src++;
   }
@@ -93,12 +93,12 @@ hexDecode(const char *in, size_t inLen, char *out, size_t outLen)
 {
   const char *src    = in;
   const char *srcEnd = in + inLen;
-  char *dst          = out;
-  char *dstEnd       = out + outLen;
+  char       *dst    = out;
+  char       *dstEnd = out + outLen;
 
   while (src < (srcEnd - 1) && dst < dstEnd) {
-    *dst++ = hex2uchar(*src) << 4 | hex2uchar(*(src + 1));
-    src += 2;
+    *dst++  = hex2uchar(*src) << 4 | hex2uchar(*(src + 1));
+    src    += 2;
   }
   return dst - out;
 }
@@ -116,7 +116,7 @@ size_t
 urlEncode(const char *in, size_t inLen, char *out, size_t outLen)
 {
   const char *src = in;
-  char *dst       = out;
+  char       *dst = out;
   while (static_cast<size_t>(src - in) < inLen && static_cast<size_t>(dst - out) < outLen) {
     if (isalnum(*src) || *src == '-' || *src == '_' || *src == '.' || *src == '~') {
       *dst++ = *src;
@@ -124,7 +124,7 @@ urlEncode(const char *in, size_t inLen, char *out, size_t outLen)
       *dst++ = '+';
     } else {
       *dst++ = '%';
-      sprintf(dst, "%02x", static_cast<unsigned char>(*src));
+      snprintf(dst, out + outLen - dst, "%02x", static_cast<unsigned char>(*src));
       dst += 2;
     }
     src++;
@@ -145,13 +145,13 @@ size_t
 urlDecode(const char *in, size_t inLen, char *out, size_t outLen)
 {
   const char *src = in;
-  char *dst       = out;
+  char       *dst = out;
   while (static_cast<size_t>(src - in) < inLen && static_cast<size_t>(dst - out) < outLen) {
     if (*src == '%') {
       if (src[1] && src[2]) {
-        int u  = hex2uchar(*(src + 1)) << 4 | hex2uchar(*(src + 2));
-        *dst++ = static_cast<char>(u);
-        src += 2;
+        int u   = hex2uchar(*(src + 1)) << 4 | hex2uchar(*(src + 2));
+        *dst++  = static_cast<char>(u);
+        src    += 2;
       }
     } else if (*src == '+') {
       *dst++ = ' ';
@@ -161,24 +161,6 @@ urlDecode(const char *in, size_t inLen, char *out, size_t outLen)
     src++;
   }
   return dst - out;
-}
-
-/* ******* Functions using OpenSSL library ******* */
-
-void
-cryptoMagicInit()
-{
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-  OpenSSL_add_all_digests(); /* needed for EVP_get_digestbyname() */
-#endif
-}
-
-void
-cryptoMagicCleanup()
-{
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-  EVP_cleanup();
-#endif
 }
 
 /**
@@ -218,49 +200,21 @@ cryptoErrStr(char *buffer, size_t bufferLen)
  */
 size_t
 cryptoMessageDigestGet(const char *digestType, const char *data, size_t dataLen, const char *key, size_t keyLen, char *out,
-                       size_t outLen)
+                       size_t /* outLen ATS_UNUSED */)
 {
-#ifndef HAVE_HMAC_CTX_NEW
-  HMAC_CTX ctx[1];
-#else
-  HMAC_CTX *ctx;
-#endif
-
-  const EVP_MD *md = nullptr;
-  unsigned int len = 0;
-  char buffer[256];
+  const EVP_MD *md  = nullptr;
+  unsigned int  len = 0;
+  char          buffer[256];
 
   if (!(md = EVP_get_digestbyname(digestType))) {
     AccessControlError("unknown digest name '%s'", digestType);
     return 0;
   }
 
-#ifndef HAVE_HMAC_CTX_NEW
-  HMAC_CTX_init(ctx);
-#else
-  ctx = HMAC_CTX_new();
-#endif
-  if (!HMAC_Init_ex(ctx, key, keyLen, md, nullptr)) {
-    AccessControlError("failed to create EVP message digest context: %s", cryptoErrStr(buffer, sizeof(buffer)));
-    goto err;
+  if (!HMAC(md, reinterpret_cast<const unsigned char *>(key), keyLen, reinterpret_cast<const unsigned char *>(data), dataLen,
+            reinterpret_cast<unsigned char *>(out), &len)) {
+    AccessControlError("failed to get the signing hash: %s", cryptoErrStr(buffer, sizeof(buffer)));
   }
-
-  if (!HMAC_Update(ctx, reinterpret_cast<const unsigned char *>(data), dataLen)) {
-    AccessControlError("failed to update the signing hash: %s", cryptoErrStr(buffer, sizeof(buffer)));
-    goto err;
-  }
-
-  if (!HMAC_Final(ctx, reinterpret_cast<unsigned char *>(out), &len)) {
-    AccessControlError("failed to finalize the signing hash: %s", cryptoErrStr(buffer, sizeof(buffer)));
-    goto err;
-  }
-
-err:
-#ifndef HAVE_HMAC_CTX_NEW
-  HMAC_CTX_cleanup(ctx);
-#else
-  HMAC_CTX_free(ctx);
-#endif
   return len;
 }
 
@@ -306,7 +260,7 @@ cryptoBase64EncodedSize(size_t decodedSize)
  * @return output buffer size
  */
 size_t
-cryptoBase64DecodeSize(const char *encoded, size_t encodedLen)
+cryptoBase64DecodeSize(const char * /* encoded ATS_UNUSED */, size_t encodedLen)
 {
   return ats_base64_decode_dstlen(encodedLen);
 }
@@ -366,10 +320,10 @@ cryptoModifiedBase64Encode(const char *in, size_t inLen, char *out, size_t outLe
 {
   size_t len = cryptoBase64Encode(in, inLen, out, outLen);
 
-  char *cur            = out;
-  const char *end      = out + len;
-  const char *padStart = out + len;
-  bool foundPadStart   = false;
+  char       *cur           = out;
+  const char *end           = out + len;
+  const char *padStart      = out + len;
+  bool        foundPadStart = false;
   while (cur < end) {
     if ('+' == *cur) {
       *cur = '-';
@@ -393,24 +347,21 @@ cryptoModifiedBase64Decode(const char *in, size_t inLen, char *out, size_t outLe
 {
   size_t bufferLen = inLen;
   switch (inLen % 4) {
-  case 0: /* no padding */
-    break;
   case 2: /* need space for '==' */
     bufferLen += 2;
     break;
   case 3: /* need space for '=' */
     bufferLen += 1;
     break;
-  case 4:     /* malformed base64 */
-    return 0; /* nothing will be written to the output buffer */
+  default: /* no padding */
     break;
   }
 
   /* Since 'in' would like to be unmodifiable to add the padding will need a copy */
   const char *cur = in;
   const char *end = in + inLen;
-  char buffer[bufferLen];
-  char *dst = buffer;
+  char        buffer[bufferLen];
+  char       *dst = buffer;
   while (cur < end) {
     if ('-' == *cur) {
       *dst++ = '+';

@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -123,7 +123,7 @@ inline const char *
 ptr_len_str(const char *p1, int l1, const char *str)
 {
   if (str && str[0]) {
-    int str_index           = 0;
+    int         str_index   = 0;
     const char *match_start = nullptr;
 
     while (l1 > 0) {
@@ -139,9 +139,9 @@ ptr_len_str(const char *p1, int l1, const char *str)
           return match_start;
         }
       } else if (str_index > 0) {
-        l1 += (p1 - match_start);
-        p1        = match_start;
-        str_index = 0;
+        l1        += (p1 - match_start);
+        p1         = match_start;
+        str_index  = 0;
       }
 
       p1++;
@@ -284,7 +284,7 @@ ptr_len_pbrk(const char *p1, int l1, const char *str)
 
     while (*str_cur != '\0') {
       if (*p1 == *str_cur) {
-        return (char *)p1;
+        return const_cast<char *>(p1);
       }
       str_cur++;
     }
@@ -309,36 +309,36 @@ ink_small_itoa(int val, char *buf, int buf_len)
     buf[0] = '0' + val;
     return 1;
   } else if (val < 100) { // 10 - 99
-    buf[1] = '0' + (val % 10);
-    val /= 10;
-    buf[0] = '0' + (val % 10);
+    buf[1]  = '0' + (val % 10);
+    val    /= 10;
+    buf[0]  = '0' + (val % 10);
     return 2;
   } else if (val < 1000) { // 100 - 999
-    buf[2] = '0' + (val % 10);
-    val /= 10;
-    buf[1] = '0' + (val % 10);
-    val /= 10;
-    buf[0] = '0' + (val % 10);
+    buf[2]  = '0' + (val % 10);
+    val    /= 10;
+    buf[1]  = '0' + (val % 10);
+    val    /= 10;
+    buf[0]  = '0' + (val % 10);
     return 3;
   } else if (val < 10000) { // 1000 - 9999
-    buf[3] = '0' + (val % 10);
-    val /= 10;
-    buf[2] = '0' + (val % 10);
-    val /= 10;
-    buf[1] = '0' + (val % 10);
-    val /= 10;
-    buf[0] = '0' + (val % 10);
+    buf[3]  = '0' + (val % 10);
+    val    /= 10;
+    buf[2]  = '0' + (val % 10);
+    val    /= 10;
+    buf[1]  = '0' + (val % 10);
+    val    /= 10;
+    buf[0]  = '0' + (val % 10);
     return 4;
   } else { // 10000 - 99999
-    buf[4] = '0' + (val % 10);
-    val /= 10;
-    buf[3] = '0' + (val % 10);
-    val /= 10;
-    buf[2] = '0' + (val % 10);
-    val /= 10;
-    buf[1] = '0' + (val % 10);
-    val /= 10;
-    buf[0] = '0' + (val % 10);
+    buf[4]  = '0' + (val % 10);
+    val    /= 10;
+    buf[3]  = '0' + (val % 10);
+    val    /= 10;
+    buf[2]  = '0' + (val % 10);
+    val    /= 10;
+    buf[1]  = '0' + (val % 10);
+    val    /= 10;
+    buf[0]  = '0' + (val % 10);
     return 5;
   }
 }
@@ -352,7 +352,7 @@ ink_fast_itoa(int32_t val, char *buf, int buf_len)
     return (ret >= 0 ? ret : 0);
   }
 
-  return ink_small_itoa((int)val, buf, buf_len);
+  return ink_small_itoa(static_cast<int>(val), buf, buf_len);
 }
 
 inline int
@@ -364,7 +364,7 @@ ink_fast_uitoa(uint32_t val, char *buf, int buf_len)
     return (ret >= 0 ? ret : 0);
   }
 
-  return ink_small_itoa((int)val, buf, buf_len);
+  return ink_small_itoa(static_cast<int>(val), buf, buf_len);
 }
 
 inline int
@@ -376,7 +376,7 @@ ink_fast_ltoa(int64_t val, char *buf, int buf_len)
     return (ret >= 0 ? ret : 0);
   }
 
-  return ink_small_itoa((int)val, buf, buf_len);
+  return ink_small_itoa(static_cast<int>(val), buf, buf_len);
 }
 
 /// Check for prefix.

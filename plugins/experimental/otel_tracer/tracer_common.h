@@ -23,6 +23,7 @@
 
 #include "opentelemetry/exporters/ostream/span_exporter.h"
 #include "opentelemetry/sdk/trace/simple_processor.h"
+#include "opentelemetry/sdk/trace/tracer_context.h"
 #include "opentelemetry/sdk/trace/tracer_provider.h"
 #include "opentelemetry/trace/provider.h"
 
@@ -34,6 +35,13 @@
 #include "opentelemetry/sdk/trace/samplers/always_on.h"
 #include "opentelemetry/sdk/trace/samplers/parent.h"
 #include "opentelemetry/sdk/trace/samplers/trace_id_ratio.h"
+
+#include "opentelemetry/exporters/otlp/otlp_http_exporter_factory.h"
+#include "opentelemetry/sdk/trace/simple_processor_factory.h"
+#include "opentelemetry/sdk/trace/batch_span_processor_factory.h"
+#include "opentelemetry/sdk/trace/batch_span_processor_options.h"
+#include "opentelemetry/sdk/trace/tracer_context_factory.h"
+#include "opentelemetry/sdk/trace/tracer_provider_factory.h"
 
 #include <cstring>
 #include <iostream>
@@ -61,20 +69,20 @@ constexpr const char *attrHttpScheme     = {"http.scheme"};
 template <typename T> class HttpTextMapCarrier : public context::propagation::TextMapCarrier
 {
 public:
-  HttpTextMapCarrier<T>(T &headers) : headers_(headers) {}
+  HttpTextMapCarrier(T &headers) : headers_(headers) {}
   HttpTextMapCarrier() = default;
   virtual nostd::string_view
   Get(nostd::string_view key) const noexcept override
   {
     std::string key_to_compare = key.data();
-    auto it                    = headers_.find(key_to_compare);
+    auto        it             = headers_.find(key_to_compare);
     if (it != headers_.end()) {
       return it->second;
     }
     return "";
   }
 
-  virtual void
+  void
   Set(nostd::string_view key, nostd::string_view value) noexcept override
   {
     headers_.insert(std::pair<std::string, std::string>(std::string(key), std::string(value)));
@@ -84,7 +92,7 @@ public:
 };
 
 // this object is created using placement new therefore all destructors needs
-// to be called explictly inside Destruct method
+// to be called explicitly inside Destruct method
 struct ExtraRequestData {
   nostd::shared_ptr<trace::Span> span;
 
@@ -112,7 +120,7 @@ struct ExtraRequestData {
 };
 
 void
-InitTracer(std::string url, std::string service_name, double rate)
+InitTracer(const std::string &url, const std::string &service_name, double rate, int qsize, int delay, int bsize)
 {
   otlp::OtlpHttpExporterOptions opts;
 
@@ -120,20 +128,29 @@ InitTracer(std::string url, std::string service_name, double rate)
     opts.url = url;
   }
 
-  auto exporter  = std::unique_ptr<sdktrace::SpanExporter>(new otlp::OtlpHttpExporter(opts));
-  auto processor = std::unique_ptr<sdktrace::SpanProcessor>(new sdktrace::SimpleSpanProcessor(std::move(exporter)));
+  auto exporter = otlp::OtlpHttpExporterFactory::Create(opts);
+
+  sdktrace::BatchSpanProcessorOptions options{};
+  options.max_queue_size        = qsize;
+  options.schedule_delay_millis = std::chrono::milliseconds(delay);
+  options.max_export_batch_size = bsize;
+  auto processor                = sdktrace::BatchSpanProcessorFactory::Create(std::move(exporter), options);
 
   std::vector<std::unique_ptr<sdktrace::SpanProcessor>> processors;
   processors.push_back(std::move(processor));
 
   // Set service name
-  opentelemetry::sdk::resource::ResourceAttributes attributes = {{"service.name", service_name}, {"version", (uint32_t)1}};
-  auto resource                                               = opentelemetry::sdk::resource::Resource::Create(attributes);
+  opentelemetry::sdk::resource::ResourceAttributes attributes = {
+    {"service.name", service_name},
+    {"version",      (uint32_t)1 }
+  };
+  auto resource = opentelemetry::sdk::resource::Resource::Create(attributes);
+  auto context  = sdktrace::TracerContextFactory::Create(std::move(processors), resource,
+                                                         std::unique_ptr<sdktrace::Sampler>(new sdktrace::ParentBasedSampler(
+                                                          std::make_shared<sdktrace::TraceIdRatioBasedSampler>(rate))));
 
-  auto context  = std::make_shared<sdktrace::TracerContext>(std::move(processors), resource,
-                                                           std::unique_ptr<sdktrace::Sampler>(new sdktrace::ParentBasedSampler(
-                                                             std::make_shared<sdktrace::TraceIdRatioBasedSampler>(rate))));
-  auto provider = nostd::shared_ptr<trace::TracerProvider>(new sdktrace::TracerProvider(context));
+  // create provider through factory
+  std::shared_ptr<trace::TracerProvider> provider = sdktrace::TracerProviderFactory::Create(std::move(context));
 
   // Set the global trace provider
   trace::Provider::SetTracerProvider(provider);
@@ -192,7 +209,7 @@ get_span_options(std::map<std::string, std::string> parent_headers)
 std::map<std::string, std::string>
 get_trace_headers()
 {
-  auto current_ctx = opentelemetry::context::RuntimeContext::GetCurrent();
+  auto                                                   current_ctx = opentelemetry::context::RuntimeContext::GetCurrent();
   HttpTextMapCarrier<std::map<std::string, std::string>> carrier;
   auto prop = opentelemetry::context::propagation::GlobalTextMapPropagator::GetGlobalPropagator();
   prop->Inject(carrier, current_ctx);

@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -26,10 +26,12 @@ Process arguments
 
 ****************************************************************************/
 
+#include "swoc/bwf_ip.h"
+
 #include "tscore/ink_platform.h"
 #include "tscore/ink_args.h"
 #include "tscore/Diags.h"
-#include "tscore/I_Version.h"
+#include "tscore/Version.h"
 #include "tscore/ink_file.h"
 #include "tscore/ink_memory.h"
 #include "tscore/ink_string.h"
@@ -40,8 +42,8 @@ Process arguments
 
 const char *file_arguments[MAX_FILE_ARGUMENTS] = {nullptr};
 const char *program_name                       = (char *)"Traffic Server";
-unsigned n_file_arguments                      = 0;
-int cmd_disable_pfreelist                      = 0;
+unsigned    n_file_arguments                   = 0;
+int         cmd_disable_pfreelist              = 0;
 
 //
 //  Local variables
@@ -78,7 +80,7 @@ process_arg(const AppVersionInfo *appinfo, const ArgumentDescription *argument_d
   const char *arg = nullptr;
 
   if (arg_is_version_flag(&argument_descriptions[i])) {
-    ink_fputln(stdout, appinfo->FullVersionInfoStr);
+    ink_fputln(stdout, appinfo->full_version());
     exit(0);
   }
 
@@ -179,8 +181,8 @@ process_args_ex(const AppVersionInfo *appinfo, const ArgumentDescription *argume
   //
   for (i = 0; i < n_argument_descriptions; i++) {
     if (argument_descriptions[i].env) {
-      char type = argument_descriptions[i].type[0];
-      char *env = getenv(argument_descriptions[i].env);
+      char  type = argument_descriptions[i].type[0];
+      char *env  = getenv(argument_descriptions[i].env);
       if (!env) {
         continue;
       }
@@ -205,7 +207,7 @@ process_args_ex(const AppVersionInfo *appinfo, const ArgumentDescription *argume
   //
   // Grab Command Line Arguments
   //
-  program_name = appinfo->AppStr;
+  program_name = appinfo->application();
   while (*++argv) {
     // Hack for supporting '-' as a file argument.
     if (strcmp(*argv, "-") == 0) {

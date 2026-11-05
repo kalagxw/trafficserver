@@ -34,7 +34,7 @@ using std::vector;
 
 namespace
 {
-const int WINDOW_BITS             = 31; // Always use 31 for gzip.
+const int    WINDOW_BITS          = 31; // Always use 31 for gzip.
 unsigned int INFLATE_SCALE_FACTOR = 6;
 } // namespace
 
@@ -42,9 +42,9 @@ unsigned int INFLATE_SCALE_FACTOR = 6;
  * @private
  */
 struct atscppapi::transformations::GzipInflateTransformationState : noncopyable {
-  z_stream z_stream_;
-  bool z_stream_initialized_;
-  int64_t bytes_produced_;
+  z_stream                   z_stream_;
+  bool                       z_stream_initialized_;
+  int64_t                    bytes_produced_;
   TransformationPlugin::Type transformation_type_;
 
   GzipInflateTransformationState(TransformationPlugin::Type type)
@@ -74,13 +74,10 @@ struct atscppapi::transformations::GzipInflateTransformationState : noncopyable 
 GzipInflateTransformation::GzipInflateTransformation(Transaction &transaction, TransformationPlugin::Type type)
   : TransformationPlugin(transaction, type)
 {
-  state_ = new GzipInflateTransformationState(type);
+  state_ = std::make_unique<GzipInflateTransformationState>(type);
 }
 
-GzipInflateTransformation::~GzipInflateTransformation()
-{
-  delete state_;
-}
+GzipInflateTransformation::~GzipInflateTransformation() {}
 
 void
 GzipInflateTransformation::consume(std::string_view data)
@@ -94,9 +91,9 @@ GzipInflateTransformation::consume(std::string_view data)
     return;
   }
 
-  int err                = Z_OK;
-  int iteration          = 0;
-  int inflate_block_size = INFLATE_SCALE_FACTOR * data.size();
+  int          err                = Z_OK;
+  int          iteration          = 0;
+  int          inflate_block_size = INFLATE_SCALE_FACTOR * data.size();
   vector<char> buffer(inflate_block_size);
 
   // Setup the compressed input
@@ -107,11 +104,13 @@ GzipInflateTransformation::consume(std::string_view data)
   while (state_->z_stream_.avail_in > 0 && err != Z_STREAM_END) {
     LOG_DEBUG("Iteration %d: Gzip has %d bytes to inflate", ++iteration, state_->z_stream_.avail_in);
 
-    // Setup where the decompressed output will go.
+    // Setup where the decompressed output will go
+    // next_out needs to be set to nullptr before we return since it points to a local buffer
+    // coverity[WRAPPER_ESCAPE: FALSE]
     state_->z_stream_.next_out  = reinterpret_cast<unsigned char *>(&buffer[0]);
     state_->z_stream_.avail_out = inflate_block_size;
 
-    /* Uncompress */
+    // Uncompress the data
     err = inflate(&state_->z_stream_, Z_SYNC_FLUSH);
 
     if (err != Z_OK && err != Z_STREAM_END) {

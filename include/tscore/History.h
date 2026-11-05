@@ -2,7 +2,7 @@
  *
  *  A brief file description
  *
- *  @section license License
+ *  @par License
  *
  *  Licensed to the Apache Software Foundation (ASF) under one
  *  or more contributor license agreements.  See the NOTICE file
@@ -23,17 +23,17 @@
 
 #pragma once
 
-#include "tscore/SourceLocation.h"
+#include "tsutil/SourceLocation.h"
 #include "tscore/ink_memory.h"
 
-#define NO_REENTRANT 99999
-#define NO_EVENT NO_REENTRANT
+#define NO_REENTRANT         99999
+#define NO_EVENT             NO_REENTRANT
 #define HISTORY_DEFAULT_SIZE 65
 
 struct HistoryEntry {
   SourceLocation location;
-  unsigned short event = 0;
-  short reentrancy     = 0;
+  unsigned short event;
+  short          reentrancy;
 };
 
 template <unsigned Count> class History
@@ -44,8 +44,8 @@ public:
   {
     int pos                 = history_pos++ % Count;
     history[pos].location   = location;
-    history[pos].event      = (unsigned short)event;
-    history[pos].reentrancy = (short)reentrant;
+    history[pos].event      = static_cast<unsigned short>(event);
+    history[pos].reentrancy = static_cast<short>(reentrant);
   }
 
   void
@@ -74,7 +74,7 @@ public:
   }
 
 private:
-  HistoryEntry history[Count];
+  HistoryEntry history[Count] = {};
 
   unsigned int history_pos = 0;
 };

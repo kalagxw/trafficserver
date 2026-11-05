@@ -45,9 +45,9 @@ namespace io
 {
   // TODO(dmorilha): dislike this
   struct IO {
-    TSIOBuffer buffer;
+    TSIOBuffer       buffer;
     TSIOBufferReader reader;
-    TSVIO vio = nullptr;
+    TSVIO            vio = nullptr;
 
     ~IO()
     {
@@ -60,17 +60,17 @@ namespace io
 
     IO() : buffer(TSIOBufferCreate()), reader(TSIOBufferReaderAlloc(buffer)) {}
     IO(const TSIOBuffer &b) : buffer(b), reader(TSIOBufferReaderAlloc(buffer)) { assert(buffer != nullptr); }
-    static IO *read(TSVConn, TSCont, const int64_t);
+    static std::unique_ptr<IO> read(TSVConn, TSCont, const int64_t);
 
-    static IO *
+    static std::unique_ptr<IO>
     read(TSVConn v, TSCont c)
     {
       return IO::read(v, c, std::numeric_limits<int64_t>::max());
     }
 
-    static IO *write(TSVConn, TSCont, const int64_t);
+    static std::unique_ptr<IO> write(TSVConn, TSCont, const int64_t);
 
-    static IO *
+    static std::unique_ptr<IO>
     write(TSVConn v, TSCont c)
     {
       return IO::write(v, c, std::numeric_limits<int64_t>::max());
@@ -85,33 +85,33 @@ namespace io
 
   struct ReaderSize {
     const TSIOBufferReader reader;
-    const size_t offset;
-    const size_t size;
+    const size_t           offset;
+    const size_t           size;
 
     ReaderSize(const TSIOBufferReader r, const size_t s, const size_t o = 0) : reader(r), offset(o), size(s)
     {
       assert(reader != nullptr);
     }
 
-    ReaderSize(const ReaderSize &) = delete;
-    ReaderSize &operator=(const ReaderSize &) = delete;
-    void *operator new(const std::size_t)     = delete;
+    ReaderSize(const ReaderSize &)              = delete;
+    ReaderSize &operator=(const ReaderSize &)   = delete;
+    void       *operator new(const std::size_t) = delete;
   };
 
   struct ReaderOffset {
     const TSIOBufferReader reader;
-    const size_t offset;
+    const size_t           offset;
 
     ReaderOffset(const TSIOBufferReader r, const size_t o) : reader(r), offset(o) { assert(reader != nullptr); }
-    ReaderOffset(const ReaderOffset &) = delete;
+    ReaderOffset(const ReaderOffset &)            = delete;
     ReaderOffset &operator=(const ReaderOffset &) = delete;
-    void *operator new(const std::size_t)         = delete;
+    void         *operator new(const std::size_t) = delete;
   };
 
   struct WriteOperation;
 
-  typedef std::shared_ptr<WriteOperation> WriteOperationPointer;
-  typedef std::weak_ptr<WriteOperation> WriteOperationWeakPointer;
+  using WriteOperationPointer     = std::shared_ptr<WriteOperation>;
+  using WriteOperationWeakPointer = std::weak_ptr<WriteOperation>;
 
   struct Lock {
     const TSMutex mutex_ = nullptr;
@@ -139,24 +139,24 @@ namespace io
   };
 
   struct WriteOperation : std::enable_shared_from_this<WriteOperation> {
-    TSVConn vconnection_;
-    TSIOBuffer buffer_;
+    TSVConn          vconnection_;
+    TSIOBuffer       buffer_;
     TSIOBufferReader reader_;
-    TSMutex mutex_;
-    TSCont continuation_;
-    TSVIO vio_;
-    TSAction action_;
-    const size_t timeout_;
-    size_t bytes_;
-    bool reenable_;
+    TSMutex          mutex_;
+    TSCont           continuation_;
+    TSVIO            vio_;
+    TSAction         action_;
+    const size_t     timeout_;
+    size_t           bytes_;
+    bool             reenable_;
 
-    static int Handle(TSCont, TSEvent, void *);
+    static int                       Handle(TSCont, TSEvent, void *);
     static WriteOperationWeakPointer Create(const TSVConn, const TSMutex mutex = nullptr, const size_t timeout = 0);
 
     ~WriteOperation();
 
     // noncopyable
-    WriteOperation(const WriteOperation &) = delete;
+    WriteOperation(const WriteOperation &)            = delete;
     WriteOperation &operator=(const WriteOperation &) = delete;
 
     WriteOperation &operator<<(const TSIOBufferReader);
@@ -174,26 +174,26 @@ namespace io
   };
 
   struct Node;
-  typedef std::shared_ptr<Node> NodePointer;
-  typedef std::list<NodePointer> Nodes;
+  using NodePointer = std::shared_ptr<Node>;
+  using Nodes       = std::list<NodePointer>;
 
   struct IOSink;
-  typedef std::shared_ptr<IOSink> IOSinkPointer;
+  using IOSinkPointer = std::shared_ptr<IOSink>;
 
   struct Sink;
-  typedef std::shared_ptr<Sink> SinkPointer;
+  using SinkPointer = std::shared_ptr<Sink>;
 
   struct Data;
-  typedef std::shared_ptr<Data> DataPointer;
+  using DataPointer = std::shared_ptr<Data>;
 
   struct IOSink : std::enable_shared_from_this<IOSink> {
     WriteOperationWeakPointer operation_;
-    DataPointer data_;
+    DataPointer               data_;
 
     ~IOSink();
 
     // noncopyable
-    IOSink(const IOSink &) = delete;
+    IOSink(const IOSink &)            = delete;
     IOSink &operator=(const IOSink &) = delete;
 
     template <class T>
@@ -210,22 +210,22 @@ namespace io
 
     template <class... A>
     static IOSinkPointer
-    Create(A &&... a)
+    Create(A &&...a)
     {
       return IOSinkPointer(new IOSink(WriteOperation::Create(std::forward<A>(a)...)));
     }
 
-    void process();
+    void        process();
     SinkPointer branch();
-    Lock lock();
-    void abort();
+    Lock        lock();
+    void        abort();
 
   private:
     IOSink(WriteOperationWeakPointer &&p) : operation_(std::move(p)) {}
   };
 
   struct Node {
-    typedef std::pair<size_t, bool> Result;
+    using Result = std::pair<size_t, bool>;
     IOSinkPointer ioSink_;
     virtual ~Node() {}
     virtual Node::Result process(const TSIOBuffer) = 0;
@@ -238,7 +238,7 @@ namespace io
   };
 
   struct BufferNode : Node {
-    const TSIOBuffer buffer_;
+    const TSIOBuffer       buffer_;
     const TSIOBufferReader reader_;
 
     ~BufferNode() override
@@ -256,24 +256,24 @@ namespace io
     }
 
     // noncopyable
-    BufferNode(const BufferNode &) = delete;
-    BufferNode &operator=(const BufferNode &) = delete;
-    BufferNode &operator<<(const TSIOBufferReader);
-    BufferNode &operator<<(const ReaderSize &);
-    BufferNode &operator<<(const ReaderOffset &);
-    BufferNode &operator<<(const char *const);
-    BufferNode &operator<<(const std::string &);
+    BufferNode(const BufferNode &)             = delete;
+    BufferNode  &operator=(const BufferNode &) = delete;
+    BufferNode  &operator<<(const TSIOBufferReader);
+    BufferNode  &operator<<(const ReaderSize &);
+    BufferNode  &operator<<(const ReaderOffset &);
+    BufferNode  &operator<<(const char *const);
+    BufferNode  &operator<<(const std::string &);
     Node::Result process(const TSIOBuffer) override;
   };
 
   struct Data : Node {
-    Nodes nodes_;
+    Nodes         nodes_;
     IOSinkPointer root_;
-    bool first_;
+    bool          first_;
 
     template <class T> Data(T &&t) : root_(std::forward<T>(t)), first_(false) {}
     // noncopyable
-    Data(const Data &) = delete;
+    Data(const Data &)            = delete;
     Data &operator=(const Data &) = delete;
 
     Node::Result process(const TSIOBuffer) override;
@@ -284,9 +284,9 @@ namespace io
 
     ~Sink();
 
-    template <class... A> Sink(A &&... a) : data_(std::forward<A>(a)...) {}
+    template <class... A> Sink(A &&...a) : data_(std::forward<A>(a)...) {}
     // noncopyable
-    Sink(const Sink &) = delete;
+    Sink(const Sink &)            = delete;
     Sink &operator=(const Sink &) = delete;
 
     SinkPointer branch();
@@ -302,11 +302,9 @@ namespace io
         assert(data_->root_ != nullptr);
         const bool empty = data_->nodes_.empty();
         if (data_->first_ && empty) {
-          // TSDebug(PLUGIN_TAG, "flushing");
           assert(data_->root_);
           *data_->root_ << std::forward<T>(t);
         } else {
-          // TSDebug(PLUGIN_TAG, "buffering");
           BufferNode *buffer = nullptr;
           if (!empty) {
             buffer = dynamic_cast<BufferNode *>(data_->nodes_.back().get());

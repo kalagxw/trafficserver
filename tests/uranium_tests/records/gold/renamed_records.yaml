@@ -1,0 +1,27 @@
+records:
+  exec_thread:
+    autoconfig:
+      enabled: 1
+  hostdb:
+    enabled: 1
+  http:
+    parent_proxy:
+      disable_connect_tunneling: 0
+  incoming_ip_to_bind: 0.0.0.0
+  outgoing_ip_to_bind: 0.0.0.0
+  output:
+    logfile:
+      name: traffic.out
+  ssl:
+    TLSv1_3:
+      enabled: 0
+    client:
+      TLSv1_3:
+        enabled: 0
+    origin_session_cache:
+      enabled: 0
+    session_cache:
+      mode: 0
+  tunnel:
+    prewarm:
+      enabled: 0

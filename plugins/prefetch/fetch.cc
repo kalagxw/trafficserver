@@ -27,11 +27,18 @@
 #include <netinet/ip.h>
 #include <cstring>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <cinttypes>
 
 #include "ts/ts.h" /* ATS API */
 #include "fetch.h"
 #include "headers.h"
+#include "tscore/ink_inet.h"
+
+namespace
+{
+DbgCtl dbg_ctl_log{PLUGIN_NAME "_log"};
+}
 
 const char *
 getPrefetchMetricsNames(int metric)
@@ -89,8 +96,8 @@ getPrefetchMetricsNames(int metric)
 }
 
 static bool
-createStat(const String &prefix, const String &space, const char *module, const char *statName, TSRecordDataType statType,
-           int &statId)
+createStat(const String &prefix, const String &space, const char *module, const char *statName,
+           TSRecordDataType /* statType ATS_UNUSED */, int &statId)
 {
   String name(prefix);
   name.append(".").append(space);
@@ -224,7 +231,7 @@ BgFetchState::init(const PrefetchConfig &config)
   TSMutexUnlock(_lock);
 
   /* Initialize fetching policy */
-  TSMutexLock(_policyLock);
+  TSMutexLockGuard policy_lock(_policyLock);
 
   if (!config.getFetchPolicy().empty() && 0 != config.getFetchPolicy().compare("simple")) {
     status &= initializePolicy(_policy, config.getFetchPolicy().c_str());
@@ -234,8 +241,6 @@ BgFetchState::init(const PrefetchConfig &config)
   } else {
     PrefetchDebug("Policy not specified or 'simple' policy chosen (skipping)");
   }
-
-  TSMutexUnlock(_policyLock);
 
   return status;
 }
@@ -283,8 +288,8 @@ BgFetchState::release(const String &url)
 bool
 BgFetchState::uniqueAcquire(const String &url)
 {
-  bool permitted       = true;
-  bool throttled       = false;
+  bool   permitted     = true;
+  bool   throttled     = false;
   size_t cachedCounter = 0;
 
   TSMutexLock(_lock);
@@ -317,7 +322,7 @@ BgFetchState::uniqueAcquire(const String &url)
 bool
 BgFetchState::uniqueRelease(const String &url)
 {
-  bool permitted        = true;
+  bool    permitted     = true;
   ssize_t cachedCounter = 0;
 
   TSMutexLock(_lock);
@@ -409,11 +414,12 @@ BgFetch::~BgFetch()
 
 bool
 BgFetch::schedule(BgFetchState *state, const PrefetchConfig &config, bool askPermission, TSMBuffer requestBuffer,
-                  TSMLoc requestHeaderLoc, TSHttpTxn txnp, const char *path, size_t pathLen, const String &cachekey)
+                  TSMLoc requestHeaderLoc, TSHttpTxn txnp, const char *path, size_t pathLen, const String &cachekey,
+                  bool removeQuery, const char *query, size_t queryLen)
 {
-  bool ret       = false;
+  bool     ret   = false;
   BgFetch *fetch = new BgFetch(state, config, askPermission);
-  if (fetch->init(requestBuffer, requestHeaderLoc, txnp, path, pathLen, cachekey)) {
+  if (fetch->init(requestBuffer, requestHeaderLoc, txnp, path, pathLen, cachekey, removeQuery, query, queryLen)) {
     fetch->schedule();
     ret = true;
   } else {
@@ -431,6 +437,8 @@ BgFetch::saveIp(TSHttpTxn txnp)
       memcpy(&client_ip, ip, sizeof(sockaddr_in));
     } else if (ip->sa_family == AF_INET6) {
       memcpy(&client_ip, ip, sizeof(sockaddr_in6));
+    } else if (ip->sa_family == AF_UNIX) {
+      memcpy(&client_ip, ip, sizeof(sockaddr_un));
     } else {
       PrefetchError("unknown address family %d", ip->sa_family);
     }
@@ -451,7 +459,7 @@ BgFetch::addBytes(int64_t b)
  */
 bool
 BgFetch::init(TSMBuffer reqBuffer, TSMLoc reqHdrLoc, TSHttpTxn txnp, const char *fetchPath, size_t fetchPathLen,
-              const String &cachekey)
+              const String &cachekey, bool removeQuery, const char *fetchQuery, size_t fetchQueryLen)
 {
   TSAssert(TS_NULL_MLOC == _headerLoc);
   TSAssert(TS_NULL_MLOC == _urlLoc);
@@ -499,11 +507,29 @@ BgFetch::init(TSMBuffer reqBuffer, TSMLoc reqHdrLoc, TSHttpTxn txnp, const char 
   }
 
   /* Save the path before changing */
-  int pathLen;
+  int         pathLen;
   const char *path = TSUrlPathGet(_mbuf, _urlLoc, &pathLen);
   if (nullptr == path) {
     PrefetchError("failed to get a URL path");
     return false;
+  }
+
+  /* Remove the query string */
+  if (removeQuery) {
+    if (TS_SUCCESS == TSUrlHttpQuerySet(_mbuf, _urlLoc, "", 0)) {
+      PrefetchDebug("original query string removed");
+    } else {
+      PrefetchError("failed to remove original query string");
+    }
+  }
+
+  /* Replace the query string when a derived prefetch path supplied one. */
+  if (nullptr != fetchQuery) {
+    if (TS_SUCCESS == TSUrlHttpQuerySet(_mbuf, _urlLoc, fetchQuery, fetchQueryLen)) {
+      PrefetchDebug("setting URL query to %.*s", (int)fetchQueryLen, fetchQuery);
+    } else {
+      PrefetchError("failed to set URL query to %.*s", (int)fetchQueryLen, fetchQuery);
+    }
   }
 
   /* Now set or remove the prefetch API header */
@@ -534,8 +560,8 @@ BgFetch::init(TSMBuffer reqBuffer, TSMLoc reqHdrLoc, TSHttpTxn txnp, const char 
   }
 
   /* Come up with the host name to be used in the fetch request */
-  const char *hostName = nullptr;
-  int hostNameLen      = 0;
+  const char *hostName    = nullptr;
+  int         hostNameLen = 0;
   if (_config.getReplaceHost().empty()) {
     hostName = TSUrlHostGet(_mbuf, _urlLoc, &hostNameLen);
   } else {
@@ -559,8 +585,8 @@ BgFetch::init(TSMBuffer reqBuffer, TSMLoc reqHdrLoc, TSHttpTxn txnp, const char 
 
   /* Save the URL to be fetched with this fetch for debugging purposes, expensive TSUrlStringGet()
    * but really helpful when debugging multi-remap / host-replacement use cases */
-  int urlLen = 0;
-  char *url  = TSUrlStringGet(_mbuf, _urlLoc, &urlLen);
+  int   urlLen = 0;
+  char *url    = TSUrlStringGet(_mbuf, _urlLoc, &urlLen);
   if (nullptr != url) {
     _url.assign(url, urlLen);
     TSfree(static_cast<void *>(url));
@@ -627,9 +653,9 @@ BgFetch::logAndMetricUpdate(TSEvent event) const
     break;
   }
 
-  if (TSIsDebugTagSet(PLUGIN_NAME "_log")) {
-    TSHRTime now   = TShrtime();
-    double elapsed = static_cast<double>(now - _startTime) / 1000000.0;
+  if (dbg_ctl_log.on()) {
+    TSHRTime now     = TShrtime();
+    double   elapsed = static_cast<double>(now - _startTime) / 1000000.0;
 
     PrefetchDebug("ns=%s bytes=%" PRId64 " time=%1.3lf status=%s url=%s key=%s", _config.getNameSpace().c_str(), _bytes, elapsed,
                   status, _url.c_str(), _cachekey.c_str());
@@ -649,7 +675,7 @@ int
 BgFetch::handler(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
 {
   BgFetch *fetch = static_cast<BgFetch *>(TSContDataGet(contp));
-  int64_t avail;
+  int64_t  avail;
 
   PrefetchDebug("event: %s (%d)", TSHttpEventNameLookup(event), event);
 
@@ -657,8 +683,8 @@ BgFetch::handler(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
   case TS_EVENT_IMMEDIATE:
   case TS_EVENT_TIMEOUT:
     // Debug info for this particular bg fetch (put all debug in here please)
-    if (TSIsDebugTagSet(PLUGIN_NAME)) {
-      char buf[INET6_ADDRSTRLEN];
+    if (dbg_ctl.on()) {
+      char            buf[INET6_ADDRSTRLEN];
       const sockaddr *sockaddress = reinterpret_cast<const sockaddr *>(&fetch->client_ip);
 
       switch (sockaddress->sa_family) {
@@ -670,12 +696,17 @@ BgFetch::handler(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
         inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)sockaddress)->sin6_addr), buf, INET6_ADDRSTRLEN);
         PrefetchDebug("client IPv6 = %s", buf);
         break;
+      case AF_UNIX:
+        char path[TS_UNIX_SIZE];
+        strncpy(path, ats_unix_cast(sockaddress)->sun_path, TS_UNIX_SIZE);
+        PrefetchDebug("client UDS = %s", path);
+        break;
       default:
         TSError("[%s] Unknown address family %d", PLUGIN_NAME, sockaddress->sa_family);
         break;
       }
       PrefetchDebug("Starting background fetch.");
-      dumpHeaders(fetch->_mbuf, fetch->_headerLoc);
+      dumpHeaders(fetch->_headerLoc);
     }
 
     // Setup the NetVC for background fetch
@@ -683,7 +714,6 @@ BgFetch::handler(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
     if ((fetch->vc = TSHttpConnect(reinterpret_cast<sockaddr *>(&fetch->client_ip))) != nullptr) {
       TSHttpHdrPrint(fetch->_mbuf, fetch->_headerLoc, fetch->req_io_buf);
       // We never send a body with the request. ToDo: Do we ever need to support that ?
-      TSIOBufferWrite(fetch->req_io_buf, "\r\n", 2);
 
       fetch->r_vio = TSVConnRead(fetch->vc, contp, fetch->resp_io_buf, INT64_MAX);
       fetch->w_vio = TSVConnWrite(fetch->vc, contp, fetch->req_io_buf_reader, TSIOBufferReaderAvail(fetch->req_io_buf_reader));

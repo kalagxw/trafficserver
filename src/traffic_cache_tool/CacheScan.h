@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -33,31 +33,32 @@
 #include <unordered_map>
 #include "CacheDefs.h"
 
-#include "../../proxy/hdrs/HTTP.h"
+#include "../../include/proxy/hdrs/HTTP.h"
 // using namespace ct;
 namespace ct
 {
 class CacheScan
 {
-  Stripe *stripe;
-  url_matcher *u_matcher;
+  StripeSM                    *stripe    = nullptr;
+  std::unique_ptr<url_matcher> u_matcher = nullptr;
 
 public:
-  CacheScan(Stripe *str, ts::file::path const &path) : stripe(str)
+  CacheScan(StripeSM *str, swoc::file::path const &path) : stripe(str)
   {
     if (!path.empty()) {
-      u_matcher = new url_matcher(path);
+      u_matcher = std::make_unique<url_matcher>(path);
     }
   };
-  CacheScan(Stripe *str) : stripe(str) {}
+  CacheScan(StripeSM *str) : stripe(str) {}
+  ~CacheScan() {}
   Errata Scan(bool search = false);
-  Errata get_alternates(const char *buf, int length, bool search);
-  int unmarshal(HdrHeap *hh, int buf_length, int obj_type, HdrHeapObjImpl **found_obj, RefCountObj *block_ref);
-  Errata unmarshal(char *buf, int len, RefCountObj *block_ref);
+  Errata get_alternates(const char *buf, int length, bool search, ts::VersionNumber version);
+  int    unmarshal(HdrHeap *hh, int buf_length, int obj_type, HdrHeapObjImpl **found_obj, RefCountObj *block_ref);
+  Errata unmarshal(char *buf, int len, RefCountObj *block_ref, ts::VersionNumber version);
   Errata unmarshal(HTTPHdrImpl *obj, intptr_t offset);
   Errata unmarshal(URLImpl *obj, intptr_t offset);
   Errata unmarshal(MIMEFieldBlockImpl *mf, intptr_t offset);
   Errata unmarshal(MIMEHdrImpl *obj, intptr_t offset);
-  bool check_url(ts::MemSpan<char> &mem, URLImpl *url);
+  bool   check_url(swoc::MemSpan<char> &mem, URLImpl *url);
 };
 } // namespace ct

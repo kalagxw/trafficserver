@@ -2,7 +2,7 @@
 
   Crash logging helper support
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -21,12 +21,20 @@
   limitations under the License.
  */
 
-#include "Main.h"
-#include "tscore/I_Layout.h"
-#include "tscore/I_Version.h"
-#include "I_Net.h"
+#include "Crash.h"
+#include "swoc/swoc_file.h"
+#include "records/RecCore.h"
+#include "tscore/Layout.h"
+#include "tscore/Version.h"
 #include "tscore/signals.h"
-#include "tscore/ink_cap.h"
+
+#include <string>
+#include <unistd.h>
+#include <fcntl.h>
+#if defined(__linux__)
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#endif
 
 // ucontext.h is deprecated on Darwin, and we really only need it on Linux, so only
 // include it if we are planning to use it.
@@ -34,21 +42,27 @@
 #include <ucontext.h>
 #endif
 
-extern AppVersionInfo appVersionInfo;
+namespace
+{
 
-static pid_t crash_logger_pid = -1;
-static int crash_logger_fd    = NO_FD;
+constexpr int NO_FD = swoc::file::NO_FD;
 
-static char *
+pid_t crash_logger_pid = -1;
+int   crash_logger_fd  = NO_FD;
+
+DbgCtl dbg_ctl_server{"server"};
+
+char *
 create_logger_path()
 {
-  RecString name;
-  std::string bindir;
+  std::string    bindir;
   ats_scoped_str fullpath;
 
-  if (RecGetRecordString_Xmalloc("proxy.config.crash_log_helper", &name) != REC_ERR_OKAY) {
+  auto rec_str{RecGetRecordStringAlloc("proxy.config.crash_log_helper")};
+  if (!rec_str) {
     return nullptr;
   }
+  RecString name{ats_stringdup(rec_str)};
 
   // Take an absolute path as it is ...
   if (name == nullptr || *name == '/') {
@@ -63,7 +77,7 @@ create_logger_path()
   return fullpath.release();
 }
 
-static bool
+bool
 check_logger_path(const char *path)
 {
   struct stat sbuf;
@@ -81,15 +95,17 @@ check_logger_path(const char *path)
   return true;
 }
 
+} // end anonymous namespace
+
 void
 crash_logger_init(const char *user)
 {
   ats_scoped_str logger(create_logger_path());
-  const char *basename;
+  const char    *basename;
 
   pid_t child;
-  int status;
-  int pipe[2];
+  int   status;
+  int   pipe[2];
 
   // Do nothing the log helper was set to NULL, or we can't find it.
   if (!logger || !check_logger_path(logger)) {
@@ -131,9 +147,19 @@ crash_logger_init(const char *user)
   crash_logger_pid = child;
   crash_logger_fd  = pipe[0];
 
+  // Don't leak this socket into later fork+exec children; the logger relies on seeing EOF
+  // here when we (its parent) exit.
+  fcntl(crash_logger_fd, F_SETFD, FD_CLOEXEC);
+
+#if defined(__linux__)
+  // Allow the crash logger to ptrace us. Without this, Yama's ptrace_scope=1
+  // (the default on many distros) prevents a child process from tracing its parent.
+  prctl(PR_SET_PTRACER, crash_logger_pid, 0, 0, 0);
+#endif
+
   // Wait for the helper to stop
   if (waitpid(crash_logger_pid, &status, WUNTRACED) > 0) {
-    Debug("server", "waited on PID %ld, %s", (long)crash_logger_pid, WIFSTOPPED(status) ? "STOPPED" : "???");
+    Dbg(dbg_ctl_server, "waited on PID %ld, %s", (long)crash_logger_pid, WIFSTOPPED(status) ? "STOPPED" : "???");
 
     if (WIFEXITED(status)) {
       Warning("crash logger '%s' unexpectedly exited with status %d", (const char *)logger, WEXITSTATUS(status));
@@ -153,12 +179,25 @@ crash_logger_invoke(int signo, siginfo_t *info, void *ctx)
     // Let the crash logger free ...
     kill(crash_logger_pid, SIGCONT);
 
+    // Notify the logger that this is a real crash; a plain exit closes the socket (EOF)
+    // instead. Written on every platform, ahead of the Linux-only thread payload below.
+    ATS_UNUSED_RETURN(write(crash_logger_fd, &signo, sizeof(signo)));
+
 #if defined(__linux__)
     // Write the crashing thread information to the crash logger. While the siginfo_t is blesses by POSIX, the
     // ucontext_t can contain pointers, so it's highly platform dependent. On Linux with glibc, however, it is
     // a single memory block that we can just puke out.
+    pid_t crashing_tid = static_cast<pid_t>(syscall(SYS_gettid));
+    ATS_UNUSED_RETURN(write(crash_logger_fd, &crashing_tid, sizeof(crashing_tid)));
     ATS_UNUSED_RETURN(write(crash_logger_fd, info, sizeof(siginfo_t)));
     ATS_UNUSED_RETURN(write(crash_logger_fd, static_cast<ucontext_t *>(ctx), sizeof(ucontext_t)));
+
+    // Send zero-length backtrace. We cannot safely generate a backtrace here
+    // because backtrace() can acquire locks (e.g., in the dynamic linker) that
+    // the crashing thread might be holding, causing a deadlock. The crash
+    // logger will get the backtrace via ptrace from a separate process instead.
+    uint32_t bt_len = 0;
+    ATS_UNUSED_RETURN(write(crash_logger_fd, &bt_len, sizeof(bt_len)));
 #endif
 
     close(crash_logger_fd);
@@ -169,6 +208,6 @@ crash_logger_invoke(int signo, siginfo_t *info, void *ctx)
   }
 
   // Log the signal, dump a stack trace and core.
-  signal_format_siginfo(signo, info, appVersionInfo.AppStr); // XXX Add timestamp ...
+  signal_format_siginfo(signo, info, AppVersionInfo::get_version().application()); // XXX Add timestamp ...
   signal_crash_handler(signo, info, ctx);
 }

@@ -1,6 +1,6 @@
 /** @file
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -21,20 +21,29 @@
 
 #include <cstdio>
 #include <sys/mman.h>
+
+#include "swoc/bwf_ip.h"
+
 #include "tscore/Diags.h"
 #include "tscore/ink_align.h"
 
-#define DEBUG_TAG "hugepages"
+namespace
+{
 
 #ifdef MAP_HUGETLB
 #define MEMINFO_PATH "/proc/meminfo"
-#define LINE_SIZE 256
-#define TOKEN "Hugepagesize:"
-#define TOKEN_SIZE (strlen(TOKEN))
+#define LINE_SIZE    256
+#define TOKEN        "Hugepagesize:"
+#define TOKEN_SIZE   (strlen(TOKEN))
 
-static int hugepage_size = -1;
-static bool hugepage_enabled;
+int  hugepage_size = -1;
+bool hugepage_enabled;
 #endif
+
+DbgCtl dbg_ctl_hugepages{"hugepages"};
+DbgCtl dbg_ctl_hugepages_init{"hugepages_init"};
+
+} // namespace
 
 size_t
 ats_hugepage_size()
@@ -42,7 +51,7 @@ ats_hugepage_size()
 #ifdef MAP_HUGETLB
   return hugepage_size;
 #else
-  Debug(DEBUG_TAG, "MAP_HUGETLB not defined");
+  Dbg(dbg_ctl_hugepages, "MAP_HUGETLB not defined");
   return 0;
 #endif
 }
@@ -58,24 +67,24 @@ ats_hugepage_enabled()
 }
 
 void
-ats_hugepage_init(int enabled)
+ats_hugepage_init([[maybe_unused]] int enabled)
 {
 #ifdef MAP_HUGETLB
   FILE *fp;
-  char line[LINE_SIZE];
+  char  line[LINE_SIZE];
   char *p, *ep;
 
   hugepage_size = 0;
 
   if (!enabled) {
-    Debug(DEBUG_TAG "_init", "hugepages not enabled");
+    Dbg(dbg_ctl_hugepages_init, "hugepages not enabled");
     return;
   }
 
   fp = fopen(MEMINFO_PATH, "r");
 
   if (fp == nullptr) {
-    Debug(DEBUG_TAG "_init", "Cannot open file %s", MEMINFO_PATH);
+    Dbg(dbg_ctl_hugepages_init, "Cannot open file %s", MEMINFO_PATH);
     return;
   }
 
@@ -100,39 +109,38 @@ ats_hugepage_init(int enabled)
     hugepage_enabled = true;
   }
 
-  Debug(DEBUG_TAG "_init", "Hugepage size = %d", hugepage_size);
+  Dbg(dbg_ctl_hugepages_init, "Hugepage size = %d", hugepage_size);
 #else
-  Debug(DEBUG_TAG "_init", "MAP_HUGETLB not defined");
+  Dbg(dbg_ctl_hugepages_init, "MAP_HUGETLB not defined");
 #endif
 }
 
 void *
-ats_alloc_hugepage(size_t s)
+ats_alloc_hugepage([[maybe_unused]] size_t s)
 {
 #ifdef MAP_HUGETLB
   size_t size;
-  void *mem;
+  void  *mem;
 
   size = INK_ALIGN(s, ats_hugepage_size());
 
   mem = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
 
   if (mem == MAP_FAILED) {
-    Debug(DEBUG_TAG, "Could not allocate hugepages size = %zu", size);
+    Dbg(dbg_ctl_hugepages, "Could not allocate hugepages size = %zu", size);
     return nullptr;
   }
 
-  Debug(DEBUG_TAG, "Request/Allocation (%zu/%zu) {%p}", s, size, mem);
+  Dbg(dbg_ctl_hugepages, "Request/Allocation (%zu/%zu) {%p}", s, size, mem);
   return mem;
 #else
-  (void)s;
-  Debug(DEBUG_TAG, "MAP_HUGETLB not defined");
+  Dbg(dbg_ctl_hugepages, "MAP_HUGETLB not defined");
   return nullptr;
 #endif
 }
 
 bool
-ats_free_hugepage(void *ptr, size_t s)
+ats_free_hugepage([[maybe_unused]] void *ptr, [[maybe_unused]] size_t s)
 {
 #ifdef MAP_HUGETLB
   size_t size;
@@ -140,9 +148,7 @@ ats_free_hugepage(void *ptr, size_t s)
   size = INK_ALIGN(s, ats_hugepage_size());
   return (munmap(ptr, size) == 0);
 #else
-  (void)ptr;
-  (void)s;
-  Debug(DEBUG_TAG, "MAP_HUGETLB not defined");
+  Dbg(dbg_ctl_hugepages, "MAP_HUGETLB not defined");
   return false;
 #endif
 }

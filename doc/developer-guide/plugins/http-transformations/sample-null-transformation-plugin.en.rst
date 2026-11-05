@@ -16,6 +16,7 @@
    under the License.
 
 .. include:: ../../../common.defs
+.. default-domain:: cpp
 
 .. _developer-plugins-http-transformations-null-transform:
 
@@ -38,7 +39,7 @@ Below is an overview of the null transform plugin:
         void
         TSPluginInit (int argc, const char *argv[]) {
             TSHttpHookAdd (TS_HTTP_READ_RESPONSE_HDR_HOOK,
-                    TSContCreate (transform_plugin, NULL));
+                    TSContCreate (transform_plugin, nullptr));
 
     With this ``TSPluginInit`` routine, the plugin is called back every
     time Traffic Server reads a response header.
@@ -48,7 +49,7 @@ Below is an overview of the null transform plugin:
     .. code-block:: c
 
         static int transform_plugin (TSCont contp, TSEvent event, void *edata) {
-            TSHttpTxn txnp = (TSHttpTxn) edata;
+            TSHttpTxn txnp = static_cast<TSHttpTxn>(edata);
             switch (event) {
                 case TS_EVENT_HTTP_READ_RESPONSE_HDR:
                     if (transformable (txnp)) {
@@ -169,7 +170,7 @@ Below is an overview of the null transform plugin:
     send ``WRITE_READY`` events when they need more data; when data is
     available, the upstream vconnections re-enable the downstream
     vconnections. In this instance, the ``TSVIOReenable`` function sends
-    ``TS_EVENT_IMMEDIATE``.
+    :enumerator:`TS_EVENT_IMMEDIATE`.
 
     **Passing Data Through a Transformation**
     {#PassingDataThroughaTransformation}

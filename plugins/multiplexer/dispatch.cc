@@ -31,6 +31,8 @@
 #error Please define a PLUGIN_TAG before including this file.
 #endif
 
+using multiplexer_ns::dbg_ctl;
+
 extern Statistics statistics;
 
 size_t timeout;
@@ -52,7 +54,7 @@ Request::Request(const std::string &h, const TSMBuffer b, const TSMLoc l) : host
   assert(TSHttpHdrLengthGet(b, l) >= length);
 }
 
-Request::Request(Request &&that) : host(std::move(that.host)), length(that.length), io(std::move(that.io))
+Request::Request(Request &&that) noexcept : host(std::move(that.host)), length(that.length), io(std::move(that.io))
 {
   assert(!host.empty());
   assert(length > 0);
@@ -60,15 +62,17 @@ Request::Request(Request &&that) : host(std::move(that.host)), length(that.lengt
 }
 
 Request &
-Request::operator=(const Request &r)
+Request::operator=(Request &&r) noexcept
 {
-  host   = r.host;
-  length = r.length;
-  io.reset(const_cast<Request &>(r).io.release());
-  assert(!host.empty());
-  assert(length > 0);
-  assert(io.get() != nullptr);
-  assert(r.io.get() == nullptr);
+  if (this != &r) {
+    host   = std::move(r.host);
+    length = r.length;
+    io     = std::move(r.io);
+    assert(!host.empty());
+    assert(length > 0);
+    assert(io.get() != nullptr);
+    assert(r.io.get() == nullptr);
+  }
   return *this;
 }
 
@@ -82,7 +86,7 @@ copy(const TSIOBufferReader &r, const TSIOBuffer b)
   uint64_t length = 0;
 
   for (; block; block = TSIOBufferBlockNext(block)) {
-    int64_t size              = 0;
+    int64_t           size    = 0;
     const void *const pointer = TSIOBufferBlockReadStart(block, r, &size);
 
     if (pointer != nullptr && size > 0) {
@@ -114,13 +118,13 @@ read(const TSIOBufferReader &r, std::string &o, int64_t l = 0)
   uint64_t length = 0;
 
   for (; block && l > 0; block = TSIOBufferBlockNext(block)) {
-    int64_t size              = 0;
+    int64_t           size    = 0;
     const char *const pointer = TSIOBufferBlockReadStart(block, r, &size);
     if (pointer != nullptr && size > 0) {
       size = std::min(size, l);
       o.append(pointer, size);
       length += size;
-      l -= size;
+      l      -= size;
     }
   }
 
@@ -128,19 +132,19 @@ read(const TSIOBufferReader &r, std::string &o, int64_t l = 0)
 }
 
 uint64_t
-read(const TSIOBuffer &b, std::string &o, const int64_t l = 0)
+read(const TSIOBuffer &b, std::string &o)
 {
   TSIOBufferReader reader = TSIOBufferReaderAlloc(b);
-  const uint64_t length   = read(reader, o);
+  const uint64_t   length = read(reader, o);
   TSIOBufferReaderFree(reader);
   return length;
 }
 
 class Handler
 {
-  int64_t length;
+  int64_t        length;
   struct timeval start;
-  std::string response;
+  std::string    response;
 
 public:
   const std::string url;
@@ -169,12 +173,12 @@ public:
   void
   header(const TSMBuffer b, const TSMLoc l)
   {
-    if (TSIsDebugTagSet(PLUGIN_TAG) > 0) {
+    if (dbg_ctl.on()) {
       const TSIOBuffer buffer = TSIOBufferCreate();
       TSHttpHdrPrint(b, l, buffer);
       std::string buf;
       read(buffer, buf);
-      TSDebug(PLUGIN_TAG, "Response header for \"%s\" was:\n%s", url.c_str(), buf.c_str());
+      Dbg(dbg_ctl, "Response header for \"%s\" was:\n%s", url.c_str(), buf.c_str());
       TSIOBufferDestroy(buffer);
     }
   }
@@ -183,11 +187,11 @@ public:
   data(const TSIOBufferReader r, const int64_t l)
   {
     length += l;
-    if (TSIsDebugTagSet(PLUGIN_TAG) > 0) {
-      std::string buffer;
-      const uint64_t length = read(r, buffer, l);
-      response += buffer;
-      TSDebug(PLUGIN_TAG, "Receiving response chunk \"%s\" of %" PRIu64 " bytes", buffer.c_str(), length);
+    if (dbg_ctl.on()) {
+      std::string    buffer;
+      const uint64_t length  = read(r, buffer, l);
+      response              += buffer;
+      Dbg(dbg_ctl, "Receiving response chunk \"%s\" of %" PRIu64 " bytes", buffer.c_str(), length);
     }
   }
 
@@ -198,8 +202,8 @@ public:
 
     gettimeofday(&end, nullptr);
 
-    if (TSIsDebugTagSet(PLUGIN_TAG) > 0) {
-      TSDebug(PLUGIN_TAG, "Response for \"%s\" was:\n%s", url.c_str(), response.c_str());
+    if (dbg_ctl.on()) {
+      Dbg(dbg_ctl, "Response for \"%s\" was:\n%s", url.c_str(), response.c_str());
     }
 
     const long diff = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_usec - start.tv_usec);
@@ -217,8 +221,8 @@ generateRequests(const Origins &o, const TSMBuffer buffer, const TSMLoc location
   assert(buffer != nullptr);
   assert(location != nullptr);
 
-  Origins::const_iterator iterator  = o.begin();
-  const Origins::const_iterator end = o.end();
+  Origins::const_iterator       iterator = o.begin();
+  const Origins::const_iterator end      = o.end();
 
   OriginalRequest request(buffer, location);
   request.urlScheme("");
@@ -229,6 +233,7 @@ generateRequests(const Origins &o, const TSMBuffer buffer, const TSMLoc location
     const std::string &host = *iterator;
     assert(!host.empty());
     request.hostHeader(host);
+    Dbg(dbg_ctl, "Preparing request for \"%s\"", host.c_str());
     r.push_back(Request(host, buffer, location));
   }
 }
@@ -237,9 +242,9 @@ void
 addBody(Requests &r, const TSIOBufferReader re)
 {
   assert(re != nullptr);
-  Requests::iterator iterator  = r.begin();
-  const Requests::iterator end = r.end();
-  const int64_t length         = TSIOBufferReaderAvail(re);
+  Requests::iterator       iterator = r.begin();
+  const Requests::iterator end      = r.end();
+  const int64_t            length   = TSIOBufferReaderAvail(re);
   if (length == 0) {
     return;
   }
@@ -255,18 +260,18 @@ addBody(Requests &r, const TSIOBufferReader re)
 void
 dispatch(Requests &r, const int t)
 {
-  Requests::iterator iterator  = r.begin();
-  const Requests::iterator end = r.end();
+  Requests::iterator       iterator = r.begin();
+  const Requests::iterator end      = r.end();
   for (; iterator != end; ++iterator) {
     assert(iterator->io.get() != nullptr);
-    if (TSIsDebugTagSet(PLUGIN_TAG) > 0) {
-      TSDebug(PLUGIN_TAG, "Dispatching %i bytes to \"%s\"", iterator->length, iterator->host.c_str());
+    if (dbg_ctl.on()) {
+      Dbg(dbg_ctl, "Dispatching %i bytes to \"%s\"", iterator->length, iterator->host.c_str());
       std::string b;
       read(iterator->io->reader, b);
       assert(b.size() == static_cast<uint64_t>(iterator->length));
-      TSDebug(PLUGIN_TAG, "%s", b.c_str());
+      Dbg(dbg_ctl, "%s", b.c_str());
     }
     // forwarding iterator->io pointer ownership
-    ats::get(iterator->io.release(), iterator->length, Handler(iterator->host), t);
+    ats::get(std::move(iterator->io), iterator->length, Handler(iterator->host), t);
   }
 }

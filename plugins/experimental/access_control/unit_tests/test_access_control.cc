@@ -21,13 +21,14 @@
  * @brief Unit tests for functions implementing access control
  */
 
-#define CATCH_CONFIG_MAIN      /* include main function */
-#include <catch.hpp>           /* catch unit-test framework */
-#include "../access_control.h" /* access_control utility */
+#include <catch2/catch_test_macros.hpp> /* catch unit-test framework */
+#include "../access_control.h"          /* access_control utility */
 
 /* AccessToken ***************************************************************************************************************** */
 
-StringMap secrets = {{"1", "1234567890"}};
+StringMap secrets = {
+  {"1", "1234567890"}
+};
 
 bool enableDebug = true;
 
@@ -73,7 +74,7 @@ TEST_CASE("AssetToken: simple test", "[AssetToken][access_control][utility]")
 TEST_CASE("AssetToken: empty token", "[AssetToken][access_control][utility]")
 {
   KvpAccessTokenConfig tokenConfig;
-  KvpAccessToken token(tokenConfig, secrets, enableDebug);
+  KvpAccessToken       token(tokenConfig, secrets, enableDebug);
   CHECK(INVALID_SYNTAX == token.parse(""));
 }
 
@@ -87,7 +88,7 @@ TEST_CASE("AssetToken: invalid field", "[AssetToken][access_control][utility]")
 
 TEST_CASE("AssetToken: empty field", "[AssetToken][access_control][utility]")
 {
-  KvpAccessTokenConfig tokenConfig;
+  KvpAccessTokenConfig  tokenConfig;
   KvpAccessTokenBuilder atb(tokenConfig, secrets);
   atb.addSubject("ABCDEFG");
   atb.addExpiration(1234567);
@@ -105,7 +106,7 @@ TEST_CASE("AssetToken: empty field", "[AssetToken][access_control][utility]")
 
 TEST_CASE("AssetToken: missing required fields", "[AssetToken][access_control][utility]")
 {
-  KvpAccessTokenConfig tokenConfig;
+  KvpAccessTokenConfig  tokenConfig;
   KvpAccessTokenBuilder atb(tokenConfig, secrets);
 
   class UnitKvpAccessToken : public KvpAccessToken
@@ -151,10 +152,10 @@ TEST_CASE("AssetToken: simple HMAC SHA256 signature test", "[AssetToken][access_
   class UnitKvpAccessToken : public KvpAccessToken
   {
   public:
+    using KvpAccessToken::_messageDigest;
     using KvpAccessToken::KvpAccessToken;
     using KvpAccessToken::validateSemantics;
     using KvpAccessToken::validateSignature;
-    using KvpAccessToken::_messageDigest;
   };
 
   UnitKvpAccessToken token(tokenConfig, secrets, enableDebug);

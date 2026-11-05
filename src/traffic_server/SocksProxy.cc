@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -27,20 +27,20 @@
 
 
 */
-#include "tscore/ink_platform.h"
-#include "P_Net.h"
-#include "I_OneWayTunnel.h"
-#include "HttpSessionAccept.h"
+#include "../iocore/net/P_Socks.h"
+#include "iocore/utils/OneWayTunnel.h"
+#include "proxy/http/HttpSessionAccept.h"
+#include "tsutil/Metrics.h"
 
-enum {
-  socksproxy_http_connections_stat,
-  socksproxy_tunneled_connections_stat,
+static DbgCtl dbg_ctl_SocksProxy("SocksProxy");
 
-  socksproxy_stat_count
-};
-static RecRawStatBlock *socksproxy_stat_block;
-
-#define SOCKSPROXY_INC_STAT(x) RecIncrRawStat(socksproxy_stat_block, mutex->thread_holding, x)
+namespace
+{
+struct {
+  ts::Metrics::Counter::AtomicType *http_connections;
+  ts::Metrics::Counter::AtomicType *tunneled_connections;
+} stats;
+} // namespace
 
 struct SocksProxy;
 using SocksProxyHandler = int (SocksProxy::*)(int, void *);
@@ -117,39 +117,41 @@ struct SocksProxy : public Continuation {
   int setupHttpRequest(unsigned char *p);
   int sendResp(bool granted);
 
-  void init(NetVConnection *netVC);
+  void init(NetVConnection *netVC, HttpSessionAccept *http_acceptor);
   void free();
 
 private:
-  NetVConnection *clientVC = nullptr;
-  VIO *clientVIO           = nullptr;
+  NetVConnection *clientVC  = nullptr;
+  VIO            *clientVIO = nullptr;
 
-  MIOBuffer *buf         = nullptr;
-  IOBufferReader *reader = nullptr;
-  Event *timeout         = nullptr;
+  MIOBuffer      *buf     = nullptr;
+  IOBufferReader *reader  = nullptr;
+  Event          *timeout = nullptr;
 
-  SocksAuthHandler auth_handler = nullptr;
-  SocksProxyHandler vc_handler  = nullptr;
-  Action *pending_action        = nullptr;
+  SocksAuthHandler   auth_handler   = nullptr;
+  SocksProxyHandler  vc_handler     = nullptr;
+  Action            *pending_action = nullptr;
+  HttpSessionAccept *http_acceptor  = nullptr;
 
-  unsigned char version = 0;
-  int port              = 0;
-  int state             = SOCKS_INIT;
-  int recursion         = 0;
+  unsigned char version   = 0;
+  int           port      = 0;
+  int           state     = SOCKS_INIT;
+  int           recursion = 0;
 };
 
-ClassAllocator<SocksProxy> socksProxyAllocator("socksProxyAllocator");
+ClassAllocator<SocksProxy, false> socksProxyAllocator("socksProxyAllocator");
 
 void
-SocksProxy::init(NetVConnection *netVC)
+SocksProxy::init(NetVConnection *netVC, HttpSessionAccept *http_accept)
 {
-  mutex  = new_ProxyMutex();
-  buf    = new_MIOBuffer(BUFFER_SIZE_INDEX_32K);
-  reader = buf->alloc_reader();
+  mutex         = new_ProxyMutex();
+  buf           = new_MIOBuffer(BUFFER_SIZE_INDEX_32K);
+  reader        = buf->alloc_reader();
+  http_acceptor = http_accept;
 
   SCOPED_MUTEX_LOCK(lock, mutex, this_ethread());
 
-  SET_HANDLER(static_cast<EventHandler>(&SocksProxy::acceptEvent));
+  SET_HANDLER(&SocksProxy::acceptEvent);
 
   handleEvent(NET_EVENT_ACCEPT, netVC);
 }
@@ -171,14 +173,14 @@ SocksProxy::acceptEvent(int event, void *data)
 {
   ink_assert(event == NET_EVENT_ACCEPT);
   state = SOCKS_ACCEPT;
-  Debug("SocksProxy", "Proxy got accept event");
+  Dbg(dbg_ctl_SocksProxy, "Proxy got accept event");
 
   clientVC = (NetVConnection *)data;
   clientVC->socks_addr.reset();
 
   buf->reset();
 
-  SET_HANDLER(static_cast<EventHandler>(&SocksProxy::mainEvent));
+  SET_HANDLER(&SocksProxy::mainEvent);
   vc_handler = &SocksProxy::state_read_client_request;
 
   timeout   = this_ethread()->schedule_in(this, HRTIME_SECONDS(netProcessor.socks_conf_stuff->socks_timeout));
@@ -202,14 +204,14 @@ SocksProxy::mainEvent(int event, void *data)
     if (vc_handler) {
       ret = (this->*vc_handler)(event, data);
     } else {
-      Debug("SocksProxy", "Ignore event = %s state = %d", get_vc_event_name(event), state);
+      Dbg(dbg_ctl_SocksProxy, "Ignore event = %s state = %d", get_vc_event_name(event), state);
     }
     break;
 
   case NET_EVENT_OPEN: {
     pending_action = nullptr;
     ink_assert(state == SERVER_TUNNEL);
-    Debug("SocksProxy", "open to Socks server succeeded");
+    Dbg(dbg_ctl_SocksProxy, "open to Socks server succeeded");
 
     NetVConnection *serverVC;
     serverVC = (NetVConnection *)data;
@@ -232,12 +234,12 @@ SocksProxy::mainEvent(int event, void *data)
     vc_handler     = &SocksProxy::state_send_socks_reply;
     sendResp(false);
     state = RESP_TO_CLIENT;
-    Debug("SocksProxy", "open to Socks server failed");
+    Dbg(dbg_ctl_SocksProxy, "open to Socks server failed");
     break;
 
   case EVENT_INTERVAL:
     timeout = nullptr;
-    Debug("SocksProxy", "SocksProxy timeout, state = %d", state);
+    Dbg(dbg_ctl_SocksProxy, "SocksProxy timeout, state = %d", state);
     state = SOCKS_ERROR;
     break;
 
@@ -245,7 +247,7 @@ SocksProxy::mainEvent(int event, void *data)
   case VC_EVENT_ERROR:
   case VC_EVENT_INACTIVITY_TIMEOUT:
   case VC_EVENT_ACTIVE_TIMEOUT:
-    Debug("SocksProxy", "VC_EVENT (state: %d error: %s)", state, get_vc_event_name(event));
+    Dbg(dbg_ctl_SocksProxy, "VC_EVENT (state: %d error: %s)", state, get_vc_event_name(event));
     state = SOCKS_ERROR;
     break;
 
@@ -268,7 +270,7 @@ SocksProxy::mainEvent(int event, void *data)
     }
 
     if (clientVC) {
-      Debug("SocksProxy", "Closing clientVC on error");
+      Dbg(dbg_ctl_SocksProxy, "Closing clientVC on error");
       clientVC->do_io_close();
       clientVC = nullptr;
     }
@@ -299,7 +301,7 @@ SocksProxy::state_read_client_request(int event, void *data)
 
   unsigned char *p = (unsigned char *)reader->start();
 
-  Debug("SocksProxy", "Accepted connection from a version %d client", static_cast<int>(p[0]));
+  Dbg(dbg_ctl_SocksProxy, "Accepted connection from a version %d client", static_cast<int>(p[0]));
 
   switch (p[0]) {
   case SOCKS4_VERSION:
@@ -322,7 +324,7 @@ SocksProxy::state_read_client_request(int event, void *data)
 }
 
 int
-SocksProxy::state_read_socks4_client_request(int event, void *data)
+SocksProxy::state_read_socks4_client_request([[maybe_unused]] int event, [[maybe_unused]] void *data)
 {
   ink_assert(state == SOCKS_ACCEPT);
 
@@ -338,7 +340,7 @@ SocksProxy::state_read_socks4_client_request(int event, void *data)
   }
 
   unsigned char *p = (unsigned char *)reader->start();
-  int i;
+  int            i;
   // Skip UserID
   for (i = 8; i < n && p[i] != 0; i++) {
     ;
@@ -352,15 +354,15 @@ SocksProxy::state_read_socks4_client_request(int event, void *data)
 
     return parse_socks_client_request(p);
   } else {
-    Debug("SocksProxy", "Need more data to parse userid for Socks: %d\n", p[0]);
+    Dbg(dbg_ctl_SocksProxy, "Need more data to parse userid for Socks: %d\n", p[0]);
     return EVENT_CONT;
   }
 }
 
 int
-SocksProxy::state_read_socks5_client_auth_methods(int event, void *data)
+SocksProxy::state_read_socks5_client_auth_methods([[maybe_unused]] int event, [[maybe_unused]] void *data)
 {
-  int64_t n;
+  int64_t        n;
   unsigned char *p;
 
   ink_assert(state == SOCKS_ACCEPT);
@@ -400,7 +402,7 @@ SocksProxy::state_read_socks5_client_auth_methods(int event, void *data)
     vc_handler = &SocksProxy::state_send_socks5_auth_method;
     clientVC->do_io_write(this, n_bytes, reader, false);
   } else {
-    Debug("SocksProxy", "Auth_handler returned error\n");
+    Dbg(dbg_ctl_SocksProxy, "Auth_handler returned error\n");
     state = SOCKS_ERROR;
   }
 
@@ -408,7 +410,7 @@ SocksProxy::state_read_socks5_client_auth_methods(int event, void *data)
 }
 
 int
-SocksProxy::state_send_socks5_auth_method(int event, void *data)
+SocksProxy::state_send_socks5_auth_method(int event, [[maybe_unused]] void *data)
 {
   ink_assert(state == SOCKS_ACCEPT);
   switch (event) {
@@ -425,7 +427,7 @@ SocksProxy::state_send_socks5_auth_method(int event, void *data)
     break;
   case VC_EVENT_WRITE_READY:
   default:
-    Debug("SocksProxy", "Received unexpected event: %s\n", get_vc_event_name(event));
+    Dbg(dbg_ctl_SocksProxy, "Received unexpected event: %s\n", get_vc_event_name(event));
     break;
   }
 
@@ -433,9 +435,9 @@ SocksProxy::state_send_socks5_auth_method(int event, void *data)
 }
 
 int
-SocksProxy::state_read_socks5_client_request(int event, void *data)
+SocksProxy::state_read_socks5_client_request(int event, [[maybe_unused]] void *data)
 {
-  int64_t n;
+  int64_t        n;
   unsigned char *p;
 
   ink_assert(state == AUTH_DONE);
@@ -470,7 +472,7 @@ SocksProxy::state_read_socks5_client_request(int event, void *data)
   default:
     req_len = INT_MAX;
     state   = SOCKS_ERROR;
-    Debug("SocksProxy", "Illegal address type(%d)", static_cast<int>(p[3]));
+    Dbg(dbg_ctl_SocksProxy, "Illegal address type(%d)", static_cast<int>(p[3]));
   }
 
   if (state == SOCKS_ERROR) {
@@ -506,15 +508,15 @@ SocksProxy::parse_socks_client_request(unsigned char *p)
     sendResp(true);
     state = HTTP_REQ;
   } else {
-    SOCKSPROXY_INC_STAT(socksproxy_tunneled_connections_stat);
-    Debug("SocksProxy", "Tunnelling the connection for port %d", port);
+    ts::Metrics::Counter::increment(stats.tunneled_connections);
+    Dbg(dbg_ctl_SocksProxy, "Tunnelling the connection for port %d", port);
 
     if (clientVC->socks_addr.type != SOCKS_ATYPE_IPV4) {
       // We dont support other kinds of addresses for tunnelling
       // if this is a hostname we could do host look up here
       ret = mainEvent(NET_EVENT_OPEN_FAILED, nullptr);
     } else {
-      uint32_t ip;
+      uint32_t           ip;
       struct sockaddr_in addr;
 
       memcpy(&ip, &p[4], 4);
@@ -531,7 +533,7 @@ SocksProxy::parse_socks_client_request(unsigned char *p)
       vc_options.socks_support = p[1];
       vc_options.socks_version = version;
 
-      Action *action = netProcessor.connect_re(this, ats_ip_sa_cast(&addr), &vc_options);
+      Action *action = netProcessor.connect_re(this, ats_ip_sa_cast(&addr), vc_options);
       if (action != ACTION_RESULT_DONE) {
         ink_release_assert(pending_action == nullptr);
         pending_action = action;
@@ -543,7 +545,7 @@ SocksProxy::parse_socks_client_request(unsigned char *p)
 }
 
 int
-SocksProxy::state_handing_over_http_request(int event, void *data)
+SocksProxy::state_handing_over_http_request(int event, [[maybe_unused]] void *data)
 {
   int ret = EVENT_DONE;
 
@@ -551,14 +553,10 @@ SocksProxy::state_handing_over_http_request(int event, void *data)
 
   switch (event) {
   case VC_EVENT_WRITE_COMPLETE: {
-    HttpSessionAccept::Options ha_opt;
+    ts::Metrics::Counter::increment(stats.http_connections);
+    Dbg(dbg_ctl_SocksProxy, "Handing over the HTTP request");
 
-    SOCKSPROXY_INC_STAT(socksproxy_http_connections_stat);
-    Debug("SocksProxy", "Handing over the HTTP request");
-
-    ha_opt.transport_type = clientVC->attributes;
-    HttpSessionAccept http_accept(ha_opt);
-    if (!http_accept.accept(clientVC, buf, reader)) {
+    if (!http_acceptor->accept(clientVC, buf, reader)) {
       state = SOCKS_ERROR;
     } else {
       state      = ALL_DONE;
@@ -569,7 +567,7 @@ SocksProxy::state_handing_over_http_request(int event, void *data)
     break;
   }
   case VC_EVENT_WRITE_READY:
-    Debug("SocksProxy", "Received unexpected write_ready");
+    Dbg(dbg_ctl_SocksProxy, "Received unexpected write_ready");
     ret = EVENT_CONT;
     break;
   }
@@ -578,7 +576,7 @@ SocksProxy::state_handing_over_http_request(int event, void *data)
 }
 
 int
-SocksProxy::state_send_socks_reply(int event, void *data)
+SocksProxy::state_send_socks_reply(int event, [[maybe_unused]] void *data)
 {
   int ret = EVENT_DONE;
 
@@ -589,7 +587,7 @@ SocksProxy::state_send_socks_reply(int event, void *data)
     state = SOCKS_ERROR;
     break;
   case VC_EVENT_WRITE_READY:
-    Debug("SocksProxy", "Received unexpected write_ready");
+    Dbg(dbg_ctl_SocksProxy, "Received unexpected write_ready");
     ret = EVENT_CONT;
     break;
   }
@@ -673,10 +671,10 @@ SocksProxy::setupHttpRequest(unsigned char *p)
 }
 
 static void
-new_SocksProxy(NetVConnection *netVC)
+new_SocksProxy(NetVConnection *netVC, HttpSessionAccept *http_acceptor)
 {
   SocksProxy *proxy = socksProxyAllocator.alloc();
-  proxy->init(netVC);
+  proxy->init(netVC, http_acceptor);
 }
 
 struct SocksAccepter : public Continuation {
@@ -686,34 +684,29 @@ struct SocksAccepter : public Continuation {
   mainEvent(int event, NetVConnection *netVC)
   {
     ink_assert(event == NET_EVENT_ACCEPT);
-    // Debug("Socks", "Accepter got ACCEPT event");
+    // Dbg(dbg_ctl_Socks, "Accepter got ACCEPT event");
 
-    new_SocksProxy(netVC);
+    new_SocksProxy(netVC, &http_acceptor);
 
     return EVENT_CONT;
   }
 
   // There is no state used we dont need a mutex
-  SocksAccepter() : Continuation(nullptr) { SET_HANDLER((SocksAccepterHandler)&SocksAccepter::mainEvent); }
+  SocksAccepter() : Continuation(nullptr) { SET_HANDLER(&SocksAccepter::mainEvent); }
+
+  HttpSessionAccept http_acceptor;
 };
 
 void
 start_SocksProxy(int port)
 {
-  Debug("SocksProxy", "Accepting SocksProxy connections on port %d", port);
+  Dbg(dbg_ctl_SocksProxy, "Accepting SocksProxy connections on port %d", port);
   NetProcessor::AcceptOptions opt;
   opt.local_port = port;
   netProcessor.main_accept(new SocksAccepter(), NO_FD, opt);
 
-  socksproxy_stat_block = RecAllocateRawStatBlock(socksproxy_stat_count);
-
-  if (socksproxy_stat_block) {
-    RecRegisterRawStat(socksproxy_stat_block, RECT_PROCESS, "proxy.process.socks.proxy.http_connections", RECD_INT, RECP_PERSISTENT,
-                       socksproxy_http_connections_stat, RecRawStatSyncCount);
-
-    RecRegisterRawStat(socksproxy_stat_block, RECT_PROCESS, "proxy.process.socks.proxy.tunneled_connections", RECD_INT,
-                       RECP_PERSISTENT, socksproxy_tunneled_connections_stat, RecRawStatSyncCount);
-  }
+  stats.http_connections     = ts::Metrics::Counter::createPtr("proxy.process.socks.proxy.http_connections");
+  stats.tunneled_connections = ts::Metrics::Counter::createPtr("proxy.process.socks.proxy.tunneled_connections");
 }
 
 int
@@ -725,16 +718,16 @@ socks5ServerAuthHandler(int event, unsigned char *p, void (**h_ptr)(void))
   case SOCKS_AUTH_READ_COMPLETE:
 
     ink_assert(p[0] == SOCKS5_VERSION);
-    Debug("SocksProxy", "Socks read initial auth info");
+    Dbg(dbg_ctl_SocksProxy, "Socks read initial auth info");
     // do nothing
     break;
 
   case SOCKS_AUTH_FILL_WRITE_BUF:
-    Debug("SocksProxy", "No authentication is required");
+    Dbg(dbg_ctl_SocksProxy, "No authentication is required");
     p[0] = SOCKS5_VERSION;
     p[1] = 0; // no authentication necessary
     ret  = 2;
-  // FALLTHROUGH
+    [[fallthrough]];
   case SOCKS_AUTH_WRITE_COMPLETE:
     // nothing to do
     *h_ptr = nullptr;

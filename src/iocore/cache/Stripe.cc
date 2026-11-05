@@ -1,0 +1,576 @@
+/** @file
+
+  A brief file description
+
+  @par License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+
+#include "P_CacheDisk.h"
+#include "P_CacheInternal.h"
+#include "StripeSM.h"
+#include "CacheShm.h"
+
+#include "tsutil/DbgCtl.h"
+
+#include "tscore/hugepages.h"
+#include "tscore/ink_assert.h"
+#include "tscore/ink_memory.h"
+
+#include <cstddef>
+#include <cstring>
+
+using CacheHTTPInfo = HTTPInfo;
+
+namespace
+{
+
+DbgCtl dbg_ctl_cache_init{"cache_init"};
+DbgCtl dbg_ctl_cache_free{"cache_free"};
+
+constexpr int DIRECTORY_FOOTER_SIZE{ROUND_TO_STORE_BLOCK(sizeof(StripeHeaderFooter))};
+
+int
+compare_ushort(void const *a, void const *b)
+{
+  return *static_cast<unsigned short const *>(a) - *static_cast<unsigned short const *>(b);
+}
+
+template <typename T, typename U>
+constexpr double
+percent(T part, U whole)
+{
+  return static_cast<double>(part) / static_cast<double>(whole) * 100.0;
+}
+
+} // namespace
+
+struct StripeInitInfo {
+  off_t       recover_pos;
+  AIOCallback vol_aio[4];
+  char       *vol_h_f;
+
+  StripeInitInfo()
+  {
+    recover_pos = 0;
+    vol_h_f     = static_cast<char *>(ats_memalign(ats_pagesize(), 4 * STORE_BLOCK_SIZE));
+    memset(vol_h_f, 0, 4 * STORE_BLOCK_SIZE);
+  }
+
+  ~StripeInitInfo()
+  {
+    for (auto &i : vol_aio) {
+      i.action = nullptr;
+      i.mutex.clear();
+    }
+    free(vol_h_f);
+  }
+};
+
+////
+// Stripe
+//
+
+Stripe::Stripe(CacheDisk *disk, off_t blocks, off_t dir_skip, int avg_obj_size, int fragment_size)
+  : frag_size{fragment_size},
+    skip{ROUND_TO_STORE_BLOCK((dir_skip < START_POS ? START_POS : dir_skip))},
+    start{skip},
+    len{blocks * STORE_BLOCK_SIZE}
+{
+  ink_assert(this->len < MAX_STRIPE_SIZE);
+
+  this->_init_hash_text(disk, blocks, dir_skip);
+  this->_init_data(STORE_BLOCK_SIZE, avg_obj_size);
+  this->_init_directory(this->dirlen(), this->headerlen(), DIRECTORY_FOOTER_SIZE);
+}
+
+void
+Stripe::_init_hash_text(CacheDisk const *disk, off_t blocks, off_t dir_skip)
+{
+  char const  *seed_str       = disk->hash_base_string ? disk->hash_base_string : disk->path;
+  const size_t hash_seed_size = strlen(seed_str);
+  const size_t hash_text_size = hash_seed_size + 32;
+
+  this->hash_text = static_cast<char *>(ats_malloc(hash_text_size));
+  ink_strlcpy(hash_text, seed_str, hash_text_size);
+  snprintf(hash_text + hash_seed_size, (hash_text_size - hash_seed_size), " %" PRIu64 ":%" PRIu64 "",
+           static_cast<uint64_t>(dir_skip), static_cast<uint64_t>(blocks));
+}
+
+void
+Stripe::_init_data(off_t store_block_size, int avg_obj_size)
+{
+  // iteratively calculate start + buckets; updates this->start
+  this->_init_data_internal(avg_obj_size);
+  this->_init_data_internal(avg_obj_size);
+  this->_init_data_internal(avg_obj_size);
+
+  this->data_blocks = (this->len - (this->start - this->skip)) / store_block_size;
+}
+
+void
+Stripe::_init_data_internal(int avg_obj_size)
+{
+  if (avg_obj_size <= 0) {
+    avg_obj_size = cache_config_min_average_object_size;
+  }
+
+  // step1: calculate the number of entries.
+  off_t total_entries = (this->len - (this->start - this->skip)) / avg_obj_size;
+  // step2: calculate the number of buckets
+  off_t total_buckets = total_entries / DIR_DEPTH;
+  // step3: calculate the number of segments, no segment has more than 16384 buckets
+  this->directory.segments = (total_buckets + (((1 << 16) - 1) / DIR_DEPTH)) / ((1 << 16) / DIR_DEPTH);
+  // step4: divide total_buckets into segments on average.
+  this->directory.buckets = (total_buckets + this->directory.segments - 1) / this->directory.segments;
+  // step5: set the start pointer.
+  this->start = this->skip + 2 * this->dirlen();
+}
+
+void
+Stripe::_init_directory(std::size_t directory_size, int header_size, int footer_size)
+{
+  ink_assert(directory_size <= static_cast<std::size_t>(this->len));
+  // It's probably invalid for the directory to be this small, but at least we
+  // know we will allocate sufficient space for the data we initialize
+  // pointers to, and we can't corrupt our dir pointer by writing to the
+  // footer.
+  ink_release_assert(directory_size >= sizeof(Dir) + header_size + footer_size);
+
+  Dbg(dbg_ctl_cache_init, "Stripe %s: allocating %zu directory bytes for a %lld byte volume (%lf%%)", hash_text.get(),
+      directory_size, (long long)this->len, percent(directory_size, this->len));
+  // Try shared memory first; a successful attach bypasses the MAP_HUGETLB path below
+  // (tmpfs can't use it -- CacheShm advises THP instead).
+  this->directory.raw_dir = CacheShm::attach_or_create_stripe(hash_text.get(), directory_size);
+  if (this->directory.raw_dir != nullptr) {
+    this->directory.raw_dir_huge = false;
+  } else {
+    if (ats_hugepage_enabled()) {
+      this->directory.raw_dir = static_cast<char *>(ats_alloc_hugepage(directory_size));
+      if (this->directory.raw_dir != nullptr) {
+        this->directory.raw_dir_huge = true;
+      }
+    }
+    if (nullptr == this->directory.raw_dir) {
+      this->directory.raw_dir      = static_cast<char *>(ats_memalign(ats_pagesize(), directory_size));
+      this->directory.raw_dir_huge = false;
+    }
+  }
+  this->directory.raw_dir_size = directory_size;
+  this->directory.dir          = reinterpret_cast<Dir *>(this->directory.raw_dir + header_size);
+  this->directory.header       = reinterpret_cast<StripeHeaderFooter *>(this->directory.raw_dir);
+  std::size_t const footer_offset{directory_size - static_cast<std::size_t>(footer_size)};
+  this->directory.footer = reinterpret_cast<StripeHeaderFooter *>(this->directory.raw_dir + footer_offset);
+}
+
+// Gate the fast-restart attach: magic/version say the segment looks like a directory, but not that it is safe to follow.
+// Rationale for every check, and why the passes are fused per segment, is in doc/developer-guide/cache-architecture/
+// shm-fast-restart.en.rst ("Validating a trusted segment"). On failure the caller falls back to the disk read.
+bool
+Stripe::_shm_directory_is_valid()
+{
+  if (this->directory.header->sector_size == 0 || this->directory.header->sector_size > STORE_BLOCK_SIZE) {
+    return false;
+  }
+
+  if (this->directory.header->phase > 1) {
+    return false;
+  }
+
+  const off_t data_lo = this->start;
+  const off_t data_hi = this->skip + this->len;
+
+  if (this->directory.header->write_pos < data_lo || this->directory.header->write_pos > data_hi ||
+      this->directory.header->last_write_pos < data_lo || this->directory.header->last_write_pos > data_hi ||
+      this->directory.header->agg_pos < data_lo || this->directory.header->agg_pos > data_hi) {
+    return false;
+  }
+
+  // Not a clean-shutdown artifact if the write cursor never quiesced.
+  if (this->directory.header->agg_pos != this->directory.header->write_pos) {
+    return false;
+  }
+
+  const int64_t segment_entries = static_cast<int64_t>(this->directory.buckets) * DIR_DEPTH;
+
+  std::vector<bool> visited;
+
+  for (int s = 0; s < this->directory.segments; s++) {
+    if (this->directory.header->freelist[s] >= segment_entries) {
+      return false;
+    }
+
+    // dir_prev only holds a link on empty entries; on an in-use one it is tag/phase/head/pinned.
+    Dir *seg = this->directory.get_segment(s);
+    for (int64_t i = 0; i < segment_entries; i++) {
+      Dir *e = dir_in_seg(seg, i);
+      if (dir_next(e) >= segment_entries) {
+        return false;
+      }
+      if (dir_is_empty(e)) {
+        if (dir_prev(e) >= segment_entries) {
+          return false;
+        }
+        continue;
+      }
+      // Same invariant Directory::insert() asserts. dir_valid() cannot stand in for it: an out-of-phase entry is bounded
+      // from below only, and CacheVC::handleRead() turns an out-of-stripe offset into a negative (so huge) read length.
+      if (this->vol_offset(e) >= data_hi) {
+        return false;
+      }
+    }
+
+    if (!this->_shm_segment_membership_is_valid(s, seg, segment_entries, visited)) {
+      return false;
+    }
+
+    if (!this->directory.check_segment(s)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// The per-entry bounds above only prove each link points inside the segment; they say nothing about the shape. Prove
+// that too: every entry must be reached exactly once, as a bucket root, as an empty free-list node, or as an in-use
+// bucket-chain node. Reachability alone is not enough -- a shutdown torn mid-Directory::insert leaves an entry unlinked
+// from the free list but not yet filled, so no walk visits it, and the next insert to find that empty row writes
+// through its stale prev/next into a live chain or over a live entry's tag.
+bool
+Stripe::_shm_segment_membership_is_valid(int s, Dir *seg, int64_t segment_entries, std::vector<bool> &visited)
+{
+  // Below 5, a link is a raw segment index; at or above it dir_from_offset() compacts roots out of the link space and
+  // the raw dir_in_seg() indexing here (and in the bounds loop above) would address the wrong entries.
+  static_assert(DIR_DEPTH < 5, "Dir link values are treated as raw segment indices");
+
+  visited.assign(segment_entries, false);
+
+  int64_t node = this->directory.header->freelist[s];
+  int64_t prev = 0;
+
+  while (node != 0) {
+    if (node >= segment_entries || visited[node]) {
+      return false;
+    }
+    Dir *e = dir_in_seg(seg, node);
+
+    // Every producer (Directory::free_entry, delete_entry, freelist_pop, unlink_from_freelist) clears the entry and
+    // leaves prev pointing back at the node nearer the head, so a mismatch means the list was left half-updated.
+    if (!dir_is_empty(e) || dir_prev(e) != prev) {
+      return false;
+    }
+    visited[node] = true;
+    prev          = node;
+    node          = dir_next(e);
+  }
+
+  for (int64_t b = 0; b < this->directory.buckets; b++) {
+    const int64_t root = b * DIR_DEPTH;
+
+    // A root is reachable only as a root: init_segment() frees rows 1..DIR_DEPTH-1 onto the free list, never row 0.
+    if (visited[root]) {
+      return false;
+    }
+    visited[root] = true;
+
+    // A chain carries no back-links to check, since dir_prev is tag/phase/head/pinned on the in-use entries it holds.
+    node = dir_next(dir_in_seg(seg, root));
+    while (node != 0) {
+      if (node >= segment_entries || node % DIR_DEPTH == 0 || visited[node]) {
+        return false;
+      }
+      Dir *e = dir_in_seg(seg, node);
+      if (dir_is_empty(e)) {
+        return false;
+      }
+      visited[node] = true;
+      node          = dir_next(e);
+    }
+  }
+
+  for (int64_t i = 0; i < segment_entries; i++) {
+    if (!visited[i]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// coverity[exn_spec_violation] - ink_assert aborts (doesn't throw), Dbg is exception-safe
+Stripe::~Stripe()
+{
+  if (this->directory.raw_dir != nullptr) {
+    // Debug logging to track cleanup - helps correlate with crash location
+    Dbg(dbg_ctl_cache_free, "Stripe %s: freeing raw_dir=%p size=%zu huge=%s", hash_text.get() ? hash_text.get() : "(null)",
+        this->directory.raw_dir, this->directory.raw_dir_size, this->directory.raw_dir_huge ? "true" : "false");
+
+    // Validate that size is reasonable (catches corruption before free)
+    ink_assert(this->directory.raw_dir_size > 0);
+    ink_assert(this->directory.raw_dir_size < MAX_STRIPE_SIZE);
+
+    // shm-backed directories must outlive the process; never ats_free or poison them.
+    const bool is_shm = CacheShm::is_shm_pointer(this->directory.raw_dir);
+
+#ifdef DEBUG
+    if (!is_shm) {
+      // Poison memory before freeing to help detect use-after-free
+      memset(this->directory.raw_dir, 0xDE, this->directory.raw_dir_size);
+    }
+#endif
+
+    if (is_shm) {
+      CacheShm::detach_stripe(this->directory.raw_dir);
+    } else if (this->directory.raw_dir_huge) {
+      ats_free_hugepage(this->directory.raw_dir, this->directory.raw_dir_size);
+    } else {
+      ats_free(this->directory.raw_dir);
+    }
+    this->directory.raw_dir      = nullptr;
+    this->directory.raw_dir_size = 0;
+  }
+}
+
+int
+Stripe::dir_check()
+{
+  static int const SEGMENT_HISTOGRAM_WIDTH           = 16;
+  int              hist[SEGMENT_HISTOGRAM_WIDTH + 1] = {0};
+  unsigned short   chain_tag[MAX_ENTRIES_PER_SEGMENT];
+  int32_t          chain_mark[MAX_ENTRIES_PER_SEGMENT];
+  uint64_t         total_buckets = directory.buckets * directory.segments;
+  uint64_t         total_entries = total_buckets * DIR_DEPTH;
+  int              frag_demographics[1 << DIR_SIZE_WIDTH][DIR_BLOCK_SIZES];
+
+  int j;
+  int stale = 0, in_use = 0, empty = 0;
+  int free = 0, head = 0, buckets_in_use = 0;
+
+  int     max_chain_length = 0;
+  int64_t bytes_in_use     = 0;
+
+  ink_zero(frag_demographics);
+
+  printf("Stripe '[%s]'\n", hash_text.get());
+  printf("  Directory Bytes: %" PRIu64 "\n", total_buckets * SIZEOF_DIR);
+  printf("  Segments:  %d\n", directory.segments);
+  printf("  Buckets per segment:   %" PRIu64 "\n", directory.buckets);
+  printf("  Entries:   %" PRIu64 "\n", total_entries);
+
+  for (int s = 0; s < directory.segments; s++) {
+    Dir *seg                = this->directory.get_segment(s);
+    int  seg_chain_max      = 0;
+    int  seg_empty          = 0;
+    int  seg_in_use         = 0;
+    int  seg_stale          = 0;
+    int  seg_bytes_in_use   = 0;
+    int  seg_dups           = 0;
+    int  seg_buckets_in_use = 0;
+
+    ink_zero(chain_tag);
+    memset(chain_mark, -1, sizeof(chain_mark));
+
+    for (int b = 0; b < directory.buckets; b++) {
+      Dir *root = dir_bucket(b, seg);
+      int  h    = 0; // chain length starting in this bucket
+
+      // Walk the chain starting in this bucket
+      int chain_idx = 0;
+      int mark      = 0;
+      ++seg_buckets_in_use;
+      for (Dir *e = root; e; e = next_dir(e, seg)) {
+        if (!dir_offset(e)) {
+          ++seg_empty;
+          --seg_buckets_in_use;
+          // this should only happen on the first dir in a bucket
+          ink_assert(nullptr == next_dir(e, seg));
+          break;
+        } else {
+          // Past the longest legitimate chain, so the chain is corrupt; stop before chain_tag overruns.
+          if (h >= directory.max_bucket_depth()) {
+            printf("    - Chain from bucket %d is longer than %d entries, abandoning walk\n", b, directory.max_bucket_depth());
+            break;
+          }
+          int e_idx = e - seg;
+          ++h;
+          chain_tag[chain_idx++] = dir_tag(e);
+          if (chain_mark[e_idx] == mark) {
+            printf("    - Cycle of length %d detected for bucket %d\n", h, b);
+            break;
+          } else if (chain_mark[e_idx] >= 0) {
+            printf("    - Entry %d is in chain %d and %d", e_idx, chain_mark[e_idx], mark);
+          } else {
+            chain_mark[e_idx] = mark;
+          }
+
+          if (!this->dir_valid(e)) {
+            ++seg_stale;
+          } else {
+            uint64_t size = dir_approx_size(e);
+            if (dir_head(e)) {
+              ++head;
+            }
+            ++seg_in_use;
+            seg_bytes_in_use += size;
+            ++frag_demographics[dir_size(e)][dir_big(e)];
+          }
+        }
+      }
+
+      // Check for duplicates (identical tags in the same bucket).
+      if (h > 1) {
+        unsigned short last;
+        qsort(chain_tag, h, sizeof(chain_tag[0]), &compare_ushort);
+        last = chain_tag[0];
+        for (int k = 1; k < h; ++k) {
+          if (last == chain_tag[k]) {
+            ++seg_dups;
+          }
+          last = chain_tag[k];
+        }
+      }
+
+      ++hist[std::min(h, SEGMENT_HISTOGRAM_WIDTH)];
+      seg_chain_max = std::max(seg_chain_max, h);
+    }
+    int fl_size       = directory.freelist_length(s);
+    in_use           += seg_in_use;
+    empty            += seg_empty;
+    stale            += seg_stale;
+    free             += fl_size;
+    buckets_in_use   += seg_buckets_in_use;
+    max_chain_length  = std::max(max_chain_length, seg_chain_max);
+    bytes_in_use     += seg_bytes_in_use;
+
+    printf("  - Segment-%d | Entries: used=%d stale=%d free=%d disk-bytes=%d Buckets: used=%d empty=%d max=%d avg=%.2f dups=%d\n",
+           s, seg_in_use, seg_stale, fl_size, seg_bytes_in_use, seg_buckets_in_use, seg_empty, seg_chain_max,
+           seg_buckets_in_use ? static_cast<float>(seg_in_use + seg_stale) / seg_buckets_in_use : 0.0, seg_dups);
+  }
+
+  printf("  - Stripe | Entries: in-use=%d stale=%d free=%d Buckets: empty=%d max=%d avg=%.2f\n", in_use, stale, free, empty,
+         max_chain_length, buckets_in_use ? static_cast<float>(in_use + stale) / buckets_in_use : 0);
+
+  printf("    Chain lengths:  ");
+  for (j = 0; j < SEGMENT_HISTOGRAM_WIDTH; ++j) {
+    printf(" %d=%d ", j, hist[j]);
+  }
+  printf(" %d>=%d\n", SEGMENT_HISTOGRAM_WIDTH, hist[SEGMENT_HISTOGRAM_WIDTH]);
+
+  char tt[256];
+  printf("    Total Size:      %" PRIu64 "\n", static_cast<uint64_t>(len));
+  printf("    Bytes in Use:    %" PRIu64 " [%0.2f%%]\n", bytes_in_use, 100.0 * (static_cast<float>(bytes_in_use) / len));
+  printf("    Objects:         %d\n", head);
+  printf("    Average Size:    %" PRIu64 "\n", head ? (bytes_in_use / head) : 0);
+  printf("    Average Frags:   %.2f\n", head ? static_cast<float>(in_use) / head : 0);
+  printf("    Write Position:  %" PRIu64 "\n", directory.header->write_pos - start);
+  printf("    Wrap Count:      %d\n", directory.header->cycle);
+  printf("    Phase:           %s\n", directory.header->phase ? "true" : "false");
+  ink_ctime_r(&directory.header->create_time, tt);
+  tt[strlen(tt) - 1] = 0;
+  printf("    Sync Serial:     %u\n", directory.header->sync_serial);
+  printf("    Write Serial:    %u\n", directory.header->write_serial);
+  printf("    Create Time:     %s\n", tt);
+  printf("\n");
+  printf("  Fragment size demographics\n");
+  for (int b = 0; b < DIR_BLOCK_SIZES; ++b) {
+    int block_size = DIR_BLOCK_SIZE(b);
+    int s          = 0;
+    while (s < 1 << DIR_SIZE_WIDTH) {
+      for (int j = 0; j < 8; ++j, ++s) {
+        // The size markings are redundant. Low values (less than DIR_SHIFT_WIDTH) for larger
+        // base block sizes should never be used. Such entries should use the next smaller base block size.
+        if (b > 0 && s < 1 << DIR_BLOCK_SHIFT(1)) {
+          ink_assert(frag_demographics[s][b] == 0);
+          continue;
+        }
+        printf(" %8d[%2d:%1d]:%06d", (s + 1) * block_size, s, b, frag_demographics[s][b]);
+      }
+      printf("\n");
+    }
+  }
+  printf("\n");
+
+  return 0;
+}
+
+void
+Stripe::_clear_init(std::uint32_t hw_sector_size)
+{
+  size_t dir_len = this->dirlen();
+  memset(this->directory.raw_dir, 0, dir_len);
+  this->_init_dir();
+  this->directory.header->magic          = STRIPE_MAGIC;
+  this->directory.header->version._major = CACHE_DB_MAJOR_VERSION;
+  this->directory.header->version._minor = CACHE_DB_MINOR_VERSION;
+  this->scan_pos = this->directory.header->agg_pos = this->directory.header->write_pos = this->start;
+  this->directory.header->last_write_pos                                               = this->directory.header->write_pos;
+  this->directory.header->phase                                                        = 0;
+  this->directory.header->cycle                                                        = 0;
+  this->directory.header->create_time                                                  = time(nullptr);
+  this->directory.header->dirty                                                        = 0;
+  this->sector_size = this->directory.header->sector_size = hw_sector_size;
+  *this->directory.footer                                 = *this->directory.header;
+}
+
+void
+Stripe::_init_dir()
+{
+  int b, s, l;
+
+  for (s = 0; s < this->directory.segments; s++) {
+    this->directory.header->freelist[s] = 0;
+    Dir *seg                            = this->directory.get_segment(s);
+    for (l = 1; l < DIR_DEPTH; l++) {
+      for (b = 0; b < this->directory.buckets; b++) {
+        Dir *bucket = dir_bucket(b, seg);
+        this->directory.free_entry(dir_bucket_row(bucket, l), s);
+      }
+    }
+  }
+}
+
+bool
+Stripe::flush_aggregate_write_buffer(int fd)
+{
+  // set write limit
+  this->directory.header->agg_pos = this->directory.header->write_pos + this->_write_buffer.get_buffer_pos();
+
+  if (!this->_write_buffer.flush(fd, this->directory.header->write_pos)) {
+    return false;
+  }
+  this->directory.header->last_write_pos  = this->directory.header->write_pos;
+  this->directory.header->write_pos      += this->_write_buffer.get_buffer_pos();
+  ink_assert(this->directory.header->write_pos == this->directory.header->agg_pos);
+  this->_write_buffer.reset_buffer_pos();
+  this->directory.header->write_serial++;
+
+  return true;
+}
+
+bool
+Stripe::copy_from_aggregate_write_buffer(char *dest, Dir const &dir, size_t nbytes) const
+{
+  if (!this->dir_agg_buf_valid(&dir)) {
+    return false;
+  }
+
+  int agg_offset = this->vol_offset(&dir) - this->directory.header->write_pos;
+  this->_write_buffer.copy_from(dest, agg_offset, nbytes);
+  return true;
+}

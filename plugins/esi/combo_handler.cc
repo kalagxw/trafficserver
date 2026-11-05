@@ -34,19 +34,34 @@
 #include <getopt.h>
 
 #include "ts/ts.h"
-#include "ts/experimental.h"
 #include "ts/remap.h"
 #include "tscore/ink_defs.h"
-#include "tscpp/util/TextView.h"
+#include "swoc/TextView.h"
 
 #include "HttpDataFetcherImpl.h"
 #include "gzip.h"
 #include "Utils.h"
+#include "combo_handler_utils.h"
 
 using namespace std;
 using namespace EsiLib;
+using namespace swoc::literals;
+#include "http_utils.h"
+
+/** Extracts a URL string from buffer and location objects.
+ *
+ * @param[in] bufp The buffer containing the URL data.
+ * @param[in] url_loc The memory location pointing to the URL within the
+ *   buffer.
+ *
+ * @return The URL. Returns UNKNOWN_URL_STRING if the URL cannot be retrieved due to
+ *   API failures or invalid parameters.
+ */
+// Use shared helper from url_utils.h
 
 #define DEBUG_TAG "combo_handler"
+
+static DbgCtl dbg_ctl{DEBUG_TAG};
 
 // Because STL vs. C library leads to ugly casting, fix it once.
 inline int
@@ -56,49 +71,49 @@ length(std::string const &str)
 }
 
 constexpr unsigned DEFAULT_MAX_FILE_COUNT = 100;
-constexpr int MAX_QUERY_LENGTH            = 4096;
+constexpr int      MAX_QUERY_LENGTH       = 4096;
 
 unsigned MaxFileCount = DEFAULT_MAX_FILE_COUNT;
 
 // We hardcode "immutable" here because it's not yet defined in the ATS API
 #define HTTP_IMMUTABLE "immutable"
 
-int arg_idx = -1;
-static string SIG_KEY_NAME;
+int                   arg_idx = -1;
+static string         SIG_KEY_NAME;
 static vector<string> HEADER_ALLOWLIST;
 
 #define DEFAULT_COMBO_HANDLER_PATH "admin/v1/combo"
 static string COMBO_HANDLER_PATH{DEFAULT_COMBO_HANDLER_PATH};
 
-#define LOG_ERROR(fmt, args...)                                                               \
-  do {                                                                                        \
-    TSError("[%s:%d] [%s] ERROR: " fmt, __FILE__, __LINE__, __FUNCTION__, ##args);            \
-    TSDebug(DEBUG_TAG, "[%s:%d] [%s] ERROR: " fmt, __FILE__, __LINE__, __FUNCTION__, ##args); \
+#define LOG_ERROR(fmt, args...)                                                         \
+  do {                                                                                  \
+    TSError("[%s:%d] [%s] ERROR: " fmt, __FILE__, __LINE__, __FUNCTION__, ##args);      \
+    Dbg(dbg_ctl, "[%s:%d] [%s] ERROR: " fmt, __FILE__, __LINE__, __FUNCTION__, ##args); \
   } while (0)
 
-#define LOG_DEBUG(fmt, args...)                                                               \
-  do {                                                                                        \
-    TSDebug(DEBUG_TAG, "[%s:%d] [%s] DEBUG: " fmt, __FILE__, __LINE__, __FUNCTION__, ##args); \
+#define LOG_DEBUG(fmt, args...)                                                         \
+  do {                                                                                  \
+    Dbg(dbg_ctl, "[%s:%d] [%s] DEBUG: " fmt, __FILE__, __LINE__, __FUNCTION__, ##args); \
   } while (0)
 
 using StringList = list<string>;
 
 struct ClientRequest {
-  TSHttpStatus status         = TS_HTTP_STATUS_OK;
+  TSHttpStatus    status      = TS_HTTP_STATUS_OK;
   const sockaddr *client_addr = nullptr;
-  StringList file_urls;
-  bool gzip_accepted = false;
-  string defaultBucket; // default Bucket will be set to HOST header
+  StringList      file_urls;
+  bool            gzip_accepted = false;
+  string          defaultBucket; // default Bucket will be set to HOST header
   ClientRequest() : defaultBucket("l"){};
 };
 
 struct InterceptData {
   TSVConn net_vc;
-  TSCont contp;
+  TSCont  contp;
 
   struct IoHandle {
-    TSVIO vio               = nullptr;
-    TSIOBuffer buffer       = nullptr;
+    TSVIO            vio    = nullptr;
+    TSIOBuffer       buffer = nullptr;
     TSIOBufferReader reader = nullptr;
 
     IoHandle() = default;
@@ -114,20 +129,20 @@ struct InterceptData {
     };
   };
 
-  IoHandle input;
-  IoHandle output;
+  IoHandle     input;
+  IoHandle     output;
   TSHttpParser http_parser;
 
-  string body;
-  TSMBuffer req_hdr_bufp;
-  TSMLoc req_hdr_loc;
-  bool req_hdr_parsed;
-  bool initialized;
-  ClientRequest creq;
+  string               body;
+  TSMBuffer            req_hdr_bufp;
+  TSMLoc               req_hdr_loc;
+  bool                 req_hdr_parsed;
+  bool                 initialized;
+  ClientRequest        creq;
   HttpDataFetcherImpl *fetcher;
-  bool read_complete;
-  bool write_complete;
-  string gzipped_data;
+  bool                 read_complete;
+  bool                 write_complete;
+  string               gzipped_data;
 
   InterceptData(TSCont cont)
     : net_vc(nullptr),
@@ -165,9 +180,9 @@ struct CacheControlHeader {
   string generate() const;
 
   // Cache-Control values we're keeping track of
-  unsigned int _max_age = numeric_limits<unsigned int>::max();
-  Publicity _publicity  = Publicity::DEFAULT;
-  bool _immutable       = true;
+  unsigned int _max_age   = numeric_limits<unsigned int>::max();
+  Publicity    _publicity = Publicity::DEFAULT;
+  bool         _immutable = true;
 };
 
 class ContentTypeHandler
@@ -257,33 +272,29 @@ CacheControlHeader::update(TSMBuffer bufp, TSMLoc hdr_loc)
   TSMLoc field_loc = TSMimeHdrFieldFind(bufp, hdr_loc, TS_MIME_FIELD_CACHE_CONTROL, TS_MIME_LEN_CACHE_CONTROL);
   if (field_loc != TS_NULL_MLOC) {
     int n_values = TSMimeHdrFieldValuesCount(bufp, hdr_loc, field_loc);
-    if ((n_values != TS_ERROR) && (n_values > 0)) {
+    if (n_values > 0) {
       for (int i = 0; i < n_values; i++) {
         // Grab this current header value
-        int _val_len    = 0;
-        const char *val = TSMimeHdrFieldValueStringGet(bufp, hdr_loc, field_loc, i, &_val_len);
+        int         _val_len = 0;
+        const char *val      = TSMimeHdrFieldValueStringGet(bufp, hdr_loc, field_loc, i, &_val_len);
 
-        // Update max-age if necessary
-        if (strncasecmp(val, TS_HTTP_VALUE_MAX_AGE, TS_HTTP_LEN_MAX_AGE) == 0) {
-          unsigned int max_age = 0;
-          char *ptr            = const_cast<char *>(val);
-          ptr += TS_HTTP_LEN_MAX_AGE;
-          while ((*ptr == ' ') || (*ptr == '\t')) {
-            ptr++;
+        if (val != nullptr && _val_len > 0) {
+          combo_handler::CacheControlValue const parsed =
+            combo_handler::parse_cache_control_value({val, static_cast<size_t>(_val_len)});
+
+          // Update max-age if necessary. max-age=0 is a valid directive
+          // ("must revalidate") and must be honored as the minimum.
+          if (parsed.has_max_age) {
+            if (parsed.max_age < _max_age) {
+              _max_age = parsed.max_age;
+            }
+            // If we find even a single occurrence of private, the whole response must be private
+          } else if (parsed.is_private) {
+            found_private = true;
+            // Every requested document must have immutable for the final response to be immutable
+          } else if (parsed.is_immutable) {
+            found_immutable = true;
           }
-          if (*ptr == '=') {
-            ptr++;
-            max_age = atoi(ptr);
-          }
-          if (max_age > 0 && max_age < _max_age) {
-            _max_age = max_age;
-          }
-          // If we find even a single occurrence of private, the whole response must be private
-        } else if (strncasecmp(val, TS_HTTP_VALUE_PRIVATE, TS_HTTP_LEN_PRIVATE) == 0) {
-          found_private = true;
-          // Every requested document must have immutable for the final response to be immutable
-        } else if (strncasecmp(val, HTTP_IMMUTABLE, strlen(HTTP_IMMUTABLE)) == 0) {
-          found_immutable = true;
         }
       }
     }
@@ -305,9 +316,9 @@ string
 CacheControlHeader::generate() const
 {
   unsigned int max_age;
-  char line_buf[256];
-  const char *publicity;
-  const char *immutable;
+  char         line_buf[256];
+  const char  *publicity;
+  const char  *immutable;
 
   // Previously, all combo_cache documents were public. However, that's a bug. If any requested document is private the combo_cache
   // document should private as well.
@@ -320,17 +331,17 @@ CacheControlHeader::generate() const
   immutable = (_immutable ? ", " HTTP_IMMUTABLE : "");
   max_age   = (_max_age == numeric_limits<unsigned int>::max() ? 315360000 : _max_age); // default is 10 years
 
-  sprintf(line_buf, "Cache-Control: max-age=%u, %s%s\r\n", max_age, publicity, immutable);
+  snprintf(line_buf, sizeof(line_buf), "Cache-Control: max-age=%u, %s%s\r\n", max_age, publicity, immutable);
   return string(line_buf);
 }
 
 // forward declarations
-static int handleReadRequestHeader(TSCont contp, TSEvent event, void *edata);
+static int  handleReadRequestHeader(TSCont contp, TSEvent event, void *edata);
 static bool isComboHandlerRequest(TSMBuffer bufp, TSMLoc hdr_loc, TSMLoc url_loc);
 static void getClientRequest(TSHttpTxn txnp, TSMBuffer bufp, TSMLoc hdr_loc, TSMLoc url_loc, ClientRequest &creq);
 static void parseQueryParameters(const char *query, int query_len, ClientRequest &creq);
 static void checkGzipAcceptance(TSMBuffer bufp, TSMLoc hdr_loc, ClientRequest &creq);
-static int handleServerEvent(TSCont contp, TSEvent event, void *edata);
+static int  handleServerEvent(TSCont contp, TSEvent event, void *edata);
 static bool initRequestProcessing(InterceptData &int_data, void *edata, bool &write_response);
 static bool readInterceptRequest(InterceptData &int_data);
 static bool writeResponse(InterceptData &int_data);
@@ -353,10 +364,10 @@ TSPluginInit(int argc, const char *argv[])
   }
 
   if (argc > 1) {
-    int c;
+    int                        c;
     static const struct option longopts[] = {
       {"max-files", required_argument, nullptr, 'f'},
-      {nullptr, 0, nullptr, 0},
+      {nullptr,     0,                 nullptr, 0  },
     };
 
     int longindex = 0;
@@ -365,14 +376,14 @@ TSPluginInit(int argc, const char *argv[])
       switch (c) {
       case 'f': {
         char *tmp = nullptr;
-        long n    = strtol(optarg, &tmp, 0);
+        long  n   = strtol(optarg, &tmp, 0);
         if (tmp == optarg) {
           TSError("[%s] %s requires a numeric argument", DEBUG_TAG, longopts[longindex].name);
         } else if (n < 1) {
           TSError("[%s] %s must be a positive number", DEBUG_TAG, longopts[longindex].name);
         } else {
           MaxFileCount = n;
-          TSDebug(DEBUG_TAG, "Max files set to %u", MaxFileCount);
+          Dbg(dbg_ctl, "Max files set to %u", MaxFileCount);
         }
         break;
       }
@@ -405,7 +416,7 @@ TSPluginInit(int argc, const char *argv[])
 
   if (argc > optind && (argv[optind][0] != '-' || argv[optind][1])) {
     stringstream strstream(argv[optind++]);
-    string header;
+    string       header;
     while (getline(strstream, header, ':')) {
       HEADER_ALLOWLIST.push_back(header);
     }
@@ -445,7 +456,6 @@ TSPluginInit(int argc, const char *argv[])
     LOG_DEBUG("txn_arg_idx: %d", arg_idx);
   }
 
-  Utils::init(&TSDebug, &TSError);
   LOG_DEBUG("Plugin started");
 }
 
@@ -478,9 +488,9 @@ handleReadRequestHeader(TSCont /* contp ATS_UNUSED */, TSEvent event, void *edat
   LOG_DEBUG("combo is enabled for this channel");
   LOG_DEBUG("handling TS_EVENT_HTTP_OS_DNS event");
 
-  TSEvent reenable_to_event = TS_EVENT_HTTP_CONTINUE;
+  TSEvent   reenable_to_event = TS_EVENT_HTTP_CONTINUE;
   TSMBuffer bufp;
-  TSMLoc hdr_loc;
+  TSMLoc    hdr_loc;
 
   if (TSHttpTxnClientReqGet(txnp, &bufp, &hdr_loc) == TS_SUCCESS) {
     TSMLoc url_loc;
@@ -517,8 +527,8 @@ handleReadRequestHeader(TSCont /* contp ATS_UNUSED */, TSEvent event, void *edat
 static bool
 isComboHandlerRequest(TSMBuffer bufp, TSMLoc hdr_loc, TSMLoc url_loc)
 {
-  int method_len;
-  bool retval        = false;
+  int         method_len;
+  bool        retval = false;
   const char *method = TSHttpHdrMethodGet(bufp, hdr_loc, &method_len);
 
   if (!method) {
@@ -531,7 +541,7 @@ isComboHandlerRequest(TSMBuffer bufp, TSMLoc hdr_loc, TSMLoc url_loc)
     }
 
     if (retval) {
-      int path_len;
+      int         path_len;
       const char *path = TSUrlPathGet(bufp, url_loc, &path_len);
       if (!path) {
         LOG_ERROR("Could not get path from request URL");
@@ -550,10 +560,10 @@ static bool
 getDefaultBucket(TSHttpTxn /* txnp ATS_UNUSED */, TSMBuffer bufp, TSMLoc hdr_obj, ClientRequest &creq)
 {
   LOG_DEBUG("In getDefaultBucket");
-  TSMLoc field_loc;
+  TSMLoc      field_loc;
   const char *host;
-  int host_len            = 0;
-  bool defaultBucketFound = false;
+  int         host_len           = 0;
+  bool        defaultBucketFound = false;
 
   field_loc = TSMimeHdrFieldFind(bufp, hdr_obj, TS_MIME_FIELD_HOST, -1);
   if (field_loc == TS_NULL_MLOC) {
@@ -581,21 +591,24 @@ getDefaultBucket(TSHttpTxn /* txnp ATS_UNUSED */, TSMBuffer bufp, TSMLoc hdr_obj
 static void
 getClientRequest(TSHttpTxn txnp, TSMBuffer bufp, TSMLoc hdr_loc, TSMLoc url_loc, ClientRequest &creq)
 {
-  int query_len;
+  int         query_len;
   const char *query = TSUrlHttpQueryGet(bufp, url_loc, &query_len);
 
   if (!query) {
-    LOG_ERROR("Could not get query from request URL");
+    std::string const url_string = getUrlString(bufp, url_loc);
+    LOG_ERROR("Could not get query from request URL [%s]", url_string.c_str());
     creq.status = TS_HTTP_STATUS_BAD_REQUEST;
     return;
   } else {
     if (!getDefaultBucket(txnp, bufp, hdr_loc, creq)) {
-      LOG_ERROR("failed getting Default Bucket for the request");
+      std::string const url_string = getUrlString(bufp, url_loc);
+      LOG_ERROR("failed getting Default Bucket for the request [%s]", url_string.c_str());
       return;
     }
     if (query_len > MAX_QUERY_LENGTH) {
-      creq.status = TS_HTTP_STATUS_BAD_REQUEST;
-      LOG_ERROR("querystring too long");
+      std::string const url_string = getUrlString(bufp, url_loc);
+      creq.status                  = TS_HTTP_STATUS_BAD_REQUEST;
+      LOG_ERROR("querystring too long for request [%s]", url_string.c_str());
       return;
     }
     parseQueryParameters(query, query_len, creq);
@@ -607,16 +620,16 @@ getClientRequest(TSHttpTxn txnp, TSMBuffer bufp, TSMLoc hdr_loc, TSMLoc url_loc,
 static void
 parseQueryParameters(const char *query, int query_len, ClientRequest &creq)
 {
-  creq.status         = TS_HTTP_STATUS_OK;
-  int param_start_pos = 0;
-  bool sig_verified   = false;
-  int colon_pos       = -1;
-  string file_url("http://localhost/");
-  size_t file_base_url_size      = file_url.size();
-  const char *common_prefix      = nullptr;
-  int common_prefix_size         = 0;
-  const char *common_prefix_path = nullptr;
-  int common_prefix_path_size    = 0;
+  creq.status                 = TS_HTTP_STATUS_OK;
+  int         param_start_pos = 0;
+  bool        sig_verified    = false;
+  int         colon_pos       = -1;
+  string      file_url("http://localhost/");
+  size_t      file_base_url_size      = file_url.size();
+  const char *common_prefix           = nullptr;
+  int         common_prefix_size      = 0;
+  const char *common_prefix_path      = nullptr;
+  int         common_prefix_path_size = 0;
 
   for (int i = 0; i <= query_len; ++i) {
     if ((i == query_len) || (query[i] == '&')) {
@@ -652,7 +665,7 @@ parseQueryParameters(const char *query, int query_len, ClientRequest &creq)
                 common_prefix_path      = common_prefix;
                 common_prefix_path_size = i;
                 ++i; // go beyond the ':'
-                common_prefix += i;
+                common_prefix      += i;
                 common_prefix_size -= i;
                 break;
               }
@@ -696,7 +709,7 @@ parseQueryParameters(const char *query, int query_len, ClientRequest &creq)
         }
       }
       param_start_pos = i + 1;
-    } else if (query[i] == ':') {
+    } else if ((query[i] == ':') && (colon_pos < param_start_pos)) {
       colon_pos = i;
     }
   }
@@ -722,8 +735,8 @@ checkGzipAcceptance(TSMBuffer bufp, TSMLoc hdr_loc, ClientRequest &creq)
   TSMLoc field_loc   = TSMimeHdrFieldFind(bufp, hdr_loc, TS_MIME_FIELD_ACCEPT_ENCODING, TS_MIME_LEN_ACCEPT_ENCODING);
   if (field_loc != TS_NULL_MLOC) {
     const char *value;
-    int value_len;
-    int n_values = TSMimeHdrFieldValuesCount(bufp, hdr_loc, field_loc);
+    int         value_len;
+    int         n_values = TSMimeHdrFieldValuesCount(bufp, hdr_loc, field_loc);
 
     for (int i = 0; i < n_values; ++i) {
       value = TSMimeHdrFieldValueStringGet(bufp, hdr_loc, field_loc, i, &value_len);
@@ -746,8 +759,8 @@ checkGzipAcceptance(TSMBuffer bufp, TSMLoc hdr_loc, ClientRequest &creq)
 static int
 handleServerEvent(TSCont contp, TSEvent event, void *edata)
 {
-  InterceptData *int_data = static_cast<InterceptData *>(TSContDataGet(contp));
-  bool write_response     = false;
+  InterceptData *int_data       = static_cast<InterceptData *>(TSContDataGet(contp));
+  bool           write_response = false;
 
   switch (event) {
   case TS_EVENT_NET_ACCEPT_FAILED:
@@ -856,8 +869,8 @@ readInterceptRequest(InterceptData &int_data)
 
   int consumed = 0;
   if (avail > 0) {
-    int64_t data_len;
-    const char *data;
+    int64_t         data_len;
+    const char     *data;
     TSIOBufferBlock block = TSIOBufferReaderStart(int_data.input.reader);
     while (block != nullptr) {
       data               = TSIOBufferBlockReadStart(block, int_data.input.reader, &data_len);
@@ -866,7 +879,7 @@ readInterceptRequest(InterceptData &int_data)
         int_data.read_complete = true;
       }
       consumed += data_len;
-      block = TSIOBufferBlockNext(block);
+      block     = TSIOBufferBlockNext(block);
     }
   }
   LOG_DEBUG("Consumed %d bytes from input vio", consumed);
@@ -887,8 +900,8 @@ static const string OK_REPLY_LINE("HTTP/1.0 200 OK\r\n");
 static const string BAD_REQUEST_RESPONSE("HTTP/1.0 400 Bad Request\r\n\r\n");
 static const string ERROR_REPLY_RESPONSE("HTTP/1.0 500 Internal Server Error\r\n\r\n");
 static const string FORBIDDEN_RESPONSE("HTTP/1.0 403 Forbidden\r\n\r\n");
-static const char GZIP_ENCODING_FIELD[]   = {"Content-Encoding: gzip\r\n"};
-static const int GZIP_ENCODING_FIELD_SIZE = sizeof(GZIP_ENCODING_FIELD) - 1;
+static const char   GZIP_ENCODING_FIELD[]    = {"Content-Encoding: gzip\r\n"};
+static const int    GZIP_ENCODING_FIELD_SIZE = sizeof(GZIP_ENCODING_FIELD) - 1;
 
 static bool
 writeResponse(InterceptData &int_data)
@@ -896,7 +909,7 @@ writeResponse(InterceptData &int_data)
   int_data.setupWrite();
 
   ByteBlockList body_blocks;
-  string resp_header_fields;
+  string        resp_header_fields;
   prepareResponse(int_data, body_blocks, resp_header_fields);
 
   int n_bytes_written = 0;
@@ -952,12 +965,12 @@ prepareResponse(InterceptData &int_data, ByteBlockList &body_blocks, string &res
 {
   if (int_data.creq.status == TS_HTTP_STATUS_OK) {
     HttpDataFetcherImpl::ResponseData resp_data;
-    TSMLoc field_loc;
-    time_t expires_time;
-    bool got_expires_time = false;
-    int num_headers       = HEADER_ALLOWLIST.size();
-    int flags_list[num_headers];
-    CacheControlHeader cch;
+    TSMLoc                            field_loc;
+    time_t                            expires_time;
+    bool                              got_expires_time = false;
+    int                               num_headers      = HEADER_ALLOWLIST.size();
+    int                               flags_list[num_headers];
+    CacheControlHeader                cch;
 
     for (int i = 0; i < num_headers; i++) {
       flags_list[i] = 0;
@@ -982,8 +995,8 @@ prepareResponse(InterceptData &int_data, ByteBlockList &body_blocks, string &res
         field_loc = TSMimeHdrFieldFind(resp_data.bufp, resp_data.hdr_loc, TS_MIME_FIELD_EXPIRES, TS_MIME_LEN_EXPIRES);
         if (field_loc != TS_NULL_MLOC) {
           time_t curr_field_expires_time;
-          int n_values = TSMimeHdrFieldValuesCount(resp_data.bufp, resp_data.hdr_loc, field_loc);
-          if ((n_values != TS_ERROR) && (n_values > 0)) {
+          int    n_values = TSMimeHdrFieldValuesCount(resp_data.bufp, resp_data.hdr_loc, field_loc);
+          if (n_values > 0) {
             curr_field_expires_time = TSMimeHdrFieldValueDateGet(resp_data.bufp, resp_data.hdr_loc, field_loc);
             if (!got_expires_time) {
               expires_time     = curr_field_expires_time;
@@ -1004,11 +1017,11 @@ prepareResponse(InterceptData &int_data, ByteBlockList &body_blocks, string &res
 
           field_loc = TSMimeHdrFieldFind(resp_data.bufp, resp_data.hdr_loc, header.c_str(), header.size());
           if (field_loc != TS_NULL_MLOC) {
-            bool values_added = false;
+            bool        values_added = false;
             const char *value;
-            int value_len;
-            int n_values = TSMimeHdrFieldValuesCount(resp_data.bufp, resp_data.hdr_loc, field_loc);
-            if ((n_values != TS_ERROR) && (n_values > 0)) {
+            int         value_len;
+            int         n_values = TSMimeHdrFieldValuesCount(resp_data.bufp, resp_data.hdr_loc, field_loc);
+            if (n_values > 0) {
               for (int k = 0; k < n_values; k++) {
                 value = TSMimeHdrFieldValueStringGet(resp_data.bufp, resp_data.hdr_loc, field_loc, k, &value_len);
                 if (!values_added) {
@@ -1044,7 +1057,7 @@ prepareResponse(InterceptData &int_data, ByteBlockList &body_blocks, string &res
           if (expires_time <= 0) {
             resp_header_fields.append("Expires: 0\r\n");
           } else {
-            char line_buf[128];
+            char      line_buf[128];
             struct tm gm_expires_time;
             int line_size = strftime(line_buf, 128, "Expires: %a, %d %b %Y %T GMT\r\n", gmtime_r(&expires_time, &gm_expires_time));
             resp_header_fields.append(line_buf, line_size);
@@ -1072,22 +1085,29 @@ ContentTypeHandler::nextObjectHeader(TSMBuffer bufp, TSMLoc hdr_loc)
 {
   TSMLoc field_loc = TSMimeHdrFieldFind(bufp, hdr_loc, TS_MIME_FIELD_CONTENT_TYPE, TS_MIME_LEN_CONTENT_TYPE);
   if (field_loc != TS_NULL_MLOC) {
-    bool values_added = false;
+    bool        values_added = false;
     const char *value;
-    int value_len;
-    int n_values = TSMimeHdrFieldValuesCount(bufp, hdr_loc, field_loc);
+    int         value_len;
+    int         n_values = TSMimeHdrFieldValuesCount(bufp, hdr_loc, field_loc);
+    if (n_values <= 0 && !_content_type_allowlist.empty()) {
+      // An empty Content-Type field with a non-empty allowlist must not pass.
+      TSHandleMLocRelease(bufp, hdr_loc, field_loc);
+      return false;
+    }
     for (int i = 0; i < n_values; ++i) {
       value = TSMimeHdrFieldValueStringGet(bufp, hdr_loc, field_loc, i, &value_len);
-      ts::TextView tv{value, value_len};
-      tv = tv.prefix(';').rtrim(std::string_view(" \t"));
+      swoc::TextView tv{value, size_t(value_len)};
+      tv = tv.take_prefix_at(';').rtrim(" \t"_tv);
       if (_content_type_allowlist.empty()) {
         ;
-      } else if (std::find_if(_content_type_allowlist.begin(), _content_type_allowlist.end(), [tv](ts::TextView tv2) -> bool {
+      } else if (std::find_if(_content_type_allowlist.begin(), _content_type_allowlist.end(), [tv](swoc::TextView tv2) -> bool {
                    return strcasecmp(tv, tv2) == 0;
                  }) == _content_type_allowlist.end()) {
+        TSHandleMLocRelease(bufp, hdr_loc, field_loc);
         return false;
       } else if (tv.empty()) {
         // allowlist is bad, contains an empty string.
+        TSHandleMLocRelease(bufp, hdr_loc, field_loc);
         return false;
       }
       if (!_added_content_type) {
@@ -1117,9 +1137,9 @@ void
 ContentTypeHandler::loadAllowList(std::string const &file_spec)
 {
   std::fstream fs;
-  char line_buffer[256];
-  bool extra_junk_on_line{false};
-  int line_num = 0;
+  char         line_buffer[256];
+  bool         extra_junk_on_line{false};
+  int          line_num = 0;
 
   fs.open(file_spec, std::ios_base::in);
   if (fs.good()) {
@@ -1129,16 +1149,16 @@ ContentTypeHandler::loadAllowList(std::string const &file_spec)
       if (!fs.good()) {
         break;
       }
-      constexpr std::string_view bs{" \t"sv};
-      ts::TextView line{line_buffer, std::size_t(fs.gcount() - 1)};
+      constexpr swoc::TextView bs{" \t"};
+      swoc::TextView           line{line_buffer, std::size_t(fs.gcount() - 1)};
       line.ltrim(bs);
       if (line.empty() || line[0] == '#') {
         // Empty/comment line.
         continue;
       }
-      ts::TextView content_type{line.take_prefix_at(bs)};
+      swoc::TextView content_type{line.take_prefix_at(bs)};
       line.trim(bs);
-      if (line.size() && (line[0] != '#')) {
+      if (!line.empty() && (line.front() != '#')) {
         extra_junk_on_line = true;
         break;
       }
@@ -1175,10 +1195,10 @@ writeStandardHeaderFields(InterceptData &int_data, int &n_bytes_written)
   }
 
   if (find(HEADER_ALLOWLIST.begin(), HEADER_ALLOWLIST.end(), TS_MIME_FIELD_LAST_MODIFIED) == HEADER_ALLOWLIST.end()) {
-    time_t time_now = static_cast<time_t>(TShrtime() / 1000000000); // it returns nanoseconds!
-    char last_modified_line[128];
+    time_t    time_now = static_cast<time_t>(TShrtime() / 1000000000); // it returns nanoseconds!
+    char      last_modified_line[128];
     struct tm gmnow;
-    int last_modified_line_size =
+    int       last_modified_line_size =
       strftime(last_modified_line, 128, "Last-Modified: %a, %d %b %Y %T GMT\r\n", gmtime_r(&time_now, &gmnow));
     if (TSIOBufferWrite(int_data.output.buffer, last_modified_line, last_modified_line_size) == TS_ERROR) {
       LOG_ERROR("Error while writing last-modified fields");
@@ -1214,7 +1234,7 @@ writeErrorResponse(InterceptData &int_data, int &n_bytes_written)
 }
 
 TSRemapStatus
-TSRemapDoRemap(void *ih, TSHttpTxn rh, TSRemapRequestInfo *rri)
+TSRemapDoRemap(void * /* ih ATS_UNUSED */, TSHttpTxn rh, TSRemapRequestInfo * /* rri ATS_UNUSED */)
 {
   TSUserArgSet(rh, arg_idx, (void *)1); /* Save for later hooks */
   return TSREMAP_NO_REMAP;              /* Continue with next remap plugin in chain */
@@ -1243,22 +1263,23 @@ TSRemapInit(TSRemapInterface *api_info, char *errbuf, int errbuf_size)
     LOG_DEBUG("txn_arg_idx: %d", arg_idx);
   }
 
-  TSDebug(DEBUG_TAG, "%s plugin's remap part is initialized", DEBUG_TAG);
+  Dbg(dbg_ctl, "%s plugin's remap part is initialized", DEBUG_TAG);
 
   return TS_SUCCESS;
 }
 
 TSReturnCode
-TSRemapNewInstance(int argc, char *argv[], void **ih, char *errbuf, int errbuf_size)
+TSRemapNewInstance(int /* argc ATS_UNUSED */, char *argv[], void **ih, char * /* errbuf ATS_UNUSED */,
+                   int /* errbuf_size ATS_UNUSED */)
 {
   *ih = nullptr;
 
-  TSDebug(DEBUG_TAG, "%s Remap Instance for '%s' created", DEBUG_TAG, argv[0]);
+  Dbg(dbg_ctl, "%s Remap Instance for '%s' created", DEBUG_TAG, argv[0]);
   return TS_SUCCESS;
 }
 
 void
-TSRemapDeleteInstance(void *ih)
+TSRemapDeleteInstance(void * /* ih ATS_UNUSED */)
 {
   return;
 }

@@ -16,7 +16,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 Plugin Statistics
 **********************
@@ -25,15 +25,21 @@ A plugin can create statistics (metrics) that are accessible in the same way as 
 statistics. In general monitoring the behavior of plugins in production is easier to do in this way
 in contrast to processing log files.
 
+   .. note::
+
+      These APIs are deprecated as of ATS v10.0.0, and will likely be removed in v11. Instead,
+      use the new APIs in `Metrics.h` diretly.
+
 Synopsis
 ========
 
-.. code-block:: c
+.. code-block:: cpp
 
     #include <ts/ts.h>
 
 .. function:: int TSStatCreate(const char * name, TSRecordDataType type, TSStatPersistence persistence, TSStatSync sync_style)
 .. function:: TSReturnCode TSStatFindName(const char * name, int * idx_ptr)
+.. function:: bool TSStatIdIsValid(int idx)
 
 .. function:: TSMgmtInt TSStatIntGet(int idx)
 .. function:: void TSStatIntSet(int idx, TSMgmtInt value)
@@ -49,7 +55,7 @@ Description
 A plugin statistic is created by :func:`TSStatCreate`. The :arg:`name` must be globally unique and
 should follow the standard dotted tag form. To avoid collisions and for easy of use the first tag
 should be the plugin name or something easily derived from it. Currently only integers are supported
-therefore :arg:`type` must be :enumerator:`~TSRecordDataType.TS_RECORDDATATYPE_INT`. The return value is
+therefore :arg:`type` must be :enumerator:`TS_RECORDDATATYPE_INT`. The return value is
 the index of the statistic. In general this should work but if it doesn't it will :code:`assert`. In
 particular, creating the same statistic twice will fail in this way, which can happen if statistics
 are created as part of or based on configuration files and |TS| is reloaded.
@@ -57,6 +63,11 @@ are created as part of or based on configuration files and |TS| is reloaded.
 :func:`TSStatFindName` locates a statistic by :arg:`name`. If found the function returns
 :const:`TS_SUCCESS` and the value pointed at by :arg:`idx_ptr` is updated to be the index of the
 statistic. Otherwise it returns ``TS_ERROR``.
+
+:func:`TSStatIdIsValid` returns :code:`true` if :arg:`idx` is the index of an existing statistic and
+:code:`false` otherwise. The functions that manipulate a statistic assert on an invalid index, so a
+plugin that obtains an index from an external source, such as a WebAssembly module, should validate
+it with :func:`TSStatIdIsValid` before using it.
 
 The values in statistics are manipulated by :func:`TSStatIntSet` to set the statistic directly,
 :func:`TSStatIntIncrement` to increase it by :arg:`value`, and :func:`TSStatIntDecrement` to
@@ -66,13 +77,13 @@ A group of records can be examined via :func:`TSRecordDump`. A set of records is
 iterated over. For each record in the set the callbac :arg:`callback` is invoked.
 
 The records are specified by the :enum:`TSRecordType`. If this is
-:enumerator:`~TSRecordType.TS_RECORDTYPE_NULL` then all records are examined. The callback is passed
+:enumerator:`TS_RECORDTYPE_NULL` then all records are examined. The callback is passed
 
    :arg:`type`
       The record type.
 
    :arg:`edata`
-      Callback context. This is the :arg:`edata` value passed to :c:func:`TSRecordDump`.
+      Callback context. This is the :arg:`edata` value passed to :func:`TSRecordDump`.
 
    :arg:`registered`
       A flag indicating if the value has been registered.

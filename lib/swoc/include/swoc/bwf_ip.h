@@ -17,11 +17,25 @@
 namespace swoc { inline namespace SWOC_VERSION_NS {
 
 // All of these expect the address to be in network order.
-BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, sockaddr const *addr);
-
 BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, in6_addr const &addr);
 
 BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, sockaddr const *addr);
+
+/// @{
+/// @internal The various @c sockaddr types are handled almost identically due to how formatting
+/// codes are handled so it's ugly to split the code base on family. Instead we depend on
+/// @a sa_family being set correctly.
+
+inline BufferWriter &
+bwformat(BufferWriter &w, bwf::Spec const &spec, sockaddr_in const *addr) {
+  return bwformat(w, spec, reinterpret_cast<sockaddr const *>(addr));
+}
+inline BufferWriter &
+bwformat(BufferWriter &w, bwf::Spec const &spec, sockaddr_in6 const *addr) {
+  return bwformat(w, spec, reinterpret_cast<sockaddr const *>(addr));
+}
+
+/// @}
 
 // Use class information for ordering.
 BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, IP4Addr const &addr);
@@ -30,11 +44,19 @@ BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, IP6Addr const &ad
 
 BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, IPAddr const &addr);
 
+BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, IP4Srv const &addr);
+
+BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, IP6Srv const &addr);
+
+BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, IPSrv const &addr);
+
 BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, IP4Range const &range);
 
 BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, IP6Range const &range);
 
 BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, IPRange const &range);
+
+BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, IPRangeView const &range);
 
 BufferWriter &bwformat(BufferWriter &w, bwf::Spec const &spec, IPNet const &net);
 
@@ -90,4 +112,5 @@ operator<<(ostream &s, swoc::IPRange const &Range) {
   swoc::LocalBufferWriter<swoc::IP_STREAM_SIZE> w;
   return s << bwformat(w, swoc::bwf::Spec::DEFAULT, Range);
 }
+
 } // namespace std

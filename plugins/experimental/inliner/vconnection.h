@@ -35,10 +35,10 @@ namespace io
   {
     template <class T> class Read
     {
-      typedef Read<T> Self;
+      using Self = Read<T>;
       TSVConn vconnection_;
-      io::IO in_;
-      T t_;
+      io::IO  in_;
+      T       t_;
 
       Read(TSVConn v, T &&t, const int64_t s) : vconnection_(v), t_(std::forward<T>(t))
       {

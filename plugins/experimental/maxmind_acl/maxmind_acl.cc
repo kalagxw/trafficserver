@@ -17,6 +17,7 @@
 */
 
 #include "mmdb.h"
+#include "ts/remap_version.h"
 
 ///////////////////////////////////////////////////////////////////////////////
 // Initialize the plugin as a remap plugin.
@@ -24,18 +25,8 @@
 TSReturnCode
 TSRemapInit(TSRemapInterface *api_info, char *errbuf, int errbuf_size)
 {
-  if (api_info->size < sizeof(TSRemapInterface)) {
-    strncpy(errbuf, "[tsremap_init] - Incorrect size of TSRemapInterface structure", errbuf_size - 1);
-    return TS_ERROR;
-  }
-
-  if (api_info->tsremap_version < TSREMAP_VERSION) {
-    snprintf(errbuf, errbuf_size, "[tsremap_init] - Incorrect API version %ld.%ld", api_info->tsremap_version >> 16,
-             (api_info->tsremap_version & 0xffff));
-    return TS_ERROR;
-  }
-
-  TSDebug(PLUGIN_NAME, "remap plugin is successfully initialized");
+  CHECK_REMAP_API_COMPATIBILITY(api_info, errbuf, errbuf_size);
+  Dbg(dbg_ctl, "remap plugin is successfully initialized");
   return TS_SUCCESS;
 }
 
@@ -54,7 +45,7 @@ TSRemapNewInstance(int argc, char *argv[], void **ih, char * /* errbuf */, int /
     return TS_ERROR;
   }
 
-  TSDebug(PLUGIN_NAME, "created remap instance with configuration %s", argv[2]);
+  Dbg(dbg_ctl, "created remap instance with configuration %s", argv[2]);
   return TS_SUCCESS;
 }
 
@@ -74,12 +65,16 @@ TSRemapStatus
 TSRemapDoRemap(void *ih, TSHttpTxn rh, TSRemapRequestInfo *rri)
 {
   if (nullptr == ih) {
-    TSDebug(PLUGIN_NAME, "No ACLs configured");
+    Dbg(dbg_ctl, "No ACLs configured");
   } else {
     Acl *a = static_cast<Acl *>(ih);
+    if (a->check_bypass(rh)) {
+      Dbg(dbg_ctl, "bypassing geo check due to bypass header");
+      return TSREMAP_NO_REMAP;
+    }
     if (!a->eval(rri, rh)) {
-      TSDebug(PLUGIN_NAME, "denying request");
-      TSHttpTxnStatusSet(rh, TS_HTTP_STATUS_FORBIDDEN);
+      Dbg(dbg_ctl, "denying request");
+      TSHttpTxnStatusSet(rh, TS_HTTP_STATUS_FORBIDDEN, PLUGIN_NAME);
       a->send_html(rh);
     }
   }

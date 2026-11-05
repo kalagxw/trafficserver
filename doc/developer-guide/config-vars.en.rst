@@ -21,7 +21,7 @@
 
 .. |RecCore.cc| replace:: ``RecCore.cc``
 
-.. _RecCore.cc: https://github.com/apache/trafficserver/blob/master/lib/records/RecCore.cc
+.. _RecCore.cc: https://github.com/apache/trafficserver/blob/master/src/records/RecCore.cc
 
 .. |RecordsConfig.cc| replace:: ``RecordsConfig.cc``
 
@@ -33,23 +33,23 @@
 
 .. |InkAPI.cc| replace:: ``InkAPI.cc``
 
-.. _InkAPI.cc: https://github.com/apache/trafficserver/blob/master/src/traffic_server/InkAPI.cc
+.. _InkAPI.cc: https://github.com/apache/trafficserver/blob/master/src/api/InkAPI.cc
 
 .. |InkAPITest.cc| replace:: ``InkAPITest.cc``
 
-.. _InkAPITest.cc: https://github.com/apache/trafficserver/blob/master/src/traffic_server/InkAPITest.cc
+.. _InkAPITest.cc: https://github.com/apache/trafficserver/blob/master/src/api/InkAPITest.cc
 
 .. |overridable_txn_vars.cc| replace:: ``overridable_txn_vars.cc``
 
 .. _overridable_txn_vars.cc: https://github.com/apache/trafficserver/blob/master/src/shared/overridable_txn_vars.cc
 
-.. |ts_lua_http_config.c| replace:: ``ts_lua_http_config.c``
+.. |ts_lua_http_config.cc| replace:: ``ts_lua_http_config.cc``
 
-.. _ts_lua_http_config.c: https://github.com/apache/trafficserver/blob/master/plugins/experimental/ts_lua/ts_lua_http_config.c
+.. _ts_lua_http_config.cc: https://github.com/apache/trafficserver/blob/master/plugins/experimental/ts_lua/ts_lua_http_config.cc
 
 .. |TSHttpOverridableConfig.en.rst| replace:: ``TSHttpOverridableConfig.en.rst``
 
-.. _TSHttpOverridableConfig.en.rst: https://github.com/apache/trafficserver/blob/master/doc/reference/api/TSHttpOverridableConfig.en.rst
+.. _TSHttpOverridableConfig.en.rst: https://github.com/apache/trafficserver/blob/master/doc/developer-guide/api/functions/TSHttpOverridableConfig.en.rst
 
 .. Referenced enumeration values
 
@@ -61,7 +61,7 @@
 Configuration Variable Implementation
 *************************************
 
-Adding a new configuration variable in :file:`records.config` requires a number
+Adding a new configuration variable in :file:`records.yaml` requires a number
 of steps which are mostly documented here.
 
 Before adding a new configuration variable, please discuss it on the mailing
@@ -123,8 +123,6 @@ update:``RecUpdateT``
    ``RECD_RESTART_TS``
       The :program:`traffic_server` process must be restarted for a new value to take effect.
 
-   ``RECD_RESTART_TM``
-      The :program:`traffic_manager` process must be restarted for a new value to take effect.
 
 required:``RecordRequiredType``
    Effectively a boolean that specifies if the record is required to be present,
@@ -153,7 +151,7 @@ check:``RecCheckT``
 pattern:``char const*``
    This provides a regular expressions (PCRE format) for validating the value,
    beyond the basic type validation performed by ``RecCheckT``. This can be
-   ``NULL`` if there is no regular expression to use.
+   ``nullptr`` if there is no regular expression to use.
 
 access:``RecAccessT``
    Access control. The valid values are:
@@ -182,7 +180,7 @@ dynamic if possible.
 Documentation and Defaults
 --------------------------
 
-A configuration variable should be documented in :file:`records.config`. There
+A configuration variable should be documented in :file:`records.yaml`. There
 are many examples in the file already that can be used for guidance. The general
 format is to use the tag ::
 
@@ -218,9 +216,9 @@ can use the form ::
 This will display the name as a link to the full definition.
 
 In general, a new configuration variable should not be present in the default
-:file:`records.config`. If it is added, such defaults should be added to the
-file ``proxy/config/records.config.default.in``. This is used to generate the
-default :file:`records.config`. Just add the variable to the file in an
+:file:`records.yaml`. If it is added, such defaults should be added to the
+file ``proxy/config/records.yaml.default.in``. This is used to generate the
+default :file:`records.yaml`. Just add the variable to the file in an
 appropriate place with a proper default as this will now override whatever
 default you put in the code for new installs.
 
@@ -229,7 +227,7 @@ Handling Updates
 
 The simplest mechanism for handling updates is the ``REC_EstablishStaticConfigXXX``
 family of functions. This mechanism will cause the value in the indicated
-instance to be updated in place when an update to :file:`records.config` occurs.
+instance to be updated in place when an update to :file:`records.yaml` occurs.
 This is done asynchronously using atomic operations. Use of these variables must
 keep that in mind.
 
@@ -312,7 +310,7 @@ required for generic access:
 
 #. Add a value to the ``TSOverridableConfigKey`` enumeration in |apidefs.h.in|_.
 
-#. Augment ``Overridable_Map`` in |overridable_txn_vars.cc|_ to include configuration variable.
+#. Augment ``ts::Overridable_Txn_Vars`` in |overridable_txn_vars.cc|_ to include configuration variable.
 
 #. Update the function ``_conf_to_memberp`` in |InkAPI.cc|_ to have a case for the enumeration value
    in ``TSOverridableConfigKey``.
@@ -320,7 +318,7 @@ required for generic access:
 #. Update the testing logic in |InkAPITest.cc|_ by adding the string name of the
    configuration variable to the ``SDK_Overridable_Configs`` array.
 
-#. Update the Lua plugin enumeration ``TSLuaOverridableConfigKey`` in |ts_lua_http_config.c|_.
+#. Update the Lua plugin enumeration ``TSLuaOverridableConfigKey`` in |ts_lua_http_config.cc|_.
 
 #. Update the documentation of :ref:`ts-overridable-config` in |TSHttpOverridableConfig.en.rst|_.
 
@@ -342,7 +340,7 @@ as a string as well as an integer.
 The module is responsible for creating an instance of :code:`MgmtConverter` with the appropriate
 load / store function pairs set. The declaration must be visible in the :ts:git:`proxy/InkAPI.cc`
 file. The function :code:`_conf_to_memberp` sets up the conversion. For the value of the enumeration
-:c:type:`TSOverridableConfigKey` that specifies the overridable variable, code is added to specify
+:cpp:type:`TSOverridableConfigKey` that specifies the overridable variable, code is added to specify
 the member and the conversion. There are default converters for the API types and if the overridable
 is one of those, it is only necessary to call :code:`_memberp_to_generic` passing in a pointer to
 the variable. For a variable with conversion, :arg:`ret` should be set to point to the variable and

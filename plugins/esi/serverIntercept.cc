@@ -27,24 +27,25 @@
 #include <string>
 #include <climits>
 #include <strings.h>
+#include "http_utils.h"
 #include <cstdio>
 
-const char *ECHO_HEADER_PREFIX        = "Echo-";
-const int ECHO_HEADER_PREFIX_LEN      = 5;
-const char *SERVER_INTERCEPT_HEADER   = "Esi-Internal";
-const int SERVER_INTERCEPT_HEADER_LEN = 12;
+const char *ECHO_HEADER_PREFIX          = "Echo-";
+const int   ECHO_HEADER_PREFIX_LEN      = 5;
+const char *SERVER_INTERCEPT_HEADER     = "Esi-Internal";
+const int   SERVER_INTERCEPT_HEADER_LEN = 12;
 
 using std::string;
 
-#define DEBUG_TAG "plugin_esi_intercept"
+static DbgCtl dbg_ctl{"plugin_esi_intercept"};
 
 struct SContData {
   TSVConn net_vc;
-  TSCont contp;
+  TSCont  contp;
 
   struct IoHandle {
-    TSVIO vio               = nullptr;
-    TSIOBuffer buffer       = nullptr;
+    TSVIO            vio    = nullptr;
+    TSIOBuffer       buffer = nullptr;
     TSIOBufferReader reader = nullptr;
     IoHandle()              = default;
     ;
@@ -63,12 +64,12 @@ struct SContData {
   IoHandle output;
 
   TSHttpParser http_parser;
-  string body;
-  int req_content_len;
-  TSMBuffer req_hdr_bufp;
-  TSMLoc req_hdr_loc;
-  bool req_hdr_parsed;
-  bool initialized;
+  string       body;
+  int          req_content_len;
+  TSMBuffer    req_hdr_bufp;
+  TSMLoc       req_hdr_loc;
+  bool         req_hdr_parsed;
+  bool         initialized;
 
   SContData(TSCont cont)
     : net_vc(nullptr),
@@ -91,7 +92,7 @@ struct SContData {
 
   ~SContData()
   {
-    TSDebug(DEBUG_TAG, "[%s] Destroying continuation data", __FUNCTION__);
+    Dbg(dbg_ctl, "[%s] Destroying continuation data", __FUNCTION__);
     TSHttpParserDestroy(http_parser);
     if (req_hdr_loc) {
       TSHandleMLocRelease(req_hdr_bufp, TS_NULL_MLOC, req_hdr_loc);
@@ -121,7 +122,7 @@ SContData::init(TSVConn vconn)
   TSHttpHdrTypeSet(req_hdr_bufp, req_hdr_loc, TS_HTTP_TYPE_REQUEST);
 
   initialized = true;
-  TSDebug(DEBUG_TAG, "[%s] SContData initialized!", __FUNCTION__);
+  Dbg(dbg_ctl, "[%s] SContData initialized!", __FUNCTION__);
   return true;
 }
 
@@ -143,12 +144,12 @@ handleRead(SContData *cont_data, bool &read_complete)
     return false;
   }
 
-  TSDebug(DEBUG_TAG, "[%s] Parsed header, avail: %d", __FUNCTION__, avail);
+  Dbg(dbg_ctl, "[%s] Parsed header, avail: %d", __FUNCTION__, avail);
 
   int consumed = 0;
   if (avail > 0) {
-    int64_t data_len;
-    const char *data;
+    int64_t         data_len;
+    const char     *data;
     TSIOBufferBlock block = TSIOBufferReaderStart(cont_data->input.reader);
     while (block != nullptr) {
       data = TSIOBufferBlockReadStart(block, cont_data->input.reader, &data_len);
@@ -156,7 +157,7 @@ handleRead(SContData *cont_data, bool &read_complete)
         const char *endptr = data + data_len;
         if (TSHttpHdrParseReq(cont_data->http_parser, cont_data->req_hdr_bufp, cont_data->req_hdr_loc, &data, endptr) ==
             TS_PARSE_DONE) {
-          TSDebug(DEBUG_TAG, "[%s] Parsed header", __FUNCTION__);
+          Dbg(dbg_ctl, "[%s] Parsed header", __FUNCTION__);
           TSMLoc content_len_loc =
             TSMimeHdrFieldFind(cont_data->req_hdr_bufp, cont_data->req_hdr_loc, TS_MIME_FIELD_CONTENT_LENGTH, -1);
           if (!content_len_loc) {
@@ -167,40 +168,40 @@ handleRead(SContData *cont_data, bool &read_complete)
           cont_data->req_content_len =
             TSMimeHdrFieldValueIntGet(cont_data->req_hdr_bufp, cont_data->req_hdr_loc, content_len_loc, 0);
           TSHandleMLocRelease(cont_data->req_hdr_bufp, cont_data->req_hdr_loc, content_len_loc);
-          TSDebug(DEBUG_TAG, "[%s] Got content length as %d", __FUNCTION__, cont_data->req_content_len);
+          Dbg(dbg_ctl, "[%s] Got content length as %d", __FUNCTION__, cont_data->req_content_len);
           if (cont_data->req_content_len <= 0) {
             TSError("[server_intercept][%s] Invalid content length [%d]", __FUNCTION__, cont_data->req_content_len);
             return false;
           }
           if (endptr - data) {
-            TSDebug(DEBUG_TAG, "[%s] Appending %ld bytes to body", __FUNCTION__, static_cast<long int>(endptr - data));
+            Dbg(dbg_ctl, "[%s] Appending %ld bytes to body", __FUNCTION__, static_cast<long int>(endptr - data));
             cont_data->body.append(data, endptr - data);
           }
           cont_data->req_hdr_parsed = true;
         }
       } else {
-        TSDebug(DEBUG_TAG, "[%s] Appending %" PRId64 " bytes to body", __FUNCTION__, data_len);
+        Dbg(dbg_ctl, "[%s] Appending %" PRId64 " bytes to body", __FUNCTION__, data_len);
         cont_data->body.append(data, data_len);
       }
       consumed += data_len;
-      block = TSIOBufferBlockNext(block);
+      block     = TSIOBufferBlockNext(block);
     }
   }
 
   TSIOBufferReaderConsume(cont_data->input.reader, consumed);
 
-  TSDebug(DEBUG_TAG, "[%s] Consumed %d bytes from input vio, avail: %d", __FUNCTION__, consumed, avail);
+  Dbg(dbg_ctl, "[%s] Consumed %d bytes from input vio, avail: %d", __FUNCTION__, consumed, avail);
 
   // Modify the input VIO to reflect how much data we've completed.
   TSVIONDoneSet(cont_data->input.vio, TSVIONDoneGet(cont_data->input.vio) + consumed);
 
   if (static_cast<int>(cont_data->body.size()) == cont_data->req_content_len) {
-    TSDebug(DEBUG_TAG, "[%s] Completely read body of size %d", __FUNCTION__, cont_data->req_content_len);
+    Dbg(dbg_ctl, "[%s] Completely read body of size %d", __FUNCTION__, cont_data->req_content_len);
     read_complete = true;
   } else {
     read_complete = false;
-    TSDebug(DEBUG_TAG, "[%s] Reenabling input vio as %ld bytes still need to be read", __FUNCTION__,
-            static_cast<long int>(cont_data->req_content_len - cont_data->body.size()));
+    Dbg(dbg_ctl, "[%s] Reenabling input vio as %ld bytes still need to be read", __FUNCTION__,
+        static_cast<long int>(cont_data->req_content_len - cont_data->body.size()));
     TSVIOReenable(cont_data->input.vio);
   }
   return true;
@@ -213,9 +214,9 @@ processRequest(SContData *cont_data)
 
   TSMLoc field_loc = TSMimeHdrFieldGet(cont_data->req_hdr_bufp, cont_data->req_hdr_loc, 0);
   while (field_loc) {
-    TSMLoc next_field_loc;
+    TSMLoc      next_field_loc;
     const char *name;
-    int name_len;
+    int         name_len;
     name = TSMimeHdrFieldNameGet(cont_data->req_hdr_bufp, cont_data->req_hdr_loc, field_loc, &name_len);
     if (name) {
       bool echo_header = false;
@@ -231,10 +232,10 @@ processRequest(SContData *cont_data)
         int n_field_values = TSMimeHdrFieldValuesCount(cont_data->req_hdr_bufp, cont_data->req_hdr_loc, field_loc);
         for (int i = 0; i < n_field_values; ++i) {
           const char *value;
-          int value_len;
+          int         value_len;
           value = TSMimeHdrFieldValueStringGet(cont_data->req_hdr_bufp, cont_data->req_hdr_loc, field_loc, i, &value_len);
           if (!value_len) {
-            TSDebug(DEBUG_TAG, "[%s] Error while getting value #%d of header [%.*s]", __FUNCTION__, i, name_len, name);
+            Dbg(dbg_ctl, "[%s] Error while getting value #%d of header [%.*s]", __FUNCTION__, i, name_len, name);
           } else {
             if (reply_header[reply_header.size() - 2] != ':') {
               reply_header.append(", ");
@@ -272,7 +273,7 @@ processRequest(SContData *cont_data)
     return false;
   }
   int total_bytes_written = reply_header.size() + body_size;
-  TSDebug(DEBUG_TAG, "[%s] Wrote reply of size %d", __FUNCTION__, total_bytes_written);
+  Dbg(dbg_ctl, "[%s] Wrote reply of size %d", __FUNCTION__, total_bytes_written);
   TSVIONBytesSet(cont_data->output.vio, total_bytes_written);
 
   TSVIOReenable(cont_data->output.vio);
@@ -282,14 +283,14 @@ processRequest(SContData *cont_data)
 static int
 serverIntercept(TSCont contp, TSEvent event, void *edata)
 {
-  TSDebug(DEBUG_TAG, "[%s] Received event: %d", __FUNCTION__, static_cast<int>(event));
+  Dbg(dbg_ctl, "[%s] Received event: %d", __FUNCTION__, static_cast<int>(event));
 
-  SContData *cont_data = static_cast<SContData *>(TSContDataGet(contp));
-  bool read_complete   = false;
-  bool shutdown        = false;
+  SContData *cont_data     = static_cast<SContData *>(TSContDataGet(contp));
+  bool       read_complete = false;
+  bool       shutdown      = false;
   switch (event) {
   case TS_EVENT_NET_ACCEPT:
-    TSDebug(DEBUG_TAG, "[%s] Received net accept event", __FUNCTION__);
+    Dbg(dbg_ctl, "[%s] Received net accept event", __FUNCTION__);
     TSAssert(cont_data->initialized == false);
     if (!cont_data->init(static_cast<TSVConn>(edata))) {
       TSError("[server_intercept][%s] Could not initialize continuation data!", __FUNCTION__);
@@ -297,7 +298,7 @@ serverIntercept(TSCont contp, TSEvent event, void *edata)
     }
     break;
   case TS_EVENT_VCONN_READ_READY:
-    TSDebug(DEBUG_TAG, "[%s] Received read ready event", __FUNCTION__);
+    Dbg(dbg_ctl, "[%s] Received read ready event", __FUNCTION__);
     if (!handleRead(cont_data, read_complete)) {
       TSError("[server_intercept][%s] Error while reading from input vio", __FUNCTION__);
       return 0;
@@ -306,14 +307,14 @@ serverIntercept(TSCont contp, TSEvent event, void *edata)
   case TS_EVENT_VCONN_READ_COMPLETE:
   case TS_EVENT_VCONN_EOS:
     // intentional fall-through
-    TSDebug(DEBUG_TAG, "[%s] Received read complete/eos event %d", __FUNCTION__, event);
+    Dbg(dbg_ctl, "[%s] Received read complete/eos event %d", __FUNCTION__, event);
     read_complete = true;
     break;
   case TS_EVENT_VCONN_WRITE_READY:
-    TSDebug(DEBUG_TAG, "[%s] Received write ready event", __FUNCTION__);
+    Dbg(dbg_ctl, "[%s] Received write ready event", __FUNCTION__);
     break;
   case TS_EVENT_VCONN_WRITE_COMPLETE:
-    TSDebug(DEBUG_TAG, "[%s] Received write complete event", __FUNCTION__);
+    Dbg(dbg_ctl, "[%s] Received write complete event", __FUNCTION__);
     shutdown = true;
     break;
   case TS_EVENT_ERROR:
@@ -329,12 +330,12 @@ serverIntercept(TSCont contp, TSEvent event, void *edata)
     if (!processRequest(cont_data)) {
       TSError("[server_intercept][%s] Failed to process process", __FUNCTION__);
     } else {
-      TSDebug(DEBUG_TAG, "[%s] Processed request successfully", __FUNCTION__);
+      Dbg(dbg_ctl, "[%s] Processed request successfully", __FUNCTION__);
     }
   }
 
   if (shutdown) {
-    TSDebug(DEBUG_TAG, "[%s] Completed request processing. Shutting down...", __FUNCTION__);
+    Dbg(dbg_ctl, "[%s] Completed request processing. Shutting down...", __FUNCTION__);
     if (cont_data->net_vc) {
       TSVConnClose(cont_data->net_vc);
     }
@@ -350,7 +351,9 @@ setupServerIntercept(TSHttpTxn txnp)
 {
   TSCont contp = TSContCreate(serverIntercept, TSMutexCreate());
   if (!contp) {
-    TSError("[server_intercept][%s] Could not create intercept request", __FUNCTION__);
+    // Get URL for error reporting.
+    std::string url_string = getRequestUrlString(txnp);
+    TSError("[server_intercept][%s] Could not create intercept request for URL [%s]", __FUNCTION__, url_string.c_str());
     return false;
   }
   SContData *cont_data = new SContData(contp);
@@ -358,6 +361,6 @@ setupServerIntercept(TSHttpTxn txnp)
   TSHttpTxnServerIntercept(contp, txnp);
   TSHttpTxnCntlSet(txnp, TS_HTTP_CNTL_RESPONSE_CACHEABLE, true);
   TSHttpTxnCntlSet(txnp, TS_HTTP_CNTL_REQUEST_CACHEABLE, true);
-  TSDebug(DEBUG_TAG, "[%s] Setup server intercept successfully", __FUNCTION__);
+  Dbg(dbg_ctl, "[%s] Setup server intercept successfully", __FUNCTION__);
   return true;
 }

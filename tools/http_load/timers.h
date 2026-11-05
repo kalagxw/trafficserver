@@ -39,8 +39,8 @@
 */
 typedef union {
   void *p;
-  int i;
-  long l;
+  int   i;
+  long  l;
 } ClientData;
 
 extern ClientData JunkClientData; /* for use when you don't care */
@@ -53,14 +53,14 @@ typedef void TimerProc(ClientData client_data, struct timeval *nowP);
 
 /* The Timer struct. */
 typedef struct TimerStruct {
-  TimerProc *timer_proc;
-  ClientData client_data;
-  long msecs;
-  int periodic;
-  struct timeval time;
+  TimerProc          *timer_proc;
+  ClientData          client_data;
+  long                msecs;
+  int                 periodic;
+  struct timeval      time;
   struct TimerStruct *prev;
   struct TimerStruct *next;
-  int hash;
+  int                 hash;
 } Timer;
 
 /* Initialize the timer package. */
@@ -97,5 +97,5 @@ extern void tmr_cancel(Timer *timer);
 /* Clean up the timers package, freeing any unused storage. */
 extern void tmr_cleanup(void);
 
-/* Cancel all timers and free storage, usually in preparation for exitting. */
+/* Cancel all timers and free storage, usually in preparation for exiting. */
 extern void tmr_destroy(void);

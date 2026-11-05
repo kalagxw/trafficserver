@@ -23,48 +23,70 @@
 
 #include <string>
 
+#include <tscore/ink_assert.h>
+
 #include "matcher.h"
 #include "factory.h"
 #include "resources.h"
 #include "parser.h"
+#include "conditions.h"
+#include "operators.h"
 
 ///////////////////////////////////////////////////////////////////////////////
-// Class holding one ruleset. A ruleset is one (or more) pre-conditions, and
-// one (or more) operators.
+// RuleSet: Represents a complete wrapping a single OperatorIf.
 //
 class RuleSet
 {
 public:
-  RuleSet() { TSDebug(PLUGIN_NAME_DBG, "RuleSet CTOR"); }
-
-  ~RuleSet()
-  {
-    TSDebug(PLUGIN_NAME_DBG, "RulesSet DTOR");
-    delete next;
-    delete _cond;
-    delete _oper;
-  }
+  RuleSet();
+  ~RuleSet();
 
   // noncopyable
-  RuleSet(const RuleSet &) = delete;
+  RuleSet(const RuleSet &)        = delete;
   void operator=(const RuleSet &) = delete;
 
-  // No reason to inline these
-  void append(RuleSet *rule);
-  bool add_condition(Parser &p, const char *filename, int lineno);
-  bool add_operator(Parser &p, const char *filename, int lineno);
+  void        append(std::unique_ptr<RuleSet> rule);
+  Condition  *make_condition(Parser &p, const char *filename, int lineno);
   ResourceIDs get_all_resource_ids() const;
+  bool        add_operator(Parser &p, const char *filename, int lineno);
+  bool        add_operator(std::unique_ptr<Operator> op);
+
+  ConditionGroup *
+  get_group()
+  {
+    return _op_if.get_group();
+  }
+
+  Parser::CondClause
+  get_clause() const
+  {
+    return _op_if.get_clause();
+  }
+
+  ConditionGroup *
+  new_section(Parser::CondClause clause)
+  {
+    return _op_if.new_section(clause);
+  }
 
   bool
   has_operator() const
   {
-    return nullptr != _oper;
+    return _op_if.has_operator();
   }
 
   bool
-  has_condition() const
+  section_has_condition() const
   {
-    return nullptr != _cond;
+    auto *sec = _op_if.cur_section();
+    return sec ? sec->group.has_conditions() : false;
+  }
+
+  bool
+  section_has_operator() const
+  {
+    auto *sec = _op_if.cur_section();
+    return sec ? sec->has_operator() : false;
   }
 
   void
@@ -86,37 +108,19 @@ public:
   }
 
   bool
-  eval(const Resources &res) const
-  {
-    if (nullptr == _cond) {
-      return true;
-    } else {
-      return _cond->do_eval(res);
-    }
-  }
-
-  bool
   last() const
   {
     return _last;
   }
 
-  OperModifiers
-  exec(const Resources &res) const
-  {
-    _oper->do_exec(res);
-    return _opermods;
-  }
+  OperModifiers exec(const Resources &res) const;
 
-  RuleSet *next = nullptr; // Linked list
+  // Linked list of RuleSets
+  std::unique_ptr<RuleSet> next;
 
 private:
-  Condition *_cond   = nullptr;                        // First pre-condition (linked list)
-  Operator *_oper    = nullptr;                        // First operator (linked list)
+  OperatorIf   _op_if;
   TSHttpHookID _hook = TS_HTTP_READ_RESPONSE_HDR_HOOK; // Which hook is this rule for
-
-  // State values (updated when conds / operators are added)
-  ResourceIDs _ids        = RSRC_NONE;
-  OperModifiers _opermods = OPER_NONE;
-  bool _last              = false;
+  ResourceIDs  _ids  = RSRC_NONE;
+  bool         _last = false;
 };

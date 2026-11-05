@@ -38,13 +38,19 @@ Operator::initialize(Parser &p)
 {
   Statement::initialize(p);
 
-  if (p.mod_exist("L")) {
+  if (p.consume_mod("L") || p.consume_mod("LAST")) {
     _mods = static_cast<OperModifiers>(_mods | OPER_LAST);
   }
 
-  if (p.mod_exist("QSA")) {
+  if (p.consume_mod("QSA")) {
     _mods = static_cast<OperModifiers>(_mods | OPER_QSA);
   }
+
+  if (p.consume_mod("I") || p.consume_mod("INV")) {
+    _mods = static_cast<OperModifiers>(_mods | OPER_INV);
+  }
+
+  p.validate_mods();
 }
 
 void
@@ -52,7 +58,8 @@ OperatorHeaders::initialize(Parser &p)
 {
   Operator::initialize(p);
 
-  _header = p.get_arg();
+  _header     = p.get_arg();
+  _header_wks = TSMimeHdrStringToWKS(_header.c_str(), _header.length());
 
   require_resources(RSRC_SERVER_RESPONSE_HEADERS);
   require_resources(RSRC_SERVER_REQUEST_HEADERS);

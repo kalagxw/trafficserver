@@ -1,0 +1,8 @@
+VARS {
+    bool_0: bool;
+    bool_1: bool;
+}
+
+REMAP {
+    bool_1 = bool_0;
+}

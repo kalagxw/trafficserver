@@ -32,14 +32,14 @@ static TSTextLogObject pluginlog;
 bool
 is_get_request(TSHttpTxn transaction)
 {
-  TSMLoc req_loc;
+  TSMLoc    req_loc;
   TSMBuffer req_bufp;
   if (TSHttpTxnClientReqGet(transaction, &req_bufp, &req_loc) == TS_ERROR) {
     TSError("Error while retrieving client request header\n");
     return false;
   }
-  int method_len     = 0;
-  const char *method = TSHttpHdrMethodGet(req_bufp, req_loc, &method_len);
+  int         method_len = 0;
+  const char *method     = TSHttpHdrMethodGet(req_bufp, req_loc, &method_len);
   if (method_len != static_cast<int>(strlen(TS_HTTP_METHOD_GET)) || strncasecmp(method, TS_HTTP_METHOD_GET, method_len) != 0) {
     TSHandleMLocRelease(req_bufp, TS_NULL_MLOC, req_loc);
     return false;
@@ -49,7 +49,7 @@ is_get_request(TSHttpTxn transaction)
 }
 
 int
-global_handler(TSCont continuation, TSEvent event, void *data)
+global_handler(TSCont /* continuation ATS_UNUSED */, TSEvent event, void *data)
 {
   TSHttpSsn session     = static_cast<TSHttpSsn>(data);
   TSHttpTxn transaction = static_cast<TSHttpTxn>(data);
@@ -64,11 +64,11 @@ global_handler(TSCont continuation, TSEvent event, void *data)
     return 0;
 
   default:
-    return 0;
+    TSError("[%s] global_handler: unexpected event: %d\n", plugin_name, event);
+    break;
   }
 
   TSHttpSsnReenable(session, TS_EVENT_HTTP_CONTINUE);
-
   return 0;
 }
 
@@ -87,5 +87,14 @@ TSPluginInit(int argc, const char **argv)
   }
 
   TSAssert(TS_SUCCESS == TSTextLogObjectCreate(plugin_name, TS_LOG_MODE_ADD_TIMESTAMP, &pluginlog));
+
+  if (argc > 1 && strcmp(argv[1], "--write-during-init") == 0) {
+    const std::string long_line(5000, 'i');
+
+    for (int i = 0; i < 2; ++i) {
+      TSAssert(TS_SUCCESS == TSTextLogObjectWrite(pluginlog, "Writing during plugin initialization: %s", long_line.c_str()));
+    }
+  }
+
   TSHttpHookAdd(TS_HTTP_READ_REQUEST_HDR_HOOK, TSContCreate(global_handler, nullptr));
 }

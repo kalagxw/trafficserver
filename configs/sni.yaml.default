@@ -20,12 +20,20 @@
 #    verify_client_ca_certs   - specifies an alternate set of certificate authority certs to use to verify the client cert.
 #    host_sni_policy          - sets the flag to control how policy impacting mismatches between host header and SNI values are dealt with;
 #                               parameters = one of 'DISABLED', 'PERMISSIVE', or 'ENFORCED'
-#    valid_tls_versions_in    - sets the list of TLS protocols that will be offered to user agents during the TLS negotiation;
+#    valid_tls_version_min_in - sets the minimum TLS version that will be offered to user agents during the TLS negotiation;
+#                               parameters = one of 'TLSv1', 'TLSv1_1', 'TLSv1_2', and 'TLSv1_3'.
+#    valid_tls_version_max_in - sets the maximum TLS version that will be offered to user agents during the TLS negotiation;
 #                               parameters = one of 'TLSv1', 'TLSv1_1', 'TLSv1_2', and 'TLSv1_3'.
 #    client_cert              - sets the client certificate to present to the server specified in dest_host; parameters = certificate file .
 #                               The location of the certificate file is relative to proxy.config.ssl.server.cert.path directory.
 #    client_key               - sets the file containing the client private key that corresponds to the certificate for the outbound connection.
 #    client_sni_policy        - policy of SNI on outbound connection.
+#    ssl_ticket_enabled       - enables or disables session tickets for matched inbound TLS connections; parameters = 1 or 0.
+#                               This overrides proxy.config.ssl.server.session_ticket.enable.
+#    ssl_ticket_number        - sets the number of TLSv1.3 session tickets issued for matched inbound TLS connections;
+#                               parameters = INTEGER. This overrides proxy.config.ssl.server.session_ticket.number.
+#                               BoringSSL does not support setting the ticket number on a per-SNI basis,
+#                               so this configuration is ignored when ATS is linked against BoringSSL.
 #    http2                    - adds or removes HTTP/2 (H2) from the protocol list advertised by ATS; parameter required = None, parameters = on or off
 #    tunnel_route             - sets the e2e tunnel route
 #    forward_route            - destination as an FQDN and port, separated by a colon :.

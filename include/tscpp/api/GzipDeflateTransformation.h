@@ -21,6 +21,8 @@
  * @brief Gzip Deflate Transformation can be used to compress content.
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include <string>
@@ -81,7 +83,7 @@ namespace transformations
     ~GzipDeflateTransformation() override;
 
   private:
-    GzipDeflateTransformationState *state_; /** Internal state for Gzip Deflate Transformations */
+    std::unique_ptr<GzipDeflateTransformationState> state_; /** Internal state for Gzip Deflate Transformations */
   };
 } // namespace transformations
 } // namespace atscppapi

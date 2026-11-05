@@ -1,0 +1,384 @@
+/** @file
+
+  A brief file description
+
+  @par License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+
+/*************************** -*- Mod: C++ -*- ******************************
+  SSLSNIConfig.cc
+   Created On      : 05/02/2017
+
+   Description:
+   SNI based Configuration in ATS
+ ****************************************************************************/
+
+#include "P_SSLUtils.h"
+#include "P_SSLConfig.h"
+#include "SSLRPKUtils.h"
+#include "iocore/net/SSLSNIConfig.h"
+#include "iocore/net/SNIActionItem.h"
+#include "mgmt/config/ConfigContextDiags.h"
+#include "tscore/Diags.h"
+#include "tscore/Layout.h"
+#include "tscore/TSSystemState.h"
+#include "tsutil/ts_ip.h"
+#include "tsutil/Convert.h"
+
+#include <netinet/in.h>
+#include <sstream>
+#include <utility>
+#include <algorithm>
+#include <functional>
+#include <utility>
+
+namespace
+{
+DbgCtl dbg_ctl_ssl{"ssl"};
+DbgCtl dbg_ctl_ssl_sni{"ssl_sni"};
+DbgCtl dbg_ctl_sni{"sni"};
+
+bool
+is_port_in_the_ranges(const std::vector<ts::port_range_t> &port_ranges, in_port_t port)
+{
+  return std::any_of(port_ranges.begin(), port_ranges.end(),
+                     [port](ts::port_range_t const &port_range) { return port_range.contains(port); });
+}
+} // namespace
+
+////
+// NamedElement
+//
+NamedElement::NamedElement(NamedElement &&other)
+{
+  *this = std::move(other);
+}
+
+NamedElement &
+NamedElement::operator=(NamedElement &&other)
+{
+  if (this != &other) {
+    match               = std::move(other.match);
+    inbound_port_ranges = std::move(other.inbound_port_ranges);
+    rank                = other.rank;
+  }
+  return *this;
+}
+
+void
+NamedElement::set_glob_name(std::string name)
+{
+  std::string::size_type pos = 0;
+  while ((pos = name.find('.', pos)) != std::string::npos) {
+    name.replace(pos, 1, "\\.");
+    pos += 2;
+  }
+  pos = 0;
+  while ((pos = name.find('*', pos)) != std::string::npos) {
+    name.replace(pos, 1, "(.{0,})");
+  }
+  Dbg(dbg_ctl_ssl_sni, "Regexed fqdn=%s", name.c_str());
+  set_regex_name(name);
+}
+
+void
+NamedElement::set_regex_name(const std::string &regex_name)
+{
+  if (!regex_name.empty()) {
+    match.compile(regex_name, REFlags::RE_ANCHORED | REFlags::RE_CASE_INSENSITIVE);
+  }
+}
+
+////
+// SNIConfigParams
+//
+const NextHopProperty *
+SNIConfigParams::get_property_config(std::string_view servername) const
+{
+  const NextHopProperty *nps = nullptr;
+  RegexMatches           matches;
+  for (auto &&item : next_hop_list) {
+    if (item.match.exec(servername, matches, RE_FULL_MATCH) >= 0) {
+      nps = &item.prop;
+      break;
+    }
+  }
+  return nps;
+}
+
+bool
+SNIConfigParams::load_sni_config()
+{
+  uint32_t             count = 0;
+  ats_wildcard_matcher wildcard;
+
+  for (auto &item : yaml_sni.items) {
+    Dbg(dbg_ctl_ssl, "name: %s", item.fqdn.data());
+
+    ActionElement *element = nullptr;
+
+    // servername is case-insensitive, store & find it in lower case
+    char lower_case_name[TS_MAX_HOST_NAME_LEN + 1];
+    ts::transform_lower(item.fqdn, lower_case_name);
+
+    if (wildcard.match(lower_case_name)) {
+      auto &ai = sni_action_list.emplace_back();
+      ai.set_glob_name(lower_case_name);
+      element = &ai;
+    } else {
+      auto it = sni_action_map.emplace(std::make_pair(lower_case_name, ActionElement()));
+      if (it == sni_action_map.end()) {
+        Error("error on loading sni yaml - fqdn=%s", item.fqdn.c_str());
+        return false;
+      }
+
+      element = &it->second;
+    }
+
+    element->inbound_port_ranges = item.inbound_port_ranges;
+    element->rank                = count++;
+
+    item.populate_sni_actions(element->actions);
+    if (!set_next_hop_properties(item)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool
+SNIConfigParams::set_next_hop_properties(YamlSNIConfig::Item const &item)
+{
+  auto &nps = next_hop_list.emplace_back();
+  if (!load_certs_if_client_cert_specified(item, nps)) {
+    return false;
+  };
+
+  nps.set_glob_name(item.fqdn);
+  nps.prop.verify_server_policy     = item.verify_server_policy;
+  nps.prop.verify_server_properties = item.verify_server_properties;
+  nps.prop.client_rpk_enabled       = item.client_rpk_enabled;
+
+  return true;
+}
+
+bool
+SNIConfigParams::load_certs_if_client_cert_specified(YamlSNIConfig::Item const &item, NextHopItem &nps)
+{
+  if (!item.client_cert.empty()) {
+    SSLConfig::scoped_config params;
+    nps.prop.client_cert_file = Layout::get()->relative_to(params->clientCertPathOnly, item.client_cert.data());
+    if (!item.client_key.empty()) {
+      nps.prop.client_key_file = Layout::get()->relative_to(params->clientKeyPathOnly, item.client_key.data());
+    }
+
+    auto ctx =
+      params->getCTX(nps.prop.client_cert_file, nps.prop.client_key_file, params->clientCACertFilename, params->clientCACertPath);
+    if (ctx.get() == nullptr) {
+      return false;
+    }
+  }
+
+#if TS_USE_RPK
+  if (!item.server_rpk_ca.empty()) {
+    SSLConfig::scoped_config params;
+    nps.prop.server_rpk_ca_file = Layout::get()->relative_to(params->clientCACertPath, item.server_rpk_ca.data());
+    // Watched so that replacing the file in place is picked up by a configuration reload, which is
+    // the only point the set below is re-read.
+    if (SSLConfigParams::load_ssl_file_cb != nullptr) {
+      SSLConfigParams::load_ssl_file_cb(nps.prop.server_rpk_ca_file.c_str());
+    }
+    // Parsed once here rather than re-parsed from disk on every outbound handshake to this next
+    // hop; also fails the config load now rather than at handshake time if the keys are unreadable.
+    auto trusted = std::make_shared<SSLRPKUtils::TrustedKeySet>();
+    if (!SSLRPKUtils::loadTrustedKeys(nps.prop.server_rpk_ca_file.c_str(), *trusted)) {
+      return false;
+    }
+    // Taken once here for the same reason: it identifies the pinned set in the origin session cache
+    // key, so a resumption cannot inherit the authentication of a set that has since been replaced.
+    nps.prop.server_rpk_ca_digest = SSLRPKUtils::digestTrustedKeys(*trusted);
+    if (nps.prop.server_rpk_ca_digest.empty()) {
+      return false;
+    }
+    nps.prop.server_rpk_ca = std::move(trusted);
+  }
+#endif
+
+  return true;
+}
+
+/**
+  CAVEAT: the "fqdn" field in the sni.yaml accepts wildcards (*), but it has a negative performance impact.
+  */
+std::pair<const ActionVector *, ActionItem::Context>
+SNIConfigParams::get(std::string_view servername, in_port_t dest_incoming_port) const
+{
+  const ActionElement *element = nullptr;
+
+  // Check for exact matches
+  char lower_case_name[TS_MAX_HOST_NAME_LEN + 1];
+  ts::transform_lower(servername, lower_case_name);
+
+  Dbg(dbg_ctl_sni, "lower_case_name=%s", lower_case_name);
+
+  auto range = sni_action_map.equal_range(lower_case_name);
+  for (auto it = range.first; it != range.second; ++it) {
+    Dbg(dbg_ctl_sni, "match with %s", it->first.c_str());
+
+    if (!is_port_in_the_ranges(it->second.inbound_port_ranges, dest_incoming_port)) {
+      continue;
+    }
+
+    const ActionElement *candidate = &it->second;
+    if (element == nullptr) {
+      element = candidate;
+    } else if (candidate->rank < element->rank) {
+      element = &it->second;
+    }
+  }
+
+  // Check for wildcard matches
+  RegexMatches matches;
+
+  for (auto const &retval : sni_action_list) {
+    if (element != nullptr && element->rank < retval.rank) {
+      break;
+    }
+
+    if (retval.match.empty() && servername.length() == 0) {
+      return {&retval.actions, {}};
+    } else if (retval.match.exec(servername, matches, RE_FULL_MATCH) >= 0) {
+      if (!is_port_in_the_ranges(retval.inbound_port_ranges, dest_incoming_port)) {
+        continue;
+      }
+      if (matches.size() == 1) {
+        return {&retval.actions, {}};
+      }
+
+      ActionItem::Context::CapturedGroupViewVec groups;
+      groups.reserve(matches.size());
+      for (int count = 1; count < matches.size(); count++) {
+        groups.emplace_back(matches[count]);
+      }
+      return {&retval.actions, {std::move(groups)}};
+    }
+  }
+
+  if (element != nullptr) {
+    return {&element->actions, {}};
+  } else {
+    return {nullptr, {}};
+  }
+}
+
+bool
+SNIConfigParams::initialize(ConfigContext ctx)
+{
+  std::string sni_filename = RecConfigReadConfigPath("proxy.config.ssl.servername.filename");
+  return initialize(sni_filename, ctx);
+}
+
+bool
+SNIConfigParams::initialize(std::string const &sni_filename, ConfigContext ctx)
+{
+  CfgLoadInProgress(ctx, "%s loading ...", sni_filename.c_str());
+
+  struct stat sbuf;
+  if (stat(sni_filename.c_str(), &sbuf) == -1 && errno == ENOENT) {
+    CfgLoadLog(ctx, DL_Warning, "Loading SNI configuration - %s doesn't exist", sni_filename.c_str());
+    return true;
+  }
+
+  YamlSNIConfig yaml_sni_tmp;
+  auto          zret = yaml_sni_tmp.loader(sni_filename);
+  if (!zret.is_ok()) {
+    std::stringstream errMsg;
+    errMsg << zret;
+    if (TSSystemState::is_initializing()) {
+      Emergency("%s failed to load: %s", sni_filename.c_str(), errMsg.str().c_str());
+    } else {
+      CfgLoadFail(ctx, "%s failed to load: %s", sni_filename.c_str(), errMsg.str().c_str());
+    }
+    return false;
+  }
+  yaml_sni = std::move(yaml_sni_tmp);
+
+  return load_sni_config();
+}
+
+SNIConfigParams::~SNIConfigParams()
+{
+  // sni_action_map, sni_action_list and next_hop_list should cleanup with the params object
+}
+
+////
+// SNIConfig
+//
+int                   SNIConfig::_configid      = 0;
+std::function<void()> SNIConfig::on_reconfigure = nullptr;
+
+void
+SNIConfig::startup()
+{
+  if (!reconfigure()) {
+    std::string sni_filename = RecConfigReadConfigPath("proxy.config.ssl.servername.filename");
+    Fatal("failed to load %s", sni_filename.c_str());
+  }
+}
+
+int
+SNIConfig::reconfigure(ConfigContext ctx)
+{
+  SNIConfigParams *params = new SNIConfigParams;
+
+  std::string sni_filename = RecConfigReadConfigPath("proxy.config.ssl.servername.filename");
+  bool        retStatus    = params->initialize(sni_filename, ctx);
+
+  if (retStatus) {
+    _configid = configProcessor.set(_configid, params);
+    if (SNIConfig::on_reconfigure) {
+      SNIConfig::on_reconfigure();
+    }
+    CfgLoadComplete(ctx, "%s finished loading", sni_filename.c_str());
+  } else {
+    delete params;
+    CfgLoadFail(ctx, "%s failed to load", sni_filename.c_str());
+  }
+
+  return retStatus ? 1 : 0;
+}
+
+SNIConfigParams *
+SNIConfig::acquire()
+{
+  return static_cast<SNIConfigParams *>(configProcessor.get(_configid));
+}
+
+void
+SNIConfig::release(SNIConfigParams *params)
+{
+  configProcessor.release(_configid, params);
+}
+
+void
+SNIConfig::set_on_reconfigure_callback(std::function<void()> cb)
+{
+  SNIConfig::on_reconfigure = std::move(cb);
+}

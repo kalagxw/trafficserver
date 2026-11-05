@@ -1,0 +1,86 @@
+/**@file
+
+   A brief file description
+
+ @par License
+
+   Licensed to the Apache Software
+   Foundation(ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+
+#include "iocore/net/ReadWriteEventIO.h"
+#include "iocore/net/NetHandler.h"
+#include "ts/ats_probe.h"
+namespace
+{
+DbgCtl dbg_ctl_iocore_net_main{"iocore_net_main"};
+
+} // end anonymous namespace
+
+int
+ReadWriteEventIO::start(EventLoop l, NetEvent *ne, NetHandler *nh, int events)
+{
+  _ne = ne;
+  _nh = nh;
+  return start_common(l, ne->get_fd(), events);
+}
+
+int
+ReadWriteEventIO::start(EventLoop l, int afd, NetEvent *ne, NetHandler *nh, int events)
+{
+  _ne = ne;
+  _nh = nh;
+  return start_common(l, afd, events);
+}
+
+void
+ReadWriteEventIO::process_event(int flags)
+{
+  // A migrated connection may have an event already fetched from the old kqueue.
+  // Do not put its closing VC back on a ready list.
+#if TS_USE_KQUEUE
+  if (event_loop.load() == nullptr) {
+    return;
+  }
+#endif
+
+  ATS_PROBE2(eventio_rw_process_event, _ne->get_fd(), flags);
+  if (flags & (EVENTIO_ERROR)) {
+    _ne->set_error_from_socket();
+  }
+  if (flags & (EVENTIO_READ)) {
+    _ne->read.triggered = 1;
+    if (!_nh->read_ready_list.in(_ne)) {
+      _nh->read_ready_list.enqueue(_ne);
+    }
+  }
+  if (flags & (EVENTIO_WRITE)) {
+    _ne->write.triggered = 1;
+    if (!_nh->write_ready_list.in(_ne)) {
+      _nh->write_ready_list.enqueue(_ne);
+    }
+  } else if (!(flags & (EVENTIO_READ))) {
+    Dbg(dbg_ctl_iocore_net_main, "Unhandled epoll event: 0x%04x", flags);
+    // In practice we sometimes see EPOLLERR and EPOLLHUP through there
+    // Anything else would be surprising
+    ink_assert((flags & ~(EVENTIO_ERROR)) == 0);
+    _ne->write.triggered = 1;
+    if (!_nh->write_ready_list.in(_ne)) {
+      _nh->write_ready_list.enqueue(_ne);
+    }
+  }
+}

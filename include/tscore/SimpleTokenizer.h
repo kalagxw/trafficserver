@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -189,10 +189,10 @@ public:
 private:
   char *_data = nullptr; // a pointer to the input data itself,
   // or to a copy of it
-  char _delimiter; // the token delimiter
-  unsigned _mode;  // flags that determine the
+  char     _delimiter; // the token delimiter
+  unsigned _mode;      // flags that determine the
   // mode of operation
-  char _escape;      // the escape character
+  char   _escape;    // the escape character
   size_t _start = 0; // pointer to the start of the next
   // token
   size_t _length = 0; // the length of _data
@@ -232,8 +232,8 @@ private:
 
         // set end
         //
-        size_t end     = _start;
-        int delimCount = 0;
+        size_t end        = _start;
+        int    delimCount = 0;
         while (end < _length && (_data[end] != delimiter || (end && (_data[end - 1] == _escape ? (hasEsc = true) : 0)) ||
                                  ((++delimCount < numTokens) && (end < _length - 1)))) {
           ++end;
@@ -246,14 +246,16 @@ private:
         // CONSIDER_NULL_FIELDS flag is not set
         //
         if (!(_mode & CONSIDER_NULL_FIELDS)) {
-          while (_data[--end] == delimiter)
-            ;
+          while (_data[--end] == delimiter) {
+            // do nothing
+          }
           ++end;
         }
 
         if (!(_mode & KEEP_WHITESPACE_RIGHT)) {
-          while (isspace(_data[--end]))
-            ;
+          while (isspace(_data[--end])) {
+            // do nothing
+          }
           ++end;
         }
 

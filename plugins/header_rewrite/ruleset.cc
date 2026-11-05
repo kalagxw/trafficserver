@@ -19,82 +19,108 @@
 // ruleset.cc: implementation of the ruleset class
 //
 //
+#include <exception>
 #include <string>
 
 #include "ruleset.h"
 #include "factory.h"
+#include "operators.h"
 
-///////////////////////////////////////////////////////////////////////////////
-// Class implementation (no reason to have these inline)
-//
-void
-RuleSet::append(RuleSet *rule)
+RuleSet::RuleSet()
 {
-  RuleSet *tmp = this;
-
-  TSReleaseAssert(rule->next == nullptr);
-
-  while (tmp->next) {
-    tmp = tmp->next;
-  }
-  tmp->next = rule;
+  Dbg(dbg_ctl, "RuleSet CTOR");
 }
 
-bool
-RuleSet::add_condition(Parser &p, const char *filename, int lineno)
+RuleSet::~RuleSet()
+{
+  Dbg(dbg_ctl, "RulesSet DTOR");
+}
+
+OperModifiers
+RuleSet::exec(const Resources &res) const
+{
+  return _op_if.exec_and_return_mods(res);
+}
+
+void
+RuleSet::append(std::unique_ptr<RuleSet> rule)
+{
+  TSReleaseAssert(rule->next == nullptr);
+  std::unique_ptr<RuleSet> *cur = &next;
+
+  while (*cur) {
+    cur = &(*cur)->next;
+  }
+
+  *cur = std::move(rule);
+}
+
+// This stays here, since the condition, albeit owned by a group, is tightly couple to the ruleset.
+Condition *
+RuleSet::make_condition(Parser &p, const char *filename, int lineno)
 {
   Condition *c = condition_factory(p.get_op());
 
-  if (nullptr != c) {
-    TSDebug(PLUGIN_NAME, "   Adding condition: %%{%s} with arg: %s", p.get_op().c_str(), p.get_arg().c_str());
-    c->initialize(p);
-    if (!c->set_hook(_hook)) {
-      delete c;
-      TSError("[%s] in %s:%d: can't use this condition in hook=%s: %%{%s} with arg: %s", PLUGIN_NAME, filename, lineno,
-              TSHttpHookNameLookup(_hook), p.get_op().c_str(), p.get_arg().c_str());
-      return false;
-    }
-    if (nullptr == _cond) {
-      _cond = c;
-    } else {
-      _cond->append(c);
-    }
-
-    // Update some ruleset state based on this new condition
-    _last |= c->last();
-    _ids = static_cast<ResourceIDs>(_ids | _cond->get_resource_ids());
-
-    return true;
+  if (nullptr == c) {
+    return nullptr;
   }
 
-  return false;
+  Dbg(pi_dbg_ctl, "    Creating condition: %%{%s} with arg: %s", p.get_op().c_str(), p.get_arg().c_str());
+  c->set_config_location(filename, lineno);
+  c->initialize(p);
+  if (!c->is_hook_valid(_hook)) {
+    delete c;
+    TSError("[%s] in %s:%d: can't use this condition in hook=%s: %%{%s} with arg: %s", PLUGIN_NAME, filename, lineno,
+            TSHttpHookNameLookup(_hook), p.get_op().c_str(), p.get_arg().c_str());
+    return nullptr;
+  }
+
+  if (c->get_cond_op() == MATCH_ERROR) {
+    delete c;
+    TSError("[%s] in %s:%d: Invalid operator", PLUGIN_NAME, filename, lineno);
+    return nullptr;
+  }
+
+  _last |= c->last();
+  _ids   = static_cast<ResourceIDs>(_ids | c->get_resource_ids());
+
+  return c;
 }
 
 bool
 RuleSet::add_operator(Parser &p, const char *filename, int lineno)
 {
-  Operator *o = operator_factory(p.get_op());
+  std::unique_ptr<Operator> op{operator_factory(p.get_op())};
 
-  if (nullptr != o) {
-    TSDebug(PLUGIN_NAME, "   Adding operator: %s(%s)=\"%s\"", p.get_op().c_str(), p.get_arg().c_str(), p.get_value().c_str());
-    o->initialize(p);
-    if (!o->set_hook(_hook)) {
-      delete o;
-      TSDebug(PLUGIN_NAME, "in %s:%d: can't use this operator in hook=%s:  %s(%s)", filename, lineno, TSHttpHookNameLookup(_hook),
-              p.get_op().c_str(), p.get_arg().c_str());
+  if (op) {
+    Dbg(pi_dbg_ctl, "    Adding operator: %s(%s)=\"%s\"", p.get_op().c_str(), p.get_arg().c_str(), p.get_value().c_str());
+    op->set_config_location(filename, lineno);
+
+    try {
+      op->initialize(p);
+    } catch (std::exception const &ex) {
+      TSError("[%s] in %s:%d: failed to initialize operator %s: %s", PLUGIN_NAME, filename, lineno, p.get_op().c_str(), ex.what());
+      return false;
+    }
+
+    if (!op->is_hook_valid(_hook)) {
+      Dbg(pi_dbg_ctl, "in %s:%d: can't use this operator in hook=%s:  %s(%s)", filename, lineno, TSHttpHookNameLookup(_hook),
+          p.get_op().c_str(), p.get_arg().c_str());
       TSError("[%s] in %s:%d: can't use this operator in hook=%s:  %s(%s)", PLUGIN_NAME, filename, lineno,
               TSHttpHookNameLookup(_hook), p.get_op().c_str(), p.get_arg().c_str());
       return false;
     }
-    if (nullptr == _oper) {
-      _oper = o;
+
+    auto *cur_sec = _op_if.cur_section();
+
+    if (!cur_sec->ops.oper) {
+      cur_sec->ops.oper = std::move(op);
     } else {
-      _oper->append(o);
+      cur_sec->ops.oper->append(op.release());
     }
 
-    // Update some ruleset state based on this new operator
-    _opermods = static_cast<OperModifiers>(_opermods | _oper->get_oper_modifiers());
-    _ids      = static_cast<ResourceIDs>(_ids | _oper->get_resource_ids());
+    cur_sec->ops.oper_mods = static_cast<OperModifiers>(cur_sec->ops.oper_mods | cur_sec->ops.oper->get_oper_modifiers());
+    _ids                   = static_cast<ResourceIDs>(_ids | cur_sec->ops.oper->get_resource_ids());
 
     return true;
   }
@@ -105,13 +131,31 @@ RuleSet::add_operator(Parser &p, const char *filename, int lineno)
 ResourceIDs
 RuleSet::get_all_resource_ids() const
 {
-  ResourceIDs ids = _ids;
-  RuleSet *tmp    = this->next;
+  ResourceIDs                     ids = _ids;
+  const std::unique_ptr<RuleSet> *cur = &next;
 
-  while (tmp) {
-    ids = static_cast<ResourceIDs>(ids | tmp->get_resource_ids());
-    tmp = tmp->next;
+  while (*cur) {
+    ids = static_cast<ResourceIDs>(ids | (*cur)->get_resource_ids());
+    cur = &(*cur)->next;
   }
 
   return ids;
+}
+
+bool
+RuleSet::add_operator(std::unique_ptr<Operator> op)
+{
+  auto *cur_sec = _op_if.cur_section();
+
+  if (!cur_sec->ops.oper) {
+    cur_sec->ops.oper = std::move(op);
+  } else {
+    cur_sec->ops.oper->append(op.release());
+  }
+
+  // Update some ruleset state based on this new operator
+  cur_sec->ops.oper_mods = static_cast<OperModifiers>(cur_sec->ops.oper_mods | cur_sec->ops.oper->get_oper_modifiers());
+  _ids                   = static_cast<ResourceIDs>(_ids | cur_sec->ops.oper->get_resource_ids());
+
+  return true;
 }

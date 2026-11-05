@@ -18,20 +18,24 @@
 
 set -e # exit on error
 
+if [ ! -z $1 ]; then
+  srcdir=$1
+fi
+
 TMPDIR=${TMPDIR:-/tmp}
 tmpfile=$(mktemp "$TMPDIR/via.XXXXXX")
-if [ ! -z "$srcdir"]; then
+if [ ! -z "$srcdir" ]; then
     srcdir=$(cd $srcdir && pwd)
 else
     srcdir=$(pwd)
 fi
 
-find $srcdir/tests -type f |
+find $srcdir/traffic_via/tests -type f |
 while read f ; do
     name=$(basename "$f")
     echo "testing $name"
-    ./traffic_via "$name" > "$tmpfile" 2>&1 || true
-    diff -u "$tmpfile" "$srcdir/tests/$name"
+    ./traffic_via/traffic_via "$name" > "$tmpfile" 2>&1 || true
+    diff -u "$tmpfile" "$srcdir/traffic_via/tests/$name"
 done
 
 rm -f $tmpfile

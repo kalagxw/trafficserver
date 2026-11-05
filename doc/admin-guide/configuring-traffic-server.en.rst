@@ -60,21 +60,33 @@ Configure Traffic Server Using Configuration Files
 
 You can change
 Traffic Server configuration options by manually editing specific
-variables in :file:`records.config`.
+variables in :file:`records.yaml`.
 
 Traffic Server must reread the configuration files for any changes to take effect.
 This is done with :option:`traffic_ctl config reload`. Some configuration changes require a
 full restart of Traffic Server.
 
-The following is a sample portion of :file:`records.config`:
+The following is a sample portion of :file:`records.yaml`:
 
-.. figure:: ../static/images/admin/records.jpg
-   :align: center
-   :alt: Sample records.config file
 
-   Sample records.config file
+.. code-block:: yaml
+   :linenos:
 
-In addition to :file:`records.config`,
+   diags:
+      debug:
+         enabled: 0
+         tags: http|dns
+
+   exec_thread:
+      affinity: 1
+      autoconfig:
+         enabled: 1
+         scale: 1.0
+      limit: 2
+
+   Sample records.yaml file
+
+In addition to :file:`records.yaml`,
 Traffic Server provides other configuration files that are used to
 configure specific features. You can manually edit all configuration
 files as described in :ref:`admin-configuration-files`.

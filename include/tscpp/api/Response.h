@@ -19,6 +19,8 @@
  * @file Response.h
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include "tscpp/api/Headers.h"
@@ -48,14 +50,14 @@ public:
   /** @return Status code of the response */
   HttpStatus getStatusCode() const;
 
-  /** @param New status code to set */
-  void setStatusCode(HttpStatus);
+  /** @param[in] code New status code to set */
+  void setStatusCode(HttpStatus code);
 
   /** @return Reason phrase of the response */
   std::string getReasonPhrase() const;
 
-  /** @param New reason phrase to set */
-  void setReasonPhrase(const std::string &);
+  /** @param[in] phrase New reason phrase to set */
+  void setReasonPhrase(const std::string &phrase);
 
   /** @return Headers of the response */
   Headers &getHeaders() const;
@@ -63,9 +65,9 @@ public:
   ~Response();
 
 private:
-  ResponseState *state_;
-  void init(void *hdr_buf, void *hdr_loc);
-  void reset();
+  std::unique_ptr<ResponseState> state_{};
+  void                           init(void *hdr_buf, void *hdr_loc);
+  void                           reset();
   friend class Transaction;
   friend class utils::internal;
 };

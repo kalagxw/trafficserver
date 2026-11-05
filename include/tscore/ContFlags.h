@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -34,7 +34,7 @@
 
 #pragma once
 
-#include "ink_thread.h"
+#include "tscore/ink_thread.h"
 
 class ContFlags
 {
@@ -65,10 +65,11 @@ public:
   set_flag(enum flags flag_bit, bool value)
   {
     if (flag_bit >= 0 && flag_bit < LAST_FLAG) {
-      if (value)
+      if (value) {
         raw_flags |= (1 << flag_bit);
-      else
+      } else {
         raw_flags &= ~(1 << flag_bit);
+      }
     }
   }
   bool
@@ -90,7 +91,7 @@ private:
   uint32_t raw_flags = 0;
 };
 
-void set_cont_flags(const ContFlags &flags);
-void set_cont_flag(ContFlags::flags flag_bit, bool value);
+void      set_cont_flags(const ContFlags &flags);
+void      set_cont_flag(ContFlags::flags flag_bit, bool value);
 ContFlags get_cont_flags();
-bool get_cont_flag(ContFlags::flags flag_bit);
+bool      get_cont_flag(ContFlags::flags flag_bit);

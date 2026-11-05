@@ -20,6 +20,8 @@
  * @brief Contains the interface used in creating Transaction plugins.
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include <memory>
@@ -97,7 +99,7 @@ public:
    *  classes derived from this class with the corresponding Transaction object (using
    *  Transaction::addPlugin()), or register HOOK_TXN_CLOSE (but not both).
    *
-   * @param HookType the type of hook you wish to register
+   * @param[in] hook_type the type of hook you wish to register
    * @see HookType
    * @see Plugin
    */
@@ -121,7 +123,7 @@ protected:
   std::shared_ptr<Mutex> getMutex(TSHttpTxn);
 
 private:
-  TransactionPluginState *state_; /**< The internal state for a TransactionPlugin */
+  std::unique_ptr<TransactionPluginState> state_; /**< The internal state for a TransactionPlugin */
   friend class utils::internal;
 };
 

@@ -21,6 +21,7 @@
   limitations under the License.
  */
 #include <algorithm>
+#include <iterator>
 #include <ts/ts.h>
 #include <ts/remap.h>
 
@@ -34,6 +35,8 @@
 #ifndef PLUGIN_TAG
 #error Please define a PLUGIN_TAG before including this file.
 #endif
+
+using multiplexer_ns::dbg_ctl;
 
 // 1s
 const size_t DEFAULT_TIMEOUT = 1000000000000;
@@ -52,7 +55,7 @@ TSRemapInit(TSRemapInterface *, char *, int)
     if (timeout < 1) {
       timeout = DEFAULT_TIMEOUT;
     }
-    TSDebug(PLUGIN_TAG, "timeout is set to: %zu", timeout);
+    Dbg(dbg_ctl, "timeout is set to: %zu", timeout);
   }
 
   statistics.failures = TSStatCreate(PLUGIN_TAG ".failures", TS_RECORDDATATYPE_INT, TS_STAT_NON_PERSISTENT, TS_STAT_SYNC_COUNT);
@@ -86,7 +89,7 @@ TSRemapNewInstance(int argc, char **argv, void **i, char *, int)
       return true;
     });
   }
-  TSDebug(PLUGIN_TAG, "skipPostPut is %s", (instance->skipPostPut ? "true" : "false"));
+  Dbg(dbg_ctl, "skipPostPut is %s", (instance->skipPostPut ? "true" : "false"));
 
   *i = static_cast<void *>(instance);
 
@@ -110,21 +113,34 @@ DoRemap(const Instance &i, TSHttpTxn t)
   }
   */
   TSMBuffer buffer;
-  TSMLoc location;
+  TSMLoc    location;
 
   CHECK(TSHttpTxnClientReqGet(t, &buffer, &location));
 
   assert(buffer != nullptr);
   assert(location != nullptr);
 
-  int length;
-  const char *const method = TSHttpHdrMethodGet(buffer, location, &length);
+  int               method_length;
+  const char *const method = TSHttpHdrMethodGet(buffer, location, &method_length);
 
-  TSDebug(PLUGIN_TAG, "Method is %s.", std::string(method, length).c_str());
+  Dbg(dbg_ctl, "Method is %s.", std::string(method, method_length).c_str());
 
-  if (i.skipPostPut && ((length == TS_HTTP_LEN_POST && memcmp(TS_HTTP_METHOD_POST, method, TS_HTTP_LEN_POST) == 0) ||
-                        (length == TS_HTTP_LEN_PUT && memcmp(TS_HTTP_METHOD_PUT, method, TS_HTTP_LEN_PUT) == 0))) {
-    TSHandleMLocRelease(buffer, TS_NULL_MLOC, location);
+  // A value of -1 is used to indicate there was no Content-Length header.
+  int content_length = -1;
+  // Retrieve the value of the Content-Length header.
+  auto field_loc = TSMimeHdrFieldFind(buffer, location, TS_MIME_FIELD_CONTENT_LENGTH, TS_MIME_LEN_CONTENT_LENGTH);
+  if (field_loc != TS_NULL_MLOC) {
+    content_length = TSMimeHdrFieldValueUintGet(buffer, location, field_loc, -1);
+    TSHandleMLocRelease(buffer, location, field_loc);
+  }
+  bool const is_post_or_put = (method_length == TS_HTTP_LEN_POST && memcmp(TS_HTTP_METHOD_POST, method, TS_HTTP_LEN_POST) == 0) ||
+                              (method_length == TS_HTTP_LEN_PUT && memcmp(TS_HTTP_METHOD_PUT, method, TS_HTTP_LEN_PUT) == 0);
+  if (i.skipPostPut && is_post_or_put) {
+    Dbg(dbg_ctl, "skip_post_put: skipping a POST or PUT request.");
+  } else if (content_length < 0 && is_post_or_put) {
+    // HttpSM would need an update for POST request transforms to support
+    // chunked request bodies. It currently does not support this.
+    Dbg(dbg_ctl, "Skipping a non-Content-Length POST or PUT request.");
   } else {
     {
       TSMLoc field;
@@ -143,24 +159,24 @@ DoRemap(const Instance &i, TSHttpTxn t)
     generateRequests(i.origins, buffer, location, requests);
     assert(requests.size() == i.origins.size());
 
-    if (length == TS_HTTP_LEN_POST && memcmp(TS_HTTP_METHOD_POST, method, TS_HTTP_LEN_POST) == 0) {
+    if (is_post_or_put || content_length > 0) {
       const TSVConn vconnection = TSTransformCreate(handlePost, t);
       assert(vconnection != nullptr);
-      TSContDataSet(vconnection, new PostState(requests));
+      PostState *state = new PostState(requests, content_length);
+      TSContDataSet(vconnection, state);
       assert(requests.empty());
       TSHttpTxnHookAdd(t, TS_HTTP_REQUEST_TRANSFORM_HOOK, vconnection);
     } else {
       dispatch(requests, timeout);
     }
 
-    TSHandleMLocRelease(buffer, TS_NULL_MLOC, location);
-
     TSStatIntIncrement(statistics.requests, 1);
   }
+  TSHandleMLocRelease(buffer, TS_NULL_MLOC, location);
 }
 
 TSRemapStatus
-TSRemapDoRemap(void *i, TSHttpTxn t, TSRemapRequestInfo *r)
+TSRemapDoRemap(void *i, TSHttpTxn t, TSRemapRequestInfo * /* r ATS_UNUSED */)
 {
   assert(i != nullptr);
   assert(t != nullptr);
@@ -169,7 +185,7 @@ TSRemapDoRemap(void *i, TSHttpTxn t, TSRemapRequestInfo *r)
   if (!instance->origins.empty() && !TSHttpTxnIsInternal(t)) {
     DoRemap(*instance, t);
   } else {
-    TSDebug(PLUGIN_TAG, "Skipping transaction %p", t);
+    Dbg(dbg_ctl, "Skipping transaction %p", t);
   }
 
   return TSREMAP_NO_REMAP;

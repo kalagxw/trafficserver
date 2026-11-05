@@ -104,6 +104,93 @@ To add options to the parser or current command:
 
 This function call returns the new :class:`Option` instance. (0 is also number of arguments expected)
 
+.. Note::
+
+   For options, the number of arguments may also be one of the following, which mirror the
+   ``nargs`` values of Python's ``argparse``:
+
+   ================================ =======================================================
+   Value                            Meaning
+   ================================ =======================================================
+   ``AT_MOST_ONE_ARG_N``            Zero or one value (``argparse`` ``nargs='?'``)
+   ``MORE_THAN_ZERO_ARG_N``         Zero or more values (``argparse`` ``nargs='*'``)
+   ``MORE_THAN_ONE_ARG_N``          One or more values (``argparse`` ``nargs='+'``)
+   ================================ =======================================================
+
+   An option taking a variable number of values stops collecting when it reaches a token
+   naming another option of the same command, so options written afterwards keep their own
+   arguments. Use ``AT_MOST_ONE_ARG_N`` rather than ``MORE_THAN_ZERO_ARG_N`` for an option
+   whose value is optional, otherwise it also consumes the positional arguments of its
+   command.
+
+   A token naming another option is not a value for a fixed number of arguments either. An
+   option written where a value is expected leaves the value missing, which is reported as a
+   usage error rather than the option being consumed and applied as the value.
+
+   Because collection stops at the following option, an option taking an unbounded number of
+   values may be written more than once, and the occurrences accumulate. This matches the
+   ``--option=value`` form, which has always appended. An option taking a fixed number of
+   values keeps its last-one-wins behaviour instead, and ``AT_MOST_ONE_ARG_N`` reports a
+   repetition as a usage error since it permits only one value in total.
+
+   An empty token is not a value for ``AT_MOST_ONE_ARG_N``. It is reported as a missing
+   argument rather than read as the option having been given without one, so a value taken
+   from an unset variable cannot silently select the declared default.
+
+   A ``--`` token stops option recognition for the values being collected, which is how a
+   value beginning with ``-`` is passed. Note this differs from the POSIX ``--``: it does
+   not end the value list nor force the remainder to be positional arguments.
+
+   Option recognition stays off for the rest of that collection, so for a variable number of
+   values every remaining token becomes a value and no later option is recognized. Use the
+   ``--option=value`` form instead when options still have to follow a value that begins with
+   ``-``.
+
+   The escaped token is also left alone by the option scan of every command on the line,
+   including the one that owns it. Each of those scans covers the whole remaining command line,
+   so without this a value spelled like an option of another command would be taken as that
+   option rather than reaching the command that asked for it. Only the single token right after
+   the ``--`` is protected this way, whatever the arity of its owner. A second or later value
+   after the ``--`` is still matched against the options of the enclosing commands, ``--help``
+   and ``--version`` included, and when it is a further positional argument of a command,
+   against that command's own options as well. Put the ``--`` directly before the value that
+   begins with ``-``. That works for one such value per option or command: a second ``--`` in
+   the same collection is taken as a value, since the first one already turned option
+   recognition off. Where more than one value begins with ``-``, use the ``--option=value`` form
+   for the values that belong to an option.
+
+.. Note::
+
+   When a command or option is written on the command line but given no value at all, a
+   declared environment variable fills it in, so a caller reading the value through
+   :func:`ArgumentData::value` or :func:`ArgumentData::at` needs no special handling. This
+   applies whether the value is missing because the option takes a fixed number of arguments,
+   ``AT_MOST_ONE_ARG_N``, or ``MORE_THAN_ONE_ARG_N`` collected none. The resolution order is:
+
+   #. the value typed on the command line, if any;
+   #. the declared environment variable, if set;
+   #. the declared default value.
+
+   The variable is consulted only when the command or option is actually written, and only
+   when it is given no value at all; it never activates one that was never typed, and it never
+   joins a value that was typed. For a fixed number of arguments above one, this means the
+   variable fills every slot only when none of them were given; a partial set is a usage error
+   just as it would be without a variable declared.
+
+   An option may be written more than once. The variable applies only when every occurrence is
+   bare: if any occurrence is given a value, in either the ``--option value`` or
+   ``--option=value`` spelling, a bare occurrence of the same option is the usage error it
+   would be without a variable at all, regardless of which occurrence comes first. A line with
+   no bare occurrence is untouched, including the last-one-wins behaviour a fixed-arity option
+   already has when typed more than once. ``AT_MOST_ONE_ARG_N`` cannot reach this case, since it
+   already refuses repetition outright.
+
+   ``MORE_THAN_ZERO_ARG_N`` does not support this fallback: zero values is already valid input
+   for it, so there is no usage error for a variable to replace.
+
+   :func:`ArgumentData::env` keeps returning the variable's raw value regardless of whether it
+   was used to fill a value.
+
 We can also use the following chained way to add subcommand or option:
 
 .. code-block:: cpp
@@ -122,6 +209,72 @@ which is equivalent to
 
 In this case, `subinit` is the subcommand of `init` and `--initoption` is a switch of command `remove`.
 
+Mutually Exclusive Groups
+--------------------------
+
+ArgParser supports mutually exclusive option groups, where only one option from the group can be used at a time.
+This is useful for options that conflict with each other, such as ``--verbose`` and ``--quiet``, or ``--enable`` and ``--disable``.
+
+To create a mutually exclusive group:
+
+.. code-block:: cpp
+
+   // Create a mutex group (optional by default)
+   parser.add_mutex_group("verbosity", false, "Verbosity level");
+
+   // Add options to the group
+   parser.add_option_to_group("verbosity", "--verbose", "-v", "Enable verbose output");
+   parser.add_option_to_group("verbosity", "--quiet", "-q", "Suppress output");
+
+The second parameter to ``add_mutex_group()`` specifies whether the group is required (``true``) or optional (``false``).
+If required, the user must specify exactly one option from the group. If optional, the user may specify zero or one option.
+
+When multiple options from the same group are used together, ArgParser will display an error message and exit.
+
+Example with a required group:
+
+.. code-block:: cpp
+
+   // Create a required mutex group for output format
+   parser.add_mutex_group("format", true, "Output format (required)");
+   parser.add_option_to_group("format", "--json", "-j", "JSON format");
+   parser.add_option_to_group("format", "--xml", "-x", "XML format");
+
+   // User must specify either --json or --xml, but not both
+
+Option Dependencies
+-------------------
+
+ArgParser supports option dependencies, where one option requires another option to be present.
+This is useful when an option only makes sense in combination with another option.
+
+To specify that an option requires another option, use the ``with_required()`` method immediately after
+adding the option:
+
+.. code-block:: cpp
+
+   command.add_option("--tags", "-t", "Debug tags", "", 1)
+   command.add_option("--append", "-a", "Append tags to existing tags")
+     .with_required("--tags");  // --append requires --tags to be present
+
+When ``--append`` is used without ``--tags``, ArgParser will display an error message and exit:
+
+.. code-block:: text
+
+   Error: Option '--append' requires '--tags' to be specified
+
+Multiple dependencies can be specified by chaining ``with_required()`` calls:
+
+.. code-block:: cpp
+
+   command.add_option("--verbose-append", "-V", "Verbose append mode")
+     .with_required("--tags")
+     .with_required("--append");  // requires both --tags and --append
+
+.. Note::
+
+   The ``with_required()`` method must be called immediately after ``add_option()`` or
+   ``add_option_to_group()``. It applies to the most recently added option.
 
 Parsing Arguments
 -----------------
@@ -203,6 +356,15 @@ Classes
 
       Return the error message of the parser.
 
+   .. function:: void add_mutex_group(std::string const &group_name, bool required, std::string const &description)
+
+      Create a mutually exclusive option group. Only one option from the group can be used at a time.
+      If *required* is true, exactly one option from the group must be specified.
+
+   .. function:: void add_option_to_group(std::string const &group_name, std::string const &long_option, std::string const &short_option, std::string const &description)
+
+      Add an option to a mutually exclusive group. The option will be created and associated with the specified group.
+
 .. class:: Option
 
    :class:`Option` is a data struct containing information about an option.
@@ -226,14 +388,41 @@ Classes
    is called under certain command, it will be added as a subcommand for the current command. For Example, :code:`command1.add_command("command2", "description")`
    will make :code:`command2` a subcommand of :code:`command1`. :code:`require_commands()` is also available within :class:`Command`.
 
-   .. function:: void add_example_usage(std::string const &usage)
+   .. function:: Command &add_example_usage(std::string const &usage)
 
-      Add an example usage for the command to output in `help_message`.
-      For Example: :code:`command.add_example_usage("traffic_blabla init --path=/path/to/file")`.
+      Add an example usage for the command to output in ``help_message``. This method can be
+      called multiple times to add multiple examples. Returns the Command instance for chained calls.
+
+      Example::
+
+         command.add_example_usage("traffic_ctl server debug enable -t my_tags")
+                .add_example_usage("traffic_ctl server debug enable -t new_tag -a  # append mode");
+
+      This will output in help:
+
+      .. code-block:: text
+
+         Example Usage:
+           traffic_ctl server debug enable -t my_tags
+           traffic_ctl server debug enable -t new_tag -a  # append mode
 
    .. function:: Command &set_default()
 
       set the current command as default
+
+   .. function:: void add_mutex_group(std::string const &group_name, bool required, std::string const &description)
+
+      Create a mutually exclusive option group for this command.
+
+   .. function:: void add_option_to_group(std::string const &group_name, std::string const &long_option, std::string const &short_option, std::string const &description)
+
+      Add an option to a mutually exclusive group for this command.
+
+   .. function:: Command &with_required(std::string const &required_option)
+
+      Specify that the last added option requires another option to be present.
+      Must be called immediately after ``add_option()`` or ``add_option_to_group()``.
+      Returns the Command instance for chained calls.
 
 .. class:: Arguments
 

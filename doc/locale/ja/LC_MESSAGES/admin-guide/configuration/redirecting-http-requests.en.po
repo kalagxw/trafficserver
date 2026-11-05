@@ -123,7 +123,7 @@ msgstr ""
 "す。 *リバースマップルール* では、ターゲット URL はオリジナルコンテントがあ"
 "る場所を指し、置換 URL は Traffic Server を指しています。 Traffic Server は"
 "マッピングルールを Traffic Server の ``config`` ディレクトリにある :file:"
-"``remap.config` に保存します。"
+"`remap.config` に保存します。"
 
 #: ../../admin-guide/configuration/redirecting-http-requests.en.rst:284
 msgid ""
@@ -193,7 +193,7 @@ msgid ""
 "Edit :ts:cv:`proxy.config.reverse_proxy.enabled` in :file:`records."
 "config`. ::"
 msgstr ""
-":file:`records.config` にある :ts:cv:`proxy.config.reverse_proxy.enabled` を"
+":file:`records.yaml` にある :ts:cv:`proxy.config.reverse_proxy.enabled` を"
 "編集してください ::"
 
 #: ../../admin-guide/configuration/redirecting-http-requests.en.rst:324
@@ -515,7 +515,7 @@ msgid ""
 "Traffic Server locates a map rule in the :file:`remap.config` file and "
 "remaps the request to the specified origin server (``realhost.com``)."
 msgstr ""
-"Traffic Server は :file:``remap.config` ファイル内にあるマップルールを見つ"
+"Traffic Server は :file:`remap.config` ファイル内にあるマップルールを見つ"
 "け、リクエストを指定されたオリジンサーバー (``realhost.com``) にリマップしま"
 "す。"
 
@@ -540,9 +540,9 @@ msgstr "HTTP リクエスト用マッピングルールの使用"
 #: ../../admin-guide/configuration/redirecting-http-requests.en.rst:281
 msgid ""
 "Traffic Server provides several reverse proxy configuration options in :"
-"file:`records.config` that enable you to:"
+"file:`records.yaml` that enable you to:"
 msgstr ""
-"Traffic Server は :file:`records.config` でいくつかのリバースプロキシー設定"
+"Traffic Server は :file:`records.yaml` でいくつかのリバースプロキシー設定"
 "オプションを提供し次のことを可能にします。"
 
 #: ../../admin-guide/configuration/redirecting-http-requests.en.rst:243

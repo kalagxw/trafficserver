@@ -16,7 +16,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSTrafficServerVersionGet
 *************************
@@ -54,6 +54,8 @@ Example
     #include <ts/ts.h>
 
     #define PLUGIN_NAME "hello_world"
+
+    DbgCtl dbg_ctl{PLUGIN_NAME};
 
     int
     check_ts_version()
@@ -98,7 +100,7 @@ Example
             return;
         }
 
-        TSDebug(PLUGIN_NAME, "Hello World!");
+        Dbg(dbg_ctl, "Hello World!");
     }
 
 See Also

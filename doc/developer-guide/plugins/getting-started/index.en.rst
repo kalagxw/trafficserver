@@ -16,6 +16,7 @@
    under the License.
 
 .. include:: ../../../common.defs
+.. default-domain:: cpp
 
 .. _developer-plugins-getting-started:
 
@@ -29,9 +30,20 @@ Getting Started
    plugin-registration-and-version-checking.en
    naming-conventions.en
 
-The Traffic Server API enables you to create plugins, using the C
+The Traffic Server API enables you to create plugins, using the C++
 programming language, that customize the behavior of your Traffic Server
-installation. This chapter contains the following sections:
+installation. (Your plugin may not work properly if you use a version of C++
+older than C++17.)
+
+C++ exceptions are not a supported error channel across the plugin API. API
+functions report failure through their return values, and a plugin must not
+allow one of its own exceptions to propagate into Traffic Server (for example
+out of a continuation handler). API functions that plugins commonly call
+during cleanup are declared ``noexcept``; if an internal error would otherwise
+escape such a call as an exception, Traffic Server aborts with a message
+naming the function rather than raising an exception in the plugin.
+
+This chapter contains the following sections:
 
 -  `Understanding Traffic Server Plugins`_ -- a brief introduction to plugins.
 
@@ -137,21 +149,21 @@ The figure below, :ref:`possibleTSplugins`, illustrates several types of plugins
 
 You can find basic examples for many plugins in the SDK sample code:
 
--  ``append_transform.c`` adds text from a specified file to HTTP/text
+-  ``append_transform.cc`` adds text from a specified file to HTTP/text
    responses. This plugin is explained in
    :ref:`developer-plugins-http-transformations-append`
 
 -  The compression plugin in the figure communicates with the server
-   that actually does the compression. The ``server-transform.c`` plugin
+   that actually does the compression. The ``server-transform.cc`` plugin
    shows how to open a connection to a transformation server, have the
    server do the transformation, and send transformed data back to the
    client. Although the transformation is null in
-   ``server-transform.c``, a compression or image translation plugin
+   ``server-transform.cc``, a compression or image translation plugin
    could be implemented in a similar way.
 
--  ``basic_auth.c`` performs basic HTTP proxy authorization.
+-  ``basic_auth.cc`` performs basic HTTP proxy authorization.
 
--  ``denylist_1.c`` reads a list of servers from a configuration file
+-  ``denylist_1.cc`` reads a list of servers from a configuration file
    and denies client access to these servers. This plugin is explained
    in :ref:`developer-plugins-examples-denylist`.
 
@@ -162,7 +174,7 @@ When Traffic Server is first started, it consults the ``plugin.config``
 file to determine the names of all shared plugin libraries that need to
 be loaded. The ``plugin.config`` file also defines arguments that are to
 be passed to each plugin's initialization function, ``TSPluginInit``.
-The :file:`records.config` file defines the path to each plugin shared
+The :file:`records.yaml` file defines the path to each plugin shared
 library, as described in :ref:`specify-the-plugins-location`.
 
 .. note:: The path for each of these files is *<root_dir>*\ ``/config/``, where *<root_dir>* is where you installed Traffic Server.
@@ -242,5 +254,5 @@ The ``TSPluginInit`` function has two arguments:
 -  The ``argv`` argument is an array of pointers to the actual arguments
    defined in the ``plugin.config`` file for that plugin
 
-See :c:func:`TSPluginInit` for details about ``TSPluginInit``.
+See :func:`TSPluginInit` for details about ``TSPluginInit``.
 

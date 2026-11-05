@@ -43,19 +43,19 @@ class LRUHash
   friend struct LRUHashHasher;
 
 public:
-  LRUHash() { TSDebug(PLUGIN_NAME, "LRUHash() CTOR"); }
-  ~LRUHash() { TSDebug(PLUGIN_NAME, "~LRUHash() DTOR"); }
+  LRUHash() { DBG("LRUHash() CTOR"); }
+  ~LRUHash() { DBG("~LRUHash() DTOR"); }
 
   LRUHash(const LRUHash &h)
   {
-    TSDebug(PLUGIN_NAME, "Copy CTOR an LRUHash object");
+    DBG("Copy CTOR an LRUHash object");
     memcpy(_hash, h._hash, sizeof(_hash));
   }
 
   LRUHash &
   operator=(const LRUHash &h)
   {
-    TSDebug(PLUGIN_NAME, "copying an LRUHash object");
+    DBG("copying an LRUHash object");
     if (this != &h) {
       memcpy(_hash, h._hash, sizeof(_hash));
     }
@@ -120,8 +120,12 @@ public:
   const std::string
   id() const override
   {
+    if (_label.empty()) {
+      return ""; // This will prevent the policy factory from coalescing this policy
+    }
+
     return _label + ";LRU=b:" + std::to_string(_buckets) + ",h:" + std::to_string(_hits) + ",B:" + std::to_string(_bytes) +
-           ",i:" + std::to_string(_internal_enabled);
+           ",i:" + std::to_string(_internal_enabled) + ",e:" + _stats_id;
   }
 
   void
@@ -137,17 +141,17 @@ public:
   }
 
 private:
-  unsigned _buckets  = 1000;
-  unsigned _hits     = 10;
-  int64_t _bytes     = 0;
-  std::string _label = "";
+  unsigned    _buckets = 1000;
+  unsigned    _hits    = 10;
+  int64_t     _bytes   = 0;
+  std::string _label   = "";
 
   // For the LRU. Note that we keep track of the List sizes, because some versions fo STL have broken
   // implementations of size(), making them obsessively slow on calling ::size().
   TSMutex _lock;
-  LRUMap _map;
+  LRUMap  _map;
   LRUList _list, _freelist;
-  size_t _list_size = 0, _freelist_size = 0;
+  size_t  _list_size = 0, _freelist_size = 0;
 
   // internal stats ids
   int _freelist_size_id = -1;

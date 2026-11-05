@@ -22,14 +22,13 @@
  */
 
 #include <iostream>
-#include <cassert>
 #include <string>
 
-#include "print_funcs.h"
+#include <catch2/catch_test_macros.hpp>
+
 #include "Utils.h"
 
 using std::cout;
-using std::cerr;
 using std::endl;
 using std::string;
 using namespace EsiLib;
@@ -40,19 +39,16 @@ checkAttributes(const char *check_id, const AttributeList &attr_list, const char
   cout << check_id << ": checking attributes" << endl;
   AttributeList::const_iterator iter = attr_list.begin();
   for (int i = 0; attr_info[i]; i += 2, ++iter) {
-    assert(iter->name_len == static_cast<int>(strlen(attr_info[i])));
-    assert(strncmp(iter->name, attr_info[i], iter->name_len) == 0);
-    assert(iter->value_len == static_cast<int>(strlen(attr_info[i + 1])));
-    assert(strncmp(iter->value, attr_info[i + 1], iter->value_len) == 0);
+    REQUIRE(iter->name_len == static_cast<int>(strlen(attr_info[i])));
+    REQUIRE(strncmp(iter->name, attr_info[i], iter->name_len) == 0);
+    REQUIRE(iter->value_len == static_cast<int>(strlen(attr_info[i + 1])));
+    REQUIRE(strncmp(iter->value, attr_info[i + 1], iter->value_len) == 0);
   }
-  assert(iter == attr_list.end());
+  REQUIRE(iter == attr_list.end());
 }
 
-int
-main()
+TEST_CASE("esi utils test")
 {
-  Utils::init(&Debug, &Error);
-
   AttributeList attr_list;
 
   string str1("pos=SKY spaceid=12123");
@@ -91,7 +87,7 @@ main()
   checkAttributes("test7", attr_list, expected_strs7);
 
   const char *escaped_sequence = R"({\"site-attribute\":\"content=no_expandable; ajax_cert_expandable\"})";
-  string str8(R"(pos="FPM1" spaceid=96584352 extra_mime=")");
+  string      str8(R"(pos="FPM1" spaceid=96584352 extra_mime=")");
   str8.append(escaped_sequence);
   str8.append(R"(" foo=bar a="b")");
   const char *expected_strs8[] = {"pos", "FPM1", "spaceid", "96584352", "extra_mime", escaped_sequence,
@@ -99,12 +95,12 @@ main()
   Utils::parseAttributes(str8, attr_list);
   checkAttributes("test8", attr_list, expected_strs8);
 
-  assert(Utils::unescape(escaped_sequence) == "{\"site-attribute\":\"content=no_expandable; ajax_cert_expandable\"}");
-  assert(Utils::unescape(nullptr) == "");
-  assert(Utils::unescape("\\", 0) == "");
-  assert(Utils::unescape("\\hello\"", 3) == "he");
-  assert(Utils::unescape("\\hello\"", -3) == "");
-  assert(Utils::unescape("hello") == "hello");
+  REQUIRE(Utils::unescape(escaped_sequence) == "{\"site-attribute\":\"content=no_expandable; ajax_cert_expandable\"}");
+  REQUIRE(Utils::unescape(nullptr) == "");
+  REQUIRE(Utils::unescape("\\", 0) == "");
+  REQUIRE(Utils::unescape("\\hello\"", 3) == "he");
+  REQUIRE(Utils::unescape("\\hello\"", -3) == "");
+  REQUIRE(Utils::unescape("hello") == "hello");
 
   string str9("n1=v1; n2=v2;, n3=v3, ;n4=v4=extrav4");
   Utils::parseAttributes(str9, attr_list, ";,");
@@ -116,20 +112,20 @@ main()
   const char *expected_strs10[] = {"hello", "world", "test", "萌萌", "a", "b", nullptr};
   checkAttributes("test10", attr_list, expected_strs10);
 
-  cout << "Test 11 " << endl;
-  std::list<string> lines;
-  lines.push_back("allowlistCookie AGE");
-  lines.push_back("allowlistCookie GRADE");
-  lines.push_back("a b");
-  Utils::KeyValueMap kv;
-  Utils::HeaderValueList list;
-  Utils::parseKeyValueConfig(lines, kv, list);
-  assert(kv.find("a")->second == "b");
-  assert(list.back() == "GRADE");
-  list.pop_back();
-  assert(list.back() == "AGE");
-  list.pop_back();
-
-  cout << endl << "All tests passed!" << endl;
-  return 0;
+  SECTION("test 11")
+  {
+    std::list<string> lines;
+    lines.push_back("allowlistCookie AGE");
+    lines.push_back("allowlistCookie GRADE");
+    lines.push_back("a b");
+    Utils::KeyValueMap     kv;
+    Utils::HeaderValueList list;
+    Utils::parseKeyValueConfig(lines, kv, list);
+    const auto b = kv.find("a");
+    REQUIRE((b != std::end(kv) && b->second == "b"));
+    REQUIRE(list.back() == "GRADE");
+    list.pop_back();
+    REQUIRE(list.back() == "AGE");
+    list.pop_back();
+  }
 }

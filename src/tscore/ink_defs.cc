@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -31,9 +31,6 @@
 #include "tscore/ink_platform.h"
 
 #include <unistd.h>
-
-int off = 0;
-int on  = 1;
 
 int
 ink_login_name_max()

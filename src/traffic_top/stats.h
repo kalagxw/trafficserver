@@ -2,7 +2,7 @@
 
     Include file for the traffic_top stats.
 
-    @section license License
+    @par License
 
     Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
@@ -20,9 +20,9 @@
     See the License for the specific language governing permissions and
     limitations under the License.
 */
-#if HAS_CURL
-#include <curl/curl.h>
-#endif
+#pragma once
+
+#include <chrono>
 #include <map>
 #include <string>
 #include <sys/types.h>
@@ -30,7 +30,11 @@
 #include <fcntl.h>
 #include <cinttypes>
 #include <sys/time.h>
-#include "mgmtapi.h"
+
+#include "tscore/ink_assert.h"
+#include "shared/rpc/RPCRequests.h"
+#include "shared/rpc/RPCClient.h"
+#include "shared/rpc/yaml_codecs.h"
 
 struct LookupItem {
   LookupItem(const char *s, const char *n, const int t) : pretty(s), name(n), numerator(""), denominator(""), type(t) {}
@@ -41,12 +45,9 @@ struct LookupItem {
   const char *name;
   const char *numerator;
   const char *denominator;
-  int type;
+  int         type;
 };
-extern size_t write_data(void *ptr, size_t size, size_t nmemb, void *stream);
-#if HAS_CURL
-extern char curl_error[CURL_ERROR_SIZE];
-#endif
+extern size_t      write_data(void *ptr, size_t size, size_t nmemb, void *stream);
 extern std::string response;
 
 namespace constant
@@ -57,6 +58,19 @@ const char separator[] = "\": \"";
 const char end[]       = "\",\n";
 }; // namespace constant
 
+// Convenient definitions
+namespace detail
+{
+/// This is a convenience class to abstract the metric params. It makes it less verbose to add  a metric info object inside the
+/// record lookup object.
+struct MetricParam : shared::rpc::RecordLookupRequest::Params {
+  MetricParam(std::string name)
+    : // not regex
+      shared::rpc::RecordLookupRequest::Params{std::move(name), shared::rpc::NOT_REGEX, shared::rpc::METRIC_REC_TYPES}
+  {
+  }
+};
+} // namespace detail
 //----------------------------------------------------------------------------
 class Stats
 {
@@ -64,28 +78,12 @@ class Stats
   template <class Key, class T> using map = std::map<Key, T>;
 
 public:
-  Stats(const string &url) : _url(url)
+  Stats()
   {
-    if (url != "") {
-      if (_url.substr(0, 4) != "http") {
-        // looks like it is a host using it the old way
-        _url = "http://" + _url + "/_stats";
-      }
-
-      // set the host
-      size_t start = _url.find(":");
-      size_t end   = _url.find('/', start + 3);
-      _host        = _url.substr(start + 3, end - start - 3);
-      end          = _host.find(":");
-      if (end != string::npos) {
-        _host = _host.substr(0, end);
-      }
-    } else {
-      char hostname[25];
-      hostname[sizeof(hostname) - 1] = '\0';
-      gethostname(hostname, sizeof(hostname) - 1);
-      _host = hostname;
-    }
+    char hostname[25];
+    hostname[sizeof(hostname) - 1] = '\0';
+    gethostname(hostname, sizeof(hostname) - 1);
+    _host = hostname;
 
     _time_diff = 0;
     _old_time  = 0;
@@ -112,6 +110,7 @@ public:
     lookup_table.insert(make_pair("dns_entry", LookupItem("DNS Entry", "proxy.process.hostdb.cache.current_items", 1)));
     lookup_table.insert(make_pair("dns_hits", LookupItem("DNS Hits", "proxy.process.hostdb.total_hits", 2)));
     lookup_table.insert(make_pair("dns_lookups", LookupItem("DNS Lookups", "proxy.process.hostdb.total_lookups", 2)));
+    lookup_table.insert(make_pair("dns_serve_stale", LookupItem("DNS Serve Stale", "proxy.process.hostdb.total_serve_stale", 2)));
 
     // Incoming HTTP/1.1 and HTTP/2 connections - some metrics are HTTP version specific
     lookup_table.insert(make_pair("client_req", LookupItem("Requests", "proxy.process.http.incoming_requests", 2)));
@@ -160,8 +159,8 @@ public:
     lookup_table.insert(make_pair("ka_total", LookupItem("KA Total", "proxy.process.net.dynamic_keep_alive_timeout_in_total", 2)));
     lookup_table.insert(make_pair("ka_count", LookupItem("KA Count", "proxy.process.net.dynamic_keep_alive_timeout_in_count", 2)));
 
-    lookup_table.insert(make_pair("client_abort", LookupItem("Clnt Abort", "proxy.process.http.err_client_abort_count_stat", 2)));
-    lookup_table.insert(make_pair("conn_fail", LookupItem("Conn Fail", "proxy.process.http.err_connect_fail_count_stat", 2)));
+    lookup_table.insert(make_pair("client_abort", LookupItem("Clnt Abort", "proxy.process.http.err_client_abort_count", 2)));
+    lookup_table.insert(make_pair("conn_fail", LookupItem("Conn Fail", "proxy.process.http.err_connect_fail_count", 2)));
     lookup_table.insert(make_pair("abort", LookupItem("Abort", "proxy.process.http.transaction_counts.errors.aborts", 2)));
     lookup_table.insert(
       make_pair("t_conn_fail", LookupItem("Conn Fail", "proxy.process.http.transaction_counts.errors.connect_failed", 2)));
@@ -232,6 +231,7 @@ public:
     lookup_table.insert(make_pair("414", LookupItem("414", "proxy.process.http.414_responses", 5)));
     lookup_table.insert(make_pair("415", LookupItem("415", "proxy.process.http.415_responses", 5)));
     lookup_table.insert(make_pair("416", LookupItem("416", "proxy.process.http.416_responses", 5)));
+    lookup_table.insert(make_pair("429", LookupItem("429", "proxy.process.http.429_responses", 5)));
     lookup_table.insert(make_pair("4xx", LookupItem("4xx", "proxy.process.http.4xx_responses", 5)));
     lookup_table.insert(make_pair("500", LookupItem("500", "proxy.process.http.500_responses", 5)));
     lookup_table.insert(make_pair("501", LookupItem("501", "proxy.process.http.501_responses", 5)));
@@ -240,14 +240,6 @@ public:
     lookup_table.insert(make_pair("504", LookupItem("504", "proxy.process.http.504_responses", 5)));
     lookup_table.insert(make_pair("505", LookupItem("505", "proxy.process.http.505_responses", 5)));
     lookup_table.insert(make_pair("5xx", LookupItem("5xx", "proxy.process.http.5xx_responses", 5)));
-
-    lookup_table.insert(make_pair("s_100", LookupItem("100 B", "proxy.process.http.response_document_size_100", 5)));
-    lookup_table.insert(make_pair("s_1k", LookupItem("1 KB", "proxy.process.http.response_document_size_1K", 5)));
-    lookup_table.insert(make_pair("s_3k", LookupItem("3 KB", "proxy.process.http.response_document_size_3K", 5)));
-    lookup_table.insert(make_pair("s_5k", LookupItem("5 KB", "proxy.process.http.response_document_size_5K", 5)));
-    lookup_table.insert(make_pair("s_10k", LookupItem("10 KB", "proxy.process.http.response_document_size_10K", 5)));
-    lookup_table.insert(make_pair("s_1m", LookupItem("1 MB", "proxy.process.http.response_document_size_1M", 5)));
-    lookup_table.insert(make_pair("s_>1m", LookupItem("> 1 MB", "proxy.process.http.response_document_size_inf", 5)));
 
     // sum together
     lookup_table.insert(make_pair("ram_hit_miss", LookupItem("Ram Hit+Miss", "ram_hit", "ram_miss", 6)));
@@ -266,97 +258,43 @@ public:
     lookup_table.insert(make_pair("client_dyn_ka", LookupItem("Dynamic KA", "ka_total", "ka_count", 3)));
   }
 
-  void
+  bool
   getStats()
   {
-    if (_url == "") {
-      int64_t value = 0;
-      if (_old_stats != nullptr) {
-        delete _old_stats;
-        _old_stats = nullptr;
-      }
-      _old_stats = _stats;
-      _stats     = new map<string, string>;
+    _old_stats = std::move(_stats);
+    _stats     = std::make_unique<map<string, string>>();
 
-      gettimeofday(&_time, nullptr);
-      double now = _time.tv_sec + (double)_time.tv_usec / 1000000;
+    gettimeofday(&_time, nullptr);
+    double now = _time.tv_sec + (double)_time.tv_usec / 1000000;
 
-      for (map<string, LookupItem>::const_iterator lookup_it = lookup_table.begin(); lookup_it != lookup_table.end(); ++lookup_it) {
-        const LookupItem &item = lookup_it->second;
+    // We will lookup for all the metrics on one single request.
+    shared::rpc::RecordLookupRequest request;
 
-        if (item.type == 1 || item.type == 2 || item.type == 5 || item.type == 8) {
-          if (strcmp(item.pretty, "Version") == 0) {
-            // special case for Version information
-            TSString strValue = nullptr;
-            if (TSRecordGetString(item.name, &strValue) == TS_ERR_OKAY) {
-              string key     = item.name;
-              (*_stats)[key] = strValue;
-              TSfree(strValue);
-            } else {
-              fprintf(stderr, "Error getting stat: %s when calling TSRecordGetString() failed: file \"%s\", line %d\n\n", item.name,
-                      __FILE__, __LINE__);
-              abort();
-            }
-          } else {
-            if (TSRecordGetInt(item.name, &value) != TS_ERR_OKAY) {
-              fprintf(stderr, "Error getting stat: %s when calling TSRecordGetInt() failed: file \"%s\", line %d\n\n", item.name,
-                      __FILE__, __LINE__);
-              abort();
-            }
-            string key = item.name;
-            char buffer[32];
-            sprintf(buffer, "%" PRId64, value);
-            string foo     = buffer;
-            (*_stats)[key] = foo;
-          }
+    for (map<string, LookupItem>::const_iterator lookup_it = lookup_table.begin(); lookup_it != lookup_table.end(); ++lookup_it) {
+      const LookupItem &item = lookup_it->second;
+
+      if (item.type == 1 || item.type == 2 || item.type == 5 || item.type == 8) {
+        try {
+          // Add records names to the rpc request.
+          request.emplace_rec(detail::MetricParam{item.name});
+        } catch (std::exception const &e) {
+          // Hard break, something happened when trying to set the last metric name into the request.
+          // This is very unlikely but just in case, we stop it.
+          fprintf(stderr, "Error configuring the stats request, local error: %s", e.what());
+          return false;
         }
       }
-      _old_time  = _now;
-      _now       = now;
-      _time_diff = _now - _old_time;
-    } else {
-#if HAS_CURL
-      CURL *curl;
-      CURLcode res;
-
-      curl = curl_easy_init();
-      if (curl) {
-        curl_easy_setopt(curl, CURLOPT_URL, _url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
-        curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, curl_error);
-
-        // update time
-        gettimeofday(&_time, nullptr);
-        double now = _time.tv_sec + (double)_time.tv_usec / 1000000;
-
-        response.clear();
-        response.reserve(32768); // should hopefully be smaller then 32KB
-        res = curl_easy_perform(curl);
-
-        // only if success update stats and time information
-        if (res == 0) {
-          if (_old_stats != nullptr) {
-            delete _old_stats;
-            _old_stats = nullptr;
-          }
-          _old_stats = _stats;
-          _stats     = new map<string, string>;
-
-          // parse
-          parseResponse(response);
-          _old_time  = _now;
-          _now       = now;
-          _time_diff = _now - _old_time;
-        } else {
-          fprintf(stderr, "Can't fetch url %s\n", _url.c_str());
-          exit(1);
-        }
-
-        /* always cleanup */
-        curl_easy_cleanup(curl);
-      }
-#endif
     }
+    // query the rpc node.
+    if (auto const &error = fetch_and_fill_stats(request, _stats.get()); !error.empty()) {
+      fprintf(stderr, "Error getting stats from the RPC node:\n%s", error.c_str());
+      return false;
+    }
+    _old_time  = _now;
+    _now       = now;
+    _time_diff = _now - _old_time;
+
+    return true;
   }
 
   int64_t
@@ -374,7 +312,7 @@ public:
   getStat(const string &key, double &value, int overrideType = 0)
   {
     string strtmp;
-    int typetmp;
+    int    typetmp;
     getStat(key, value, strtmp, typetmp, overrideType);
   }
 
@@ -382,7 +320,7 @@ public:
   getStat(const string &key, string &value)
   {
     map<string, LookupItem>::const_iterator lookup_it = lookup_table.find(key);
-    assert(lookup_it != lookup_table.end());
+    ink_assert(lookup_it != lookup_table.end());
     const LookupItem &item = lookup_it->second;
 
     map<string, string>::const_iterator stats_it = _stats->find(item.name);
@@ -400,7 +338,7 @@ public:
     value = 0;
 
     map<string, LookupItem>::const_iterator lookup_it = lookup_table.find(key);
-    assert(lookup_it != lookup_table.end());
+    ink_assert(lookup_it != lookup_table.end());
     const LookupItem &item = lookup_it->second;
     prettyName             = item.pretty;
     if (overrideType != 0) {
@@ -410,17 +348,17 @@ public:
     }
 
     if (type == 1 || type == 2 || type == 5 || type == 8) {
-      value = getValue(item.name, _stats);
+      value = getValue(item.name, _stats.get());
       if (key == "total_time") {
         value = value / 10000000;
       }
 
       if ((type == 2 || type == 5 || type == 8) && _old_stats != nullptr && _absolute == false) {
-        double old = getValue(item.name, _old_stats);
+        double old = getValue(item.name, _old_stats.get());
         if (key == "total_time") {
           old = old / 10000000;
         }
-        value = (value - old) / _time_diff;
+        value = _time_diff ? (value - old) / _time_diff : 0;
       }
     } else if (type == 3 || type == 4) {
       double numerator   = 0;
@@ -491,8 +429,8 @@ public:
   parseResponse(const string &response)
   {
     // move past global
-    size_t pos = response.find(constant::global);
-    pos += sizeof(constant::global) - 1;
+    size_t pos  = response.find(constant::global);
+    pos        += sizeof(constant::global) - 1;
 
     // find parts of the line
     while (true) {
@@ -525,15 +463,7 @@ public:
     return _host;
   }
 
-  ~Stats()
-  {
-    if (_stats != nullptr) {
-      delete _stats;
-    }
-    if (_old_stats != nullptr) {
-      delete _old_stats;
-    }
-  }
+  ~Stats() {}
 
 private:
   std::pair<std::string, LookupItem>
@@ -542,14 +472,58 @@ private:
     return std::make_pair(s, i);
   }
 
-  map<string, string> *_stats;
-  map<string, string> *_old_stats;
-  map<string, LookupItem> lookup_table;
-  string _url;
-  string _host;
-  double _old_time;
-  double _now;
-  double _time_diff;
-  struct timeval _time;
-  bool _absolute;
+  /// Invoke the remote server and fill the responses into the stats map.
+  std::string
+  fetch_and_fill_stats(shared::rpc::RecordLookupRequest const &request, std::map<std::string, std::string> *stats) noexcept
+  {
+    namespace rpc = shared::rpc;
+
+    if (stats == nullptr) {
+      return "Invalid stats parameter, it shouldn't be null.";
+    }
+    try {
+      rpc::RPCClient rpcClient;
+
+      // invoke the rpc.
+      auto const &rpcResponse = rpcClient.invoke<>(request, std::chrono::milliseconds(1000), 10);
+
+      if (!rpcResponse.is_error()) {
+        auto const &records = rpcResponse.result.as<rpc::RecordLookUpResponse>();
+
+        // we check if we got some specific record error, if any we report it.
+        if (records.errorList.size()) {
+          std::stringstream ss;
+
+          for (auto const &err : records.errorList) {
+            ss << err;
+            ss << "----\n";
+          }
+          return ss.str();
+        } else {
+          // No records error, so we are good to fill the list
+          for (auto &&recordInfo : records.recordList) {
+            (*stats)[recordInfo.name] = recordInfo.currentValue;
+          }
+        }
+      } else {
+        // something didn't work inside the RPC server.
+        std::stringstream ss;
+        ss << rpcResponse.error.as<rpc::JSONRPCError>();
+        return ss.str();
+      }
+    } catch (std::exception const &ex) {
+      return {ex.what()};
+    }
+    return {}; // no error
+  }
+
+  std::unique_ptr<map<string, string>> _stats;
+  std::unique_ptr<map<string, string>> _old_stats;
+  map<string, LookupItem>              lookup_table;
+  string                               _host;
+  double                               _old_time;
+  double                               _now;
+  double                               _time_diff;
+  struct timeval                       _time;
+  bool                                 _absolute;
 };

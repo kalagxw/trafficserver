@@ -2,7 +2,7 @@
 
   traffic_ctl
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -21,281 +21,409 @@
   limitations under the License.
  */
 
-#include "traffic_ctl.h"
+#include <cstdio>
+#include <exception>
 
-#include "records/I_RecProcess.h"
-#include "RecordsConfig.h"
-#include "tscore/I_Layout.h"
+#include <iostream>
+#include <csignal>
+
+#include "tscore/Layout.h"
 #include "tscore/runroot.h"
+#include "tscore/ArgParser.h"
+#include "tscore/ink_assert.h"
+#include "tscore/signals.h"
+#include "tscore/Demangle.h"
 
-const char *
-CtrlMgmtRecord::name() const
-{
-  return this->ele->rec_name;
-}
+#include "CtrlCommands.h"
+#include "CacheShmCommand.h"
+#include "ConvertConfigCommand.h"
+#include "FileConfigCommand.h"
+#include "SSLMultiCertCommand.h"
+#include "TrafficCtlStatus.h"
+#include "tsutil/ts_errata.h"
 
-TSRecordT
-CtrlMgmtRecord::type() const
+// Define the global variable
+int                         App_Exit_Status_Code = CTRL_EX_OK; // Initialize it to a default value
+swoc::Errata::severity_type App_Exit_Level_Error = ERRATA_ERROR;
+namespace
 {
-  return this->ele->rec_type;
-}
-
-int
-CtrlMgmtRecord::rclass() const
+void
+handle_signal(int signal_num, siginfo_t *, void *)
 {
-  return this->ele->rec_class;
-}
-
-int64_t
-CtrlMgmtRecord::as_int() const
-{
-  switch (this->ele->rec_type) {
-  case TS_REC_INT:
-    return this->ele->valueT.int_val;
-  case TS_REC_COUNTER:
-    return this->ele->valueT.counter_val;
-  default:
-    return 0;
-  }
-}
-
-TSMgmtError
-CtrlMgmtRecord::fetch(const char *name)
-{
-  return TSRecordGet(name, this->ele);
-}
-
-TSMgmtError
-CtrlMgmtRecordList::match(const char *name)
-{
-  return TSRecordGetMatchMlt(name, this->list);
-}
-
-CtrlMgmtRecordValue::CtrlMgmtRecordValue(const CtrlMgmtRecord &rec)
-{
-  this->init(rec.ele->rec_type, rec.ele->valueT);
-}
-
-CtrlMgmtRecordValue::CtrlMgmtRecordValue(const TSRecordEle *ele)
-{
-  this->init(ele->rec_type, ele->valueT);
-}
-
-CtrlMgmtRecordValue::CtrlMgmtRecordValue(TSRecordT _t, TSRecordValueT _v)
-{
-  this->init(_t, _v);
+  CtrlCommand::Signal_Flagged = signal_num;
 }
 
 void
-CtrlMgmtRecordValue::init(TSRecordT _t, TSRecordValueT _v)
+signal_register_handler(int signal_num, signal_handler_t handle_signal)
 {
-  this->rec_type = _t;
-  switch (this->rec_type) {
-  case TS_REC_INT:
-    snprintf(this->fmt.nbuf, sizeof(this->fmt.nbuf), "%" PRId64, _v.int_val);
-    break;
-  case TS_REC_COUNTER:
-    snprintf(this->fmt.nbuf, sizeof(this->fmt.nbuf), "%" PRId64, _v.counter_val);
-    break;
-  case TS_REC_FLOAT:
-    snprintf(this->fmt.nbuf, sizeof(this->fmt.nbuf), "%f", _v.float_val);
-    break;
-  case TS_REC_STRING:
-    if (strcmp(_v.string_val, "") == 0) {
-      this->fmt.str = "\"\"";
+  struct sigaction act;
+
+  act.sa_handler   = nullptr;
+  act.sa_sigaction = handle_signal;
+  act.sa_flags     = SA_NODEFER | SA_RESETHAND;
+  sigemptyset(&(act.sa_mask));
+
+  ink_release_assert(sigaction(signal_num, &act, nullptr) == 0);
+}
+} // namespace
+
+int
+main([[maybe_unused]] int argc, const char **argv)
+try {
+  ts::ArgParser parser;
+
+  std::unique_ptr<CtrlCommand> command;
+
+  auto Command_Execute = [&command]() {
+    if (command) {
+      command->execute();
     } else {
-      this->fmt.str = _v.string_val;
+      throw std::runtime_error("No command provided");
     }
-    break;
-  default:
-    rec_type      = TS_REC_STRING;
-    this->fmt.str = "(invalid)";
-  }
-}
+  };
 
-const char *
-CtrlMgmtRecordValue::c_str() const
-{
-  switch (this->rec_type) {
-  case TS_REC_STRING:
-    return this->fmt.str;
-  default:
-    return this->fmt.nbuf;
-  }
-}
+  auto CtrlUnimplementedCommand = [](std::string_view cmd) {
+    std::cout << "Command " << cmd << " unimplemented.\n";
+    App_Exit_Status_Code = CTRL_EX_UNIMPLEMENTED;
+  };
 
-void
-CtrlMgmtError(TSMgmtError err, const char *fmt, ...)
-{
-  ats_scoped_str msg(TSGetErrorMessage(err));
+  parser.add_description("Apache Traffic Server RPC CLI");
+  parser.add_global_usage("traffic_ctl [OPTIONS] CMD [ARGS ...]");
+  parser.require_commands();
 
-  if (fmt) {
-    va_list ap;
-
-    fprintf(stderr, "%s: ", program_name);
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
-
-    fprintf(stderr, ": %s\n", (const char *)msg);
-  } else {
-    fprintf(stderr, "%s: %s\n", program_name, (const char *)msg);
-  }
-}
-
-void
-CtrlEngine::CtrlUnimplementedCommand(std::string_view command)
-{
-  fprintf(stderr, "'%s' command is not implemented\n", command.data());
-  status_code = CTRL_EX_UNIMPLEMENTED;
-}
-
-int
-main(int argc, const char **argv)
-{
-  CtrlEngine engine;
-
-  engine.parser.add_global_usage("traffic_ctl [OPTIONS] CMD [ARGS ...]");
-  engine.parser.require_commands();
-
-  engine.parser.add_option("--debug", "", "Enable debugging output")
+  parser.add_option("--debug", "", "Enable debugging output - unimplemented")
     .add_option("--version", "-V", "Print version string")
     .add_option("--help", "-h", "Print usage information")
-    .add_option("--run-root", "", "using TS_RUNROOT as sandbox", "TS_RUNROOT", 1);
+    .add_option("--run-root", "", "using TS_RUNROOT as sandbox", "TS_RUNROOT", 1)
+    .add_option("--format", "-f", "Use a specific output format {json|rpc}", "", 1, "", "format")
+    .add_option("--read-timeout-ms", "", "Read timeout for RPC (in milliseconds)", "", 1, "10000", "read-timeout")
+    .add_option("--read-attempts", "", "Read attempts for RPC", "", 1, "100", "read-attempts")
+    .add_option("--watch", "-w", "Execute a program periodically. Watch interval(in seconds) can be passed.", "", 1, "-1", "watch")
+    .add_option("--error-level", "",
+                "Minimum severity to treat as error for exit status: " + error_level_names() + ". Default: error", "",
+                AT_MOST_ONE_ARG_N, "", "error-level");
 
-  auto &alarm_command   = engine.parser.add_command("alarm", "Manipulate alarms").require_commands();
-  auto &config_command  = engine.parser.add_command("config", "Manipulate configuration records").require_commands();
-  auto &metric_command  = engine.parser.add_command("metric", "Manipulate performance metrics").require_commands();
-  auto &server_command  = engine.parser.add_command("server", "Stop, restart and examine the server").require_commands();
-  auto &storage_command = engine.parser.add_command("storage", "Manipulate cache storage").require_commands();
-  auto &plugin_command  = engine.parser.add_command("plugin", "Interact with plugins").require_commands();
-  auto &host_command    = engine.parser.add_command("host", "Interact with host status").require_commands();
-
-  // alarm commands
-  alarm_command.add_command("clear", "Clear all current alarms", [&]() { engine.alarm_clear(); })
-    .add_example_usage("traffic_ctl alarm clear");
-  alarm_command.add_command("list", "List all current alarms", [&]() { engine.alarm_list(); })
-    .add_example_usage("traffic_ctl alarm list");
-  alarm_command.add_command("resolve", "Resolve the listed alarms", "", MORE_THAN_ONE_ARG_N, [&]() { engine.alarm_resolve(); })
-    .add_example_usage("traffic_ctl alarm resolve ALARM [ALARM ...]");
+  auto &config_command     = parser.add_command("config", "Manipulate configuration records").require_commands();
+  auto &cache_command      = parser.add_command("cache", "Manage the document cache").require_commands();
+  auto &metric_command     = parser.add_command("metric", "Manipulate performance metrics").require_commands();
+  auto &server_command     = parser.add_command("server", "Stop, restart and examine the server").require_commands();
+  auto &storage_command    = parser.add_command("storage", "Manipulate cache storage").require_commands();
+  auto &plugin_command     = parser.add_command("plugin", "Interact with plugins").require_commands();
+  auto &host_command       = parser.add_command("host", "Interact with host status").require_commands();
+  auto &hostdb_command     = parser.add_command("hostdb", "Interact with HostDB status").require_commands();
+  auto &direct_rpc_command = parser.add_command("rpc", "Interact with the rpc api").require_commands();
 
   // config commands
-  config_command.add_command("defaults", "Show default information configuration values", [&]() { engine.config_defaults(); })
+  config_command.add_command("defaults", "Show default information configuration values", Command_Execute)
     .add_example_usage("traffic_ctl config defaults [OPTIONS]")
-    .add_option("--records", "", "Emit output in records.config format");
+    .add_option("--records", "", "Emit output in YAML format");
   config_command
-    .add_command("describe", "Show detailed information about configuration values", "", MORE_THAN_ONE_ARG_N,
-                 [&]() { engine.config_describe(); })
+    .add_command("describe", "Show detailed information about configuration values", "", MORE_THAN_ONE_ARG_N, Command_Execute)
     .add_example_usage("traffic_ctl config describe RECORD [RECORD ...]");
-  config_command.add_command("diff", "Show non-default configuration values", [&]() { engine.config_diff(); })
+  config_command.add_command("diff", "Show non-default configuration values", Command_Execute)
     .add_example_usage("traffic_ctl config diff [OPTIONS]")
-    .add_option("--records", "", "Emit output in records.config format");
-  config_command.add_command("get", "Get one or more configuration values", "", MORE_THAN_ONE_ARG_N, [&]() { engine.config_get(); })
+    .add_option("--records", "", "Emit output in YAML format");
+  config_command.add_command("get", "Get one or more configuration values", "", MORE_THAN_ONE_ARG_N, Command_Execute)
     .add_example_usage("traffic_ctl config get [OPTIONS] RECORD [RECORD ...]")
-    .add_option("--records", "", "Emit output in records.config format");
-  config_command
-    .add_command("match", "Get configuration matching a regular expression", "", MORE_THAN_ONE_ARG_N,
-                 [&]() { engine.config_match(); })
+    .add_option("--cold", "-c",
+                "Save the value in a configuration file. This does not save the value in TS. Local file change only",
+                "TS_RECORD_YAML", AT_MOST_ONE_ARG_N)
+    .add_option("--records", "", "Emit output in YAML format")
+    .add_option("--default", "", "Include default value");
+  config_command.add_command("match", "Get configuration matching a regular expression", "", MORE_THAN_ONE_ARG_N, Command_Execute)
     .add_example_usage("traffic_ctl config match [OPTIONS] REGEX [REGEX ...]")
-    .add_option("--records", "", "Emit output in records.config format");
-  config_command.add_command("reload", "Request a configuration reload", [&]() { engine.config_reload(); })
-    .add_example_usage("traffic_ctl config reload");
-  config_command.add_command("status", "Check the configuration status", [&]() { engine.config_status(); })
+    .add_option("--records", "", "Emit output in YAML format")
+    .add_option("--default", "", "Include the default value");
+
+  //
+  // Start a new reload. If used without any extra options, it will start a new reload
+  // or show the details of the current reload if one is in progress.
+  // A new token will be assigned by the server if no token is provided.
+  config_command.add_command("reload", "Request a configuration reload", [&]() { command->execute(); })
+    .add_example_usage("traffic_ctl config reload")
+    //
+    // Start a new reload with a specific token. If no token is provided, the server will assign one.
+    // If a reload is already in progress, it will try to show the details of the current reload.
+    // If token already exists, you must use another token, or let the server assign one.
+    .add_option("--token", "-t", "Configuration token to reload.", "", 1, "")
+    //
+    // Start a new reload and monitor its progress until completion.
+    // Polls the server at regular intervals (see --refresh-int).
+    // If a reload is already in progress, monitors that one instead.
+    .add_option("--monitor", "-m", "Monitor reload progress until completion")
+    //
+    // Start a new reload. if one in progress it will show de details of the current reload.
+    // if no reload in progress, it will start a new one and it will show the details of it.
+    // This cannot be used with --monitor, if both are set, --show-details will be ignored.
+    .add_option("--show-details", "-s", "Show detailed information of the reload.")
+    .add_option("--include-logs", "-l", "include logs in the details. only work together with --show-details")
+
+    //
+    // Refresh interval in seconds used with --monitor.
+    // Controls how often to poll the server for reload status.
+    .add_option("--refresh-int", "-r", "Refresh interval in seconds (used with --monitor). Accepts fractional values (e.g. 0.5)",
+                "", 1, "0.5")
+    //
+    // The server will not let you start two reload at the same time. This option will force a new reload
+    // even if there is one in progress. Use with caution as this may have unexpected results.
+    // This is mostly for debugging and testing purposes. note: Should we keep it here?
+    .add_option("--force", "-F", "Force reload even if there are unsaved changes")
+    //
+    // Pass inline config data for reload. Like curl's -d flag:
+    //   -d @file.yaml              - read config from file
+    //   -d @file1.yaml @file2.yaml - read multiple files
+    //   -d @-                      - read config from stdin
+    //   -d "yaml: content"         - inline yaml string
+    .add_option("--data", "-d", "Inline config data (@file, @- for stdin, or yaml string)", "", MORE_THAN_ZERO_ARG_N, "")
+    .add_option("--directive", "-D", "Pass a reload directive to a config handler (format: config_key.directive_key=value)", "",
+                MORE_THAN_ZERO_ARG_N, "")
+    // No short form: -w is the global --watch.
+    .add_option(
+      "--initial-wait", "",
+      "Initial wait before first poll, giving the server time to schedule all handlers (seconds). Accepts fractional values", "", 1,
+      "2")
+    .add_option("--timeout", "-T",
+                "Maximum time to wait for reload completion (used with --monitor). "
+                "Accepts duration units: 30s, 1m, 500ms, etc. 0 means no timeout",
+                "", 1, "0")
+    .with_required("--monitor");
+
+  config_command.add_command("status", "Check the configuration status", [&]() { command->execute(); })
+    .add_option("--token", "-t", "Configuration token to check status.", "", 1, "")
+    .add_option("--count", "-c", "Number of status records to return. Use numeric or 'all' to get the full history", "", 1, "")
+    .add_option("--min-level", "", "Minimum severity level for log entries: debug, note, warning, error", "", 1, "")
     .add_example_usage("traffic_ctl config status");
-  config_command.add_command("set", "Set a configuration value", "", 2, [&]() { engine.config_set(); })
+  config_command.add_command("set", "Set a configuration value", "", 2, Command_Execute)
+    .add_option("--cold", "-c",
+                "Save the value in a configuration file. This does not save the value in TS. Local file change only",
+                "TS_RECORD_YAML", AT_MOST_ONE_ARG_N)
+    .add_option("--update", "-u", "Update a configuration value. [only relevant if --cold set]")
+    .add_option(
+      "--type", "-t",
+      "Add type tag to the yaml field. This is needed if the record is not registered inside ATS. [only relevant if --cold set]",
+      "", 1)
     .add_example_usage("traffic_ctl config set RECORD VALUE");
+  config_command
+    .add_command("reset", "Reset configuration values matching a path pattern to their defaults", "", MORE_THAN_ZERO_ARG_N,
+                 Command_Execute)
+    .add_example_usage("traffic_ctl config reset records")
+    .add_example_usage("traffic_ctl config reset proxy.config.http")
+    .add_example_usage("traffic_ctl config reset proxy.config.http.cache_enabled");
+
+  config_command.add_command("registry", "Show configuration file registry", Command_Execute)
+    .add_example_usage("traffic_ctl config registry");
+
+  // cache commands
+  cache_command.add_command("clear", "Advance the global cache generation", "", 0, Command_Execute)
+    .add_example_usage("traffic_ctl cache clear");
+
+  // ssl-multicert subcommand
+  auto &ssl_multicert_command =
+    config_command.add_command("ssl-multicert", "Manage ssl_multicert configuration").require_commands();
+  auto &ssl_multicert_show = ssl_multicert_command.add_command("show", "Show the ssl_multicert configuration", Command_Execute)
+                               .add_example_usage("traffic_ctl config ssl-multicert show")
+                               .add_example_usage("traffic_ctl config ssl-multicert show --yaml")
+                               .add_example_usage("traffic_ctl config ssl-multicert show --json");
+  ssl_multicert_show.add_mutex_group("format", false, "Output format");
+  ssl_multicert_show.add_option_to_group("format", "--yaml", "-y", "Output in YAML format (default)");
+  ssl_multicert_show.add_option_to_group("format", "--json", "-j", "Output in JSON format");
+
+  // convert subcommand - convert config files between formats
+  auto &convert_command = config_command.add_command("convert", "Convert configuration files to YAML format").require_commands();
+  convert_command.add_command("ssl_multicert", "Convert ssl_multicert.config to ssl_multicert.yaml", "", 2, Command_Execute)
+    .add_example_usage("traffic_ctl config convert ssl_multicert <input_file> <output_file>")
+    .add_example_usage("traffic_ctl config convert ssl_multicert ssl_multicert.config ssl_multicert.yaml")
+    .add_example_usage("traffic_ctl config convert ssl_multicert ssl_multicert.config -  # output to stdout");
+  convert_command.add_command("storage", "Convert storage.config + volume.config to storage.yaml", "", 3, Command_Execute)
+    .add_example_usage("traffic_ctl config convert storage <storage.config> <volume.config> <output_file>")
+    .add_example_usage("traffic_ctl config convert storage storage.config volume.config storage.yaml")
+    .add_example_usage("traffic_ctl config convert storage storage.config volume.config -  # output to stdout");
+  convert_command.add_command("plugin_config", "Convert plugin.config to plugin.yaml", "", 2, Command_Execute)
+    .add_example_usage("traffic_ctl config convert plugin_config <input_file> <output_file>")
+    .add_example_usage("traffic_ctl config convert plugin_config plugin.config plugin.yaml")
+    .add_example_usage("traffic_ctl config convert plugin_config plugin.config -  # output to stdout")
+    .add_option("--skip-disabled", "", "Omit commented-out (disabled) plugins from the output");
 
   // host commands
-  host_command.add_command("status", "Get one or more host statuses", "", MORE_THAN_ONE_ARG_N, [&]() { engine.status_get(); })
+  host_command.add_command("status", "Get one or more host statuses", "", MORE_THAN_ZERO_ARG_N, Command_Execute)
     .add_example_usage("traffic_ctl host status HOST  [HOST  ...]");
-  host_command.add_command("down", "Set down one or more host(s)", "", MORE_THAN_ONE_ARG_N, [&]() { engine.status_down(); })
+  host_command.add_command("down", "Set down one or more host(s)", "", MORE_THAN_ONE_ARG_N, Command_Execute)
     .add_example_usage("traffic_ctl host down HOST [OPTIONS]")
-    .add_option("--time", "-I", "number of seconds that a host is marked down", "", 1)
-    .add_option("--reason", "", "reason for marking the host down, one of 'manual|active|local", "", 1);
-  host_command.add_command("up", "Set up one or more host(s)", "", MORE_THAN_ONE_ARG_N, [&]() { engine.status_up(); })
+    .add_option("--time", "-I", "number of seconds that a host is marked down", "", 1, "0")
+    .add_option("--reason", "", "reason for marking the host down, one of 'manual|active|local", "", 1, "manual");
+  host_command.add_command("up", "Set up one or more host(s)", "", MORE_THAN_ONE_ARG_N, Command_Execute)
     .add_example_usage("traffic_ctl host up METRIC value")
-    .add_option("--reason", "", "reason for marking the host up, one of 'manual|active|local", "", 1);
+    .add_option("--reason", "", "reason for marking the host up, one of 'manual|active|local", "", 1, "manual");
 
   // metric commands
-  metric_command.add_command("get", "Get one or more metric values", "", MORE_THAN_ONE_ARG_N, [&]() { engine.metric_get(); })
+  metric_command.add_command("get", "Get one or more metric values", "", MORE_THAN_ONE_ARG_N, Command_Execute)
     .add_example_usage("traffic_ctl metric get METRIC [METRIC ...]");
-  metric_command.add_command("clear", "Clear all metric values", [&]() { engine.metric_clear(); });
   metric_command.add_command("describe", "Show detailed information about one or more metric values", "", MORE_THAN_ONE_ARG_N,
-                             [&]() { engine.CtrlUnimplementedCommand("describe"); }); // not implemented
-  metric_command.add_command("match", "Get metrics matching a regular expression", "", MORE_THAN_ZERO_ARG_N,
-                             [&]() { engine.metric_match(); });
-  metric_command.add_command("monitor", "Display the value of a metric over time", "", MORE_THAN_ZERO_ARG_N,
-                             [&]() { engine.CtrlUnimplementedCommand("monitor"); }); // not implemented
-  metric_command.add_command("zero", "Clear one or more metric values", "", MORE_THAN_ONE_ARG_N, [&]() { engine.metric_zero(); });
+                             Command_Execute); // not implemented
+  metric_command.add_command("match", "Get metrics matching a regular expression", "", MORE_THAN_ZERO_ARG_N, Command_Execute)
+    .add_option("--include-hidden", "", "Also match hidden (internal, normally unpublished) metrics")
+    .add_example_usage("traffic_ctl metric match [--include-hidden] METRIC [METRIC ...]");
+  metric_command
+    .add_command(
+      "monitor",
+      "Display the value of a metric(s) over time. Program stops after <count> or with a SIGINT. A brief summary is displayed.", "",
+      MORE_THAN_ZERO_ARG_N, Command_Execute)
+    .add_example_usage("traffic_ctl metric monitor METRIC -i 3 -c 10")
+    .add_option("--count", "-c",
+                "Terminate execution after requesting <count> metrics. If 0 is passed, program should be terminated by a SIGINT",
+                "", 1, "0")
+    .add_option("--interval", "-i", "Wait interval seconds between sending each metric request. Minimum value is 1s.", "", 1, "5");
+
+  // hostdb commands
+  hostdb_command.add_command("status", "Get HostDB info", "", MORE_THAN_ZERO_ARG_N, Command_Execute)
+    .add_example_usage("traffic_ctl hostdb status");
+  hostdb_command.add_command("clear", "Clear all HostDB entries", "", 0, Command_Execute)
+    .add_example_usage("traffic_ctl hostdb clear");
 
   // plugin command
   plugin_command
-    .add_command("msg", "Send message to plugins - a TAG and the message DATA(optional)", "", MORE_THAN_ONE_ARG_N,
-                 [&]() { engine.plugin_msg(); })
+    .add_command("msg", "Send message to plugins - a TAG and the message DATA(optional)", "", MORE_THAN_ONE_ARG_N, Command_Execute)
     .add_example_usage("traffic_ctl plugin msg TAG DATA");
+  plugin_command.add_command("list", "Show globally loaded plugins and their status", "", 0, Command_Execute)
+    .add_example_usage("traffic_ctl plugin list");
 
   // server commands
   server_command.add_command("backtrace", "Show a full stack trace of the traffic_server process",
-                             [&]() { engine.server_backtrace(); });
-  server_command.add_command("restart", "Restart Traffic Server", [&]() { engine.server_restart(); })
-    .add_example_usage("traffic_ctl server restart [OPTIONS]")
-    .add_option("--drain", "", "Wait for client connections to drain before restarting")
-    .add_option("--manager", "", "Restart traffic_manager as well as traffic_server");
-  server_command.add_command("start", "Start the proxy", [&]() { engine.server_start(); })
-    .add_example_usage("traffic_ctl server start [OPTIONS]")
-    .add_option("--clear-cache", "", "Clear the disk cache on startup")
-    .add_option("--clear-hostdb", "", "Clear the DNS cache on startup");
-  server_command.add_command("status", "Show the proxy status", [&]() { engine.server_status(); })
+                             [&]() { CtrlUnimplementedCommand("backtrace"); });
+  server_command.add_command("status", "Show the proxy status", [&]() { command->execute(); })
     .add_example_usage("traffic_ctl server status");
-  server_command.add_command("stop", "Stop the proxy", [&]() { engine.server_stop(); })
-    .add_example_usage("traffic_ctl server stop [OPTIONS]")
-    .add_option("--drain", "", "Wait for client connections to drain before stopping");
-  server_command.add_command("drain", "Drain the requests", [&]() { engine.server_drain(); })
-    .add_example_usage("traffic_ctl server drain [OPTIONS]")
-    .add_option("--no-new-connection", "-N", "Wait for new connections down to threshold before starting draining")
-    .add_option("--undo", "-U", "Recover server from the drain mode");
+  auto &drain_cmd = server_command.add_command("drain", "Drain the requests", [&]() { command->execute(); });
+  drain_cmd.add_example_usage("traffic_ctl server drain [OPTIONS]");
+
+  drain_cmd.add_mutex_group("drain_mode", false, "Drain mode options");
+  drain_cmd.add_option_to_group("drain_mode", "--no-new-connection", "-N",
+                                "Wait for new connections down to threshold before starting draining");
+  drain_cmd.add_option_to_group("drain_mode", "--undo", "-U", "Recover server from the drain mode");
+
+  auto &debug_command =
+    server_command.add_command("debug", "Enable/Disable ATS for diagnostic messages at runtime").require_commands();
+  debug_command.add_command("enable", "Enables logging for diagnostic messages at runtime", Command_Execute)
+    .add_option("--tags", "-t", "Debug tags", "TS_DEBUG_TAGS", 1)
+    .add_option("--append", "-a", "Append tags to existing tags instead of replacing")
+    .with_required("--tags")
+    .add_option("--client_ip", "-c", "Client's ip", "", 1, "")
+    .add_example_usage("traffic_ctl server debug enable -t my_tags -c X.X.X.X")
+    .add_example_usage("traffic_ctl server debug enable -t new_tag -a  # append mode");
+  debug_command.add_command("disable", "Disables logging for diagnostic messages at runtime", Command_Execute)
+    .add_example_usage("traffic_ctl server debug disable");
 
   // storage commands
-  storage_command
-    .add_command("offline", "Take one or more storage volumes offline", "", MORE_THAN_ONE_ARG_N,
-                 [&]() { engine.storage_offline(); })
+  storage_command.add_command("offline", "Take one or more storage volumes offline", "", MORE_THAN_ONE_ARG_N, Command_Execute)
     .add_example_usage("storage offline DEVICE [DEVICE ...]");
-  storage_command.add_command("status", "Show the storage configuration", "", MORE_THAN_ZERO_ARG_N,
-                              [&]() { engine.CtrlUnimplementedCommand("status"); }); // not implemented
+  storage_command.add_command("status", "Show the storage configuration", "", MORE_THAN_ONE_ARG_N,
+                              Command_Execute); // not implemented
 
-  // parse the arguments
-  engine.arguments = engine.parser.parse(argv);
+  // direct rpc commands, handy for debug and trouble shooting
+  direct_rpc_command
+    .add_command("file", "Send direct JSONRPC request to the server from a passed file(s)", "", MORE_THAN_ONE_ARG_N,
+                 Command_Execute)
+    .add_example_usage("traffic_ctl rpc file request.yaml");
+  direct_rpc_command.add_command("get-api", "Request full API from server", "", 0, Command_Execute)
+    .add_example_usage("traffic_ctl rpc get-api");
+  direct_rpc_command.add_command("input", "Read from standard input. Ctrl-D to send the request", "", 0, Command_Execute)
+    .add_option("--raw", "-r",
+                "No json/yaml parse validation will take place, the raw content will be directly send to the server.", "", 0, "",
+                "raw")
+    .add_example_usage("traffic_ctl rpc input ");
+  direct_rpc_command
+    .add_command("invoke", "Call a method by using the method name as input parameter", "", MORE_THAN_ONE_ARG_N, Command_Execute)
+    .add_option("--params", "-p", "Parameters to be passed in the request, YAML or JSON format", "", MORE_THAN_ONE_ARG_N, "", "")
+    .add_example_usage("traffic_ctl rpc invoke foo_bar -p \"numbers: [1, 2, 3]\"");
 
-  BaseLogFile *base_log_file = new BaseLogFile("stderr");
-  DiagsPtr::set(new Diags("traffic_ctl", "" /* tags */, "" /* actions */, base_log_file));
+  // cache shm commands - operate directly on POSIX shared memory; no running server required.
+  auto &shm_command = cache_command.add_command("shm", "Inspect and manage cache shared-memory segments").require_commands();
+  // No parser-level default for --prefix: ArgParser injects defaults into the parsed
+  // arguments, which would make an omitted --prefix indistinguishable from an explicit
+  // one. CacheShmCommand supplies the runtime default and keys its "did you set
+  // name_prefix?" hint off the option being absent.
+  shm_command.add_option("--prefix", "-p", "shm name prefix word, framed as /<word>- (default 'ats')", "", 1, "");
+  shm_command.add_command("status", "Show the cache shared-memory control segment and stripe table", Command_Execute)
+    .add_example_usage("traffic_ctl cache shm status")
+    .add_example_usage("traffic_ctl cache shm status --prefix ats-t");
+  shm_command.add_command("clear", "Unlink the cache shared-memory control and stripe segments", Command_Execute)
+    .add_example_usage("traffic_ctl cache shm clear")
+    .add_example_usage("traffic_ctl cache shm clear --prefix ats-t");
 
-  if (engine.arguments.get("debug")) {
-    diags()->activate_taglist("traffic_ctl", DiagsTagType_Debug);
-    diags()->config.enabled(DiagsTagType_Debug, 1);
-    diags()->show_location = SHOW_LOCATION_DEBUG;
+  auto create_command = [](ts::Arguments &args) -> std::unique_ptr<CtrlCommand> {
+    if (args.get("config")) {
+      if (args.get("convert")) {
+        return std::make_unique<ConvertConfigCommand>(&args);
+      }
+      if (args.get("ssl-multicert")) {
+        return std::make_unique<SSLMultiCertCommand>(&args);
+      }
+      if (args.get("cold")) {
+        return std::make_unique<FileConfigCommand>(&args);
+      }
+      return std::make_unique<ConfigCommand>(&args);
+    }
+
+    if (args.get("cache")) {
+      // `cache shm` reads the shm segments directly, so it must not be routed through the RPC-backed CacheCommand.
+      if (args.get("shm")) {
+        return std::make_unique<CacheShmCommand>(&args);
+      }
+      return std::make_unique<CacheCommand>(&args);
+    }
+
+    static const std::map<std::string, std::function<std::unique_ptr<CtrlCommand>(ts::Arguments *)>> factories = {
+      {"metric",  [](ts::Arguments *a) { return std::make_unique<MetricCommand>(a); }   },
+      {"server",  [](ts::Arguments *a) { return std::make_unique<ServerCommand>(a); }   },
+      {"storage", [](ts::Arguments *a) { return std::make_unique<StorageCommand>(a); }  },
+      {"plugin",  [](ts::Arguments *a) { return std::make_unique<PluginCommand>(a); }   },
+      {"host",    [](ts::Arguments *a) { return std::make_unique<HostCommand>(a); }     },
+      {"hostdb",  [](ts::Arguments *a) { return std::make_unique<HostDBCommand>(a); }   },
+      {"rpc",     [](ts::Arguments *a) { return std::make_unique<DirectRPCCommand>(a); }},
+    };
+
+    for (const auto &[key, factory] : factories) {
+      if (args.get(key)) {
+        return factory(&args);
+      }
+    }
+    return nullptr;
+  };
+
+  try {
+    // for now we only care about SIGINT(SIGQUIT, ... ?)
+    signal_register_handler(SIGINT, handle_signal);
+
+    auto args = parser.parse(argv);
+
+    // ArgParser refuses it given more than once. Given without a value it is an error, not the default.
+    if (auto const &error_level = args.get("error-level"); error_level) {
+      if (error_level.size() == 0) {
+        throw std::runtime_error("--error-level needs a value. Use one of " + error_level_names());
+      }
+      if (auto const level = parse_error_level(error_level.value()); level) {
+        App_Exit_Level_Error = *level;
+      } else {
+        throw std::runtime_error("Unknown error level: " + error_level.value() + ". Use one of " + error_level_names());
+      }
+    }
+
+    argparser_runroot_handler(args.get("run-root").value(), argv[0]);
+    Layout::create();
+
+    if (command = create_command(args); !command) {
+      throw std::runtime_error("No valid command provided");
+    }
+    // Execute
+    args.invoke();
+  } catch (ServerErrorReported const &) {
+    // Already printed, and App_Exit_Status_Code holds its grade.
+  } catch (std::exception const &ex) {
+    App_Exit_Status_Code = CTRL_EX_ERROR;
+    std::cerr << "Error found:\n" << ex.what() << '\n';
   }
 
-  argparser_runroot_handler(engine.arguments.get("run-root").value(), argv[0]);
-  Layout::create();
-
-  // This is a little bit of a hack, for now it'll suffice.
-  max_records_entries = 262144;
-  RecProcessInit(RECM_STAND_ALONE, diags());
-  LibRecordsConfigInit();
-
-  ats_scoped_str rundir(RecConfigReadRuntimeDir());
-
-  // Make a best effort to connect the control socket. If it turns out we are
-  // just displaying help or something then it
-  // doesn't matter that we failed. If we end up performing some operation then
-  // that operation will fail and display the
-  // error.
-  TSInit(rundir, static_cast<TSInitOptionT>(TS_MGMT_OPT_NO_EVENTS | TS_MGMT_OPT_NO_SOCK_TESTS));
-
-  engine.arguments.invoke();
-
-  // Done with the mgmt API.
-  TSTerminate();
-
-  return engine.status_code;
+  return App_Exit_Status_Code;
+} catch (...) {
+  fprintf(stderr, "traffic_ctl: terminating on an unhandled %s\n", ts::describe_current_exception().c_str());
+  return CTRL_EX_ERROR;
 }

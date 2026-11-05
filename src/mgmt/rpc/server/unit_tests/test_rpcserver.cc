@@ -1,0 +1,852 @@
+/**
+  @section license License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+*/
+#define CATCH_CONFIG_EXTERNAL_INTERFACES
+
+#include <catch2/catch_test_macros.hpp> /* catch unit-test framework */
+#include <catch2/reporters/catch_reporter_event_listener.hpp>
+#include <catch2/reporters/catch_reporter_registrars.hpp>
+#include <catch2/interfaces/catch_interfaces_config.hpp>
+#include <catch2/internal/catch_context.hpp>
+
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdio.h>
+#include <unistd.h>
+
+#include <thread>
+#include <future>
+#include <chrono>
+#include <fstream>
+#include <cerrno>
+#include <cstring>
+#include <cstdlib>
+#include <vector>
+#include <functional>
+
+#include "swoc/swoc_file.h"
+
+#include <swoc/BufferWriter.h>
+#include "ts/ts.h"
+
+#include "mgmt/rpc/jsonrpc/JsonRPC.h"
+#include "mgmt/rpc/server/RPCServer.h"
+#include "mgmt/rpc/server/IPCSocketServer.h"
+
+#include "shared/rpc/IPCSocketClient.h"
+#include "iocore/eventsystem/EventSystem.h"
+#include "tscore/Layout.h"
+#include "tscore/ink_sock.h"
+#include "iocore/utils/diags.i"
+
+#define DEFINE_JSONRPC_PROTO_FUNCTION(fn) swoc::Rv<YAML::Node> fn(std::string_view const &, const YAML::Node &params)
+
+namespace fs = swoc::file;
+
+namespace rpc
+{
+bool
+test_remove_handler(std::string_view name)
+{
+  return rpc::JsonRPCManager::instance().remove_handler(name);
+}
+
+template <typename Func>
+inline bool
+add_method_handler(const std::string &name, Func &&call)
+{
+  return rpc::JsonRPCManager::instance().add_method_handler(name, std::forward<Func>(call), nullptr, {});
+}
+} // namespace rpc
+
+namespace
+{
+/// Registers a method handler and removes it when the scope ends.
+///
+/// Catch2 re-runs a TEST_CASE body once per leaf SECTION. Registering at the top of the body and
+/// removing at the bottom only works while every assertion passes: REQUIRE is fatal, so a failure
+/// inside a SECTION unwinds before the trailing removal and the handler survives into the next
+/// SECTION's run, where re-registering it fails. One real failure then reports as two, and the
+/// second points at a registration that was never the problem.
+class ScopedMethodHandler
+{
+public:
+  template <typename Func> explicit ScopedMethodHandler(std::string name, Func &&call) : _name{std::move(name)}
+  {
+    _registered = rpc::add_method_handler(_name, std::forward<Func>(call));
+  }
+
+  ~ScopedMethodHandler() noexcept
+  {
+    if (!_registered) {
+      return;
+    }
+    // Nothing may leave this destructor: it runs during stack unwinding when a SECTION failed, and
+    // an exception escaping it ends the whole test binary. Even CHECK throws once Catch2 aborts the
+    // run (-a, -x N), after it has recorded the failure.
+    try {
+      INFO("handler: " << _name);
+      CHECK(rpc::test_remove_handler(_name));
+    } catch (std::exception const &ex) {
+      // CHECK catches what test_remove_handler throws, so this is INFO or Catch2 itself failing.
+      try {
+        FAIL_CHECK("exception while removing handler '" << _name << "': " << ex.what());
+      } catch (...) {
+      }
+    } catch (...) {
+      // Only Catch2's abort gets here, and CHECK has already recorded the failure.
+    }
+  }
+
+  ScopedMethodHandler(ScopedMethodHandler const &)            = delete;
+  ScopedMethodHandler &operator=(ScopedMethodHandler const &) = delete;
+
+  [[nodiscard]] bool
+  registered() const
+  {
+    return _registered;
+  }
+
+private:
+  std::string _name;
+  bool        _registered{false};
+};
+
+constexpr std::string_view rpc_test_dir_template{"ats_rpc_XXXXXX"};
+constexpr std::string_view rpc_test_socket_name{"s"};
+constexpr std::string_view rpc_test_lock_name{"l"};
+constexpr size_t           max_rpc_socket_path_size{sizeof(sockaddr_un::sun_path) - 1};
+
+fs::path         rpcTestDir;
+std::string      sockPath;
+std::string      lockPath;
+constexpr int    default_backlog{5};
+constexpr int    default_maxRetriesOnTransientErrors{64};
+constexpr size_t default_incoming_req_max_size{32000 * 3};
+DbgCtl           dbg_ctl{"rpc.test.client"};
+
+/** Prepare JSONRPC socket paths beneath @a base.
+ *
+ * This owns creation of the per-run test directory and publishes the socket
+ * and lock paths shared by the JSONRPC test server and clients.
+ *
+ * @param[in] base Candidate parent directory for the test directory.
+ * @param[out] error Reason setup failed, if a usable directory was not created.
+ * @return @c true if the socket and lock paths are ready for this test run.
+ */
+bool
+try_setup_rpc_test_paths(fs::path const &base, std::string &error)
+{
+  fs::path const     template_path    = base / rpc_test_dir_template;
+  std::string const &dir_template     = template_path.string();
+  fs::path const     socket_file_path = template_path / rpc_test_socket_name;
+  std::string const &socket_path      = socket_file_path.string();
+
+  if (socket_path.size() > max_rpc_socket_path_size) {
+    error = "JSONRPC test socket path is too long under " + base.string() + ": " + socket_path;
+    return false;
+  }
+
+  std::vector<char> mutable_template{dir_template.begin(), dir_template.end()};
+  mutable_template.push_back('\0');
+
+  char *created_dir = mkdtemp(mutable_template.data());
+  if (created_dir == nullptr) {
+    error = "Failed to create JSONRPC test directory under " + base.string() + ": " + std::strerror(errno);
+    return false;
+  }
+
+  rpcTestDir = fs::path{created_dir};
+  sockPath   = (rpcTestDir / rpc_test_socket_name).string();
+  lockPath   = (rpcTestDir / rpc_test_lock_name).string();
+  return true;
+}
+
+/** Prepare JSONRPC socket paths for the test run.
+ *
+ * This prefers the environment temporary directory, then falls back to @c /tmp
+ * when the generated Unix-domain socket path would be too long or setup fails.
+ *
+ * @param[out] error Reason setup failed, if no candidate directory works.
+ * @return @c true if the socket and lock paths are ready for this test run.
+ */
+bool
+setup_rpc_test_paths(std::string &error)
+{
+  if (try_setup_rpc_test_paths(fs::temp_directory_path(), error)) {
+    error.clear();
+    return true;
+  }
+  if (try_setup_rpc_test_paths(fs::path{"/tmp"}, error)) {
+    error.clear();
+    return true;
+  }
+  return false;
+}
+
+} // end anonymous namespace
+
+struct RPCServerTestListener : Catch::EventListenerBase {
+  using EventListenerBase::EventListenerBase; // inherit constructor
+  ~RPCServerTestListener();
+
+  // The whole test run starting
+  void
+  testRunStarting(Catch::TestRunInfo const & /* testRunInfo ATS_UNUSED */) override
+  {
+    std::string setup_error;
+    bool const  setup_ok = setup_rpc_test_paths(setup_error);
+    INFO(setup_error);
+    REQUIRE(setup_ok);
+
+    Layout::create();
+    init_diags("rpc", nullptr);
+    RecProcessInit();
+
+    signal(SIGPIPE, SIG_IGN);
+
+    ink_event_system_init(EVENT_SYSTEM_MODULE_PUBLIC_VERSION);
+    eventProcessor.start(2, 1048576);
+
+    // EThread *main_thread = new EThread;
+    main_thread = std::make_unique<EThread>();
+    main_thread->set_specific();
+
+    rpc::config::RPCConfig serverConfig;
+
+    auto confStr{R"({"rpc": { "enabled": true, "unix": { "lock_path_name": ")" + lockPath + R"(", "sock_path_name": ")" + sockPath +
+                 R"(",  "backlog": 5,"max_retry_on_transient_errors": 64, "incoming_request_max_size": 32000 }}})"};
+    YAML::Node configNode = YAML::Load(confStr);
+    serverConfig.load(configNode["rpc"]);
+    // Report this loudly: otherwise every socket test just fails later with a
+    // confusing "no such file" on the socket path, which is especially noisy
+    // now that each test case runs as its own process.
+    try {
+      jsonrpcServer = new rpc::RPCServer(serverConfig);
+
+      jsonrpcServer->start_thread();
+    } catch (std::exception const &ex) {
+      std::fprintf(stderr, "Failed to start the JSONRPC test server on %s: %s\n", sockPath.c_str(), ex.what());
+    }
+  }
+
+  // The whole test run ending
+  void
+  testRunEnded(Catch::TestRunStats const & /* testRunStats ATS_UNUSED */) override
+  {
+    if (jsonrpcServer) {
+      delete jsonrpcServer; // will stop the thread
+    }
+
+    std::error_code ec;
+    if (!rpcTestDir.empty()) {
+      fs::remove_all(rpcTestDir, ec);
+    }
+  }
+
+private:
+  std::unique_ptr<EThread> main_thread;
+};
+CATCH_REGISTER_LISTENER(RPCServerTestListener)
+
+RPCServerTestListener::~RPCServerTestListener() {}
+
+void
+restart_json_rpc_server(YAML::Node n)
+{
+  rpc::config::RPCConfig serverConfig;
+  serverConfig.load(n["rpc"]);
+
+  if (jsonrpcServer) {
+    delete jsonrpcServer;
+  }
+
+  try {
+    jsonrpcServer = new rpc::RPCServer(serverConfig);
+    jsonrpcServer->start_thread();
+  } catch (std::exception const &ex) {
+    Dbg(dbg_ctl, "Oops: %s", ex.what());
+  }
+}
+
+DEFINE_JSONRPC_PROTO_FUNCTION(some_foo) // id, params
+{
+  swoc::Rv<YAML::Node> resp;
+  int                  dur{1};
+  try {
+    dur = params["duration"].as<int>();
+  } catch (...) {
+  }
+  INFO("Sleeping for " << dur << "s");
+  std::this_thread::sleep_for(std::chrono::seconds(dur));
+  resp.result()["res"]      = "ok";
+  resp.result()["duration"] = dur;
+
+  INFO("Done sleeping");
+  return resp;
+}
+namespace
+{
+// Handy class to avoid manually disconnecting the socket.
+// TODO: should it also connect?
+struct ScopedLocalSocket : shared::rpc::IPCSocketClient {
+  using super = shared::rpc::IPCSocketClient;
+  // TODO, use another path.
+  ScopedLocalSocket() : IPCSocketClient(sockPath) {}
+  ~ScopedLocalSocket() { IPCSocketClient::disconnect(); }
+
+  template <std::size_t N>
+  void
+  send_in_chunks(std::string_view data, int disconnect_after_chunk_n = -1)
+  {
+    int  chunk_number{1};
+    auto chunks = chunk<N>(data);
+    for (auto &&part : chunks) {
+      if (super::_safe_write(_sock, part.c_str(), part.size()) == -1) {
+        Dbg(dbg_ctl, "error sending message :%s", std ::strerror(errno));
+        break;
+      }
+
+      if (disconnect_after_chunk_n == chunk_number) {
+        Dbg(dbg_ctl, "Disconnecting it after chunk %d", chunk_number);
+        super::disconnect();
+        return;
+      }
+      ++chunk_number;
+    }
+  }
+
+  // basic read, if fail, why it fail is irrelevant in this test.
+  std::string
+  read()
+  {
+    std::string buf;
+    auto        ret = super::read_all(buf);
+    if (ret == ReadStatus::NO_ERROR) {
+      return buf;
+    }
+    return {};
+  }
+  // small wrapper function to deal with the flow.
+  std::string
+  query(std::string_view msg)
+  {
+    std::string buf;
+    auto        ret = connect().send(msg).read_all(buf);
+    if (ret == ReadStatus::NO_ERROR) {
+      return buf;
+    }
+
+    return {};
+  }
+
+private:
+  template <typename Iter, std::size_t N>
+  std::array<std::string, N>
+  chunk_impl(Iter from, Iter to)
+  {
+    const std::size_t size = std::distance(from, to);
+    if (size <= N) {
+      return {
+        std::string{from, to}
+      };
+    }
+    std::size_t                index{0};
+    std::array<std::string, N> ret;
+    const std::size_t          each_part = size / N;
+    const std::size_t          remainder = size % N;
+
+    for (auto it = from; it != to;) {
+      if (std::size_t rem = std::distance(it, to); rem == (each_part + remainder)) {
+        ret[index++] = std::string{it, it + rem};
+        break;
+      }
+      ret[index++] = std::string{it, it + each_part};
+      std::advance(it, each_part);
+    }
+
+    return ret;
+  }
+
+  template <std::size_t N>
+  auto
+  chunk(std::string_view v)
+  {
+    return chunk_impl<std::string_view::const_iterator, N>(v.begin(), v.end());
+  }
+};
+
+struct TestableIPCSocketClient : shared::rpc::IPCSocketClient {
+  using shared::rpc::IPCSocketClient::_safe_write;
+};
+
+// helper function to send a request and update the promise when the response is done.
+// This is to be used in a multithread test.
+void
+send_request(std::string json, std::promise<std::string> p)
+{
+  ScopedLocalSocket rpc_client;
+  auto              resp = rpc_client.query(json);
+  p.set_value(resp);
+}
+
+TEST_CASE("IPCSocketClient write returns when the peer stops reading", "[socket][client]")
+{
+  int fds[2];
+  REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+  int const flags = ::fcntl(fds[0], F_GETFL, 0);
+  REQUIRE(flags >= 0);
+  REQUIRE(::fcntl(fds[0], F_SETFL, flags | O_NONBLOCK) == 0);
+
+  std::vector<char> fill(4096, 'x');
+  while (true) {
+    ssize_t const ret = ::write(fds[0], fill.data(), fill.size());
+    if (ret < 0) {
+      REQUIRE((errno == EAGAIN || errno == EWOULDBLOCK));
+      break;
+    }
+    REQUIRE(ret > 0);
+  }
+
+  TestableIPCSocketClient rpc_client;
+  pid_t const             pid = ::fork();
+  REQUIRE(pid >= 0);
+  if (pid == 0) {
+    ::close(fds[1]);
+    char const byte = 'x';
+    auto const ret  = rpc_client._safe_write(fds[0], &byte, 1);
+    auto const err  = errno;
+    ::close(fds[0]);
+    _exit(ret == -1 && err == ETIMEDOUT ? 0 : 1);
+  }
+
+  int        status         = 0;
+  bool       child_exited   = false;
+  auto const child_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (std::chrono::steady_clock::now() < child_deadline) {
+    auto const wait_ret = ::waitpid(pid, &status, WNOHANG);
+    if (wait_ret == pid) {
+      child_exited = true;
+      break;
+    }
+    REQUIRE(wait_ret == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+
+  if (!child_exited) {
+    auto const wait_ret = ::waitpid(pid, &status, WNOHANG);
+    if (wait_ret == pid) {
+      child_exited = true;
+    } else {
+      REQUIRE(wait_ret == 0);
+    }
+  }
+
+  if (!child_exited) {
+    ::kill(pid, SIGKILL);
+    REQUIRE(::waitpid(pid, &status, 0) == pid);
+    FAIL("_safe_write did not return when the nonblocking socket stayed unwritable");
+  }
+
+  ::close(fds[0]);
+  ::close(fds[1]);
+
+  REQUIRE(WIFEXITED(status));
+  REQUIRE(WEXITSTATUS(status) == 0);
+}
+} // namespace
+TEST_CASE("Sending 'concurrent' requests to the rpc server.", "[thread]")
+{
+  SECTION("A registered handlers")
+  {
+    ScopedMethodHandler some_foo_handler{"some_foo", &some_foo};
+    ScopedMethodHandler some_foo2_handler{"some_foo2", &some_foo};
+    REQUIRE(some_foo_handler.registered());
+    REQUIRE(some_foo2_handler.registered());
+
+    std::promise<std::string> p1;
+    std::promise<std::string> p2;
+    auto                      fut1 = p1.get_future();
+    auto                      fut2 = p2.get_future();
+
+    REQUIRE_NOTHROW([&]() {
+      // Two different clients, on the same server, as the server is an Unix Domain Socket, it should handle all this
+      // properly, in any case we just run the basic smoke test for our server.
+      auto t1 = std::thread(&send_request, R"({"jsonrpc": "2.0", "method": "some_foo", "params": {"duration": 1}, "id": "aBcD"})",
+                            std::move(p1));
+      auto t2 = std::thread(&send_request, R"({"jsonrpc": "2.0", "method": "some_foo", "params": {"duration": 1}, "id": "eFgH"})",
+                            std::move(p2));
+      // wait to get the promise set.
+      fut1.wait();
+      fut2.wait();
+
+      // the expected
+      std::string_view expected1{R"({"jsonrpc": "2.0", "result": {"res": "ok", "duration": "1"}, "id": "aBcD"})"};
+      std::string_view expected2{R"({"jsonrpc": "2.0", "result": {"res": "ok", "duration": "1"}, "id": "eFgH"})"};
+
+      CHECK(fut1.get() == expected1);
+      CHECK(fut2.get() == expected2);
+
+      t1.join();
+      t2.join();
+    }());
+  }
+}
+
+std::string
+random_string(std::string::size_type length)
+{
+  auto randchar = []() -> char {
+    const char   charset[] = "0123456789"
+                             "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                             "abcdefghijklmnopqrstuvwxyz";
+    const size_t max_index = (sizeof(charset) - 1);
+    return charset[rand() % max_index];
+  };
+  std::string str(length, 0);
+  std::generate_n(str.begin(), length, randchar);
+  return str;
+}
+
+DEFINE_JSONRPC_PROTO_FUNCTION(do_nothing) // id, params, resp
+{
+  swoc::Rv<YAML::Node> resp;
+  resp.result()["size"] = params["msg"].as<std::string>().size();
+  return resp;
+}
+
+TEST_CASE("Basic message sending to a running server", "[socket]")
+{
+  ScopedMethodHandler handler{"do_nothing", &do_nothing};
+  REQUIRE(handler.registered());
+  SECTION("Basic single request to the rpc server")
+  {
+    const int S{500};
+    auto      json{R"({"jsonrpc": "2.0", "method": "do_nothing", "params": {"msg":")" + random_string(S) + R"("}, "id":"EfGh-1"})"};
+    REQUIRE_NOTHROW([&]() {
+      ScopedLocalSocket rpc_client;
+      auto              resp = rpc_client.query(json);
+
+      REQUIRE(resp == R"({"jsonrpc": "2.0", "result": {"size": ")" + std::to_string(S) + R"("}, "id": "EfGh-1"})");
+    }());
+  }
+}
+
+TEST_CASE("JSONRPC socket inode permissions reflect restricted_api config", "[socket][permissions]")
+{
+  SECTION("restricted_api=true yields mode 0700 on the socket inode")
+  {
+    auto confStr{
+      R"({"rpc": { "enabled": true, "unix": { "lock_path_name": ")" + lockPath + R"(", "sock_path_name": ")" + sockPath +
+      R"(",  "backlog": 5, "max_retry_on_transient_errors": 64, "incoming_request_max_size": 32000, "restricted_api": true }}})"};
+    YAML::Node n = YAML::Load(confStr);
+    restart_json_rpc_server(n);
+
+    // Restore the default test server configuration on scope exit, even if an
+    // assertion below fails (REQUIRE throws), so subsequent test cases are not
+    // left running against the restricted-api server.
+    struct ConfigRestorer {
+      std::function<void()> restore;
+      ~ConfigRestorer()
+      {
+        try {
+          restore();
+        } catch (...) {
+        }
+      }
+    } config_restorer{[&]() {
+      auto       restoreStr{R"({"rpc": { "enabled": true, "unix": { "lock_path_name": ")" + lockPath + R"(", "sock_path_name": ")" +
+                      sockPath +
+                      R"(",  "backlog": 5, "max_retry_on_transient_errors": 64, "incoming_request_max_size": 32000 }}})"};
+      YAML::Node restoreN = YAML::Load(restoreStr);
+      restart_json_rpc_server(restoreN);
+    }};
+
+    struct stat st {
+    };
+    REQUIRE(::stat(sockPath.c_str(), &st) == 0);
+    CHECK(S_ISSOCK(st.st_mode));
+    CHECK((st.st_mode & 0777) == 0700);
+  }
+}
+
+TEST_CASE("Sending a message bigger than the internal server's buffer. 32000", "[buffer][error]")
+{
+  ScopedMethodHandler handler{"do_nothing32000", &do_nothing};
+  REQUIRE(handler.registered());
+  const int S{32000}; // + the rest of the json message.
+  auto json{R"({"jsonrpc": "2.0", "method": "do_nothing32000", "params": {"msg":")" + random_string(S) + R"("}, "id":"32k_1"})"};
+
+  SECTION("Message larger than the the accepted size.")
+  {
+    REQUIRE_NOTHROW([&]() {
+      ScopedLocalSocket rpc_client;
+      auto              resp = rpc_client.query(json);
+      REQUIRE(resp.empty());
+    }());
+  }
+
+  SECTION("Retry the big message after reconfigure(restart rpc server) the incoming request size limit.")
+  {
+    auto confStr{R"({"rpc": { "enabled": true, "unix": { "lock_path_name": ")" + lockPath + R"(", "sock_path_name": ")" + sockPath +
+                 R"(",  "backlog": 5,"max_retry_on_transient_errors": 64, "incoming_request_max_size": 62000 }}})"};
+    YAML::Node n = YAML::Load(confStr);
+    restart_json_rpc_server(n);
+    REQUIRE_NOTHROW([&]() {
+      ScopedLocalSocket rpc_client;
+      auto              resp = rpc_client.query(json);
+      REQUIRE(resp == R"({"jsonrpc": "2.0", "result": {"size": "32000"}, "id": "32k_1"})");
+    }());
+
+    const int oversized_message_size{64000};
+    auto      oversized_json{R"({"jsonrpc": "2.0", "method": "do_nothing32000", "params": {"msg":")" +
+                        random_string(oversized_message_size) + R"("}, "id":"over-limit"})"};
+    REQUIRE_NOTHROW([&]() {
+      ScopedLocalSocket rpc_client;
+      auto              resp = rpc_client.query(oversized_json);
+      REQUIRE(resp.empty());
+    }());
+  }
+}
+
+TEST_CASE("Test with invalid json message", "[socket]")
+{
+  ScopedMethodHandler handler{"do_nothing", &do_nothing};
+  REQUIRE(handler.registered());
+
+  SECTION("A rpc server")
+  {
+    const int S{10};
+    auto      json{R"({"jsonrpc": "2.0", "method": "do_nothing", "params": { "msg": ")" + random_string(S) + R"("}, "id": "EfGh})"};
+    REQUIRE_NOTHROW([&]() {
+      ScopedLocalSocket rpc_client;
+      auto              resp = rpc_client.query(json);
+
+      CHECK(resp == R"({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}})");
+    }());
+  }
+}
+
+TEST_CASE("Test with chunks", "[socket][chunks]")
+{
+  ScopedMethodHandler handler{"do_nothing", &do_nothing};
+  REQUIRE(handler.registered());
+
+  SECTION("Sending request by chunks")
+  {
+    const int S{10};
+    auto      json{R"({"jsonrpc": "2.0", "method": "do_nothing", "params": { "msg": ")" + random_string(S) +
+              R"("}, "id": "chunk-parts-3"})"};
+
+    REQUIRE_NOTHROW([&]() {
+      ScopedLocalSocket rpc_client;
+      using namespace std::chrono_literals;
+      rpc_client.connect();
+      rpc_client.send_in_chunks<3>(json);
+      auto resp = rpc_client.read();
+      REQUIRE(resp == R"({"jsonrpc": "2.0", "result": {"size": ")" + std::to_string(S) + R"("}, "id": "chunk-parts-3"})");
+    }());
+  }
+}
+
+TEST_CASE("Test with chunks - disconnect after second part", "[socket][chunks]")
+{
+  ScopedMethodHandler handler{"do_nothing", &do_nothing};
+  REQUIRE(handler.registered());
+
+  SECTION("Sending request by chunks")
+  {
+    const int S{4000};
+    auto      json{R"({"jsonrpc": "2.0", "method": "do_nothing", "params": { "msg": ")" + random_string(S) +
+              R"("}, "id": "chunk-parts-3-2"})"};
+
+    REQUIRE_NOTHROW([&]() {
+      ScopedLocalSocket rpc_client;
+      using namespace std::chrono_literals;
+      rpc_client.connect();
+      rpc_client.send_in_chunks<3>(json, 2);
+      // read will fail.
+      auto resp = rpc_client.read();
+      REQUIRE(resp == "");
+    }());
+  }
+}
+
+TEST_CASE("Test with chunks - incomplete message", "[socket][chunks]")
+{
+  ScopedMethodHandler handler{"do_nothing", &do_nothing};
+  REQUIRE(handler.registered());
+
+  SECTION("Sending request by chunks, broken message")
+  {
+    const int S{50};
+    auto      json{R"({"jsonrpc": "2.0", "method": "do_nothing", "params": { "msg": ")" + random_string(S) +
+              R"("}, "id": "chunk-parts-3)"};
+    //                                  ^  missing-> "}
+
+    REQUIRE_NOTHROW([&]() {
+      ScopedLocalSocket rpc_client;
+      using namespace std::chrono_literals;
+      rpc_client.connect();
+      rpc_client.send_in_chunks<3>(json);
+      auto resp = rpc_client.read();
+      REQUIRE(resp == R"({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}})");
+    }());
+  }
+}
+
+// Fails on purpose, so the guard's CHECK throws into its catch (...); see test_jsonrpcserver.guard_abort.
+TEST_CASE("ScopedMethodHandler reports a failed removal when Catch2 aborts", "[.][guard_abort]")
+{
+  if (std::getenv("RPC_TEST_GUARD_ABORT") == nullptr || Catch::getCurrentContext().getConfig()->abortAfter() != 1) {
+    SKIP("run by ctest as test_jsonrpcserver.guard_abort");
+  }
+
+  ScopedMethodHandler handler{"guard_abort_handler", &do_nothing};
+  REQUIRE(handler.registered());
+  REQUIRE(rpc::test_remove_handler("guard_abort_handler"));
+}
+
+// Enable toggle
+TEST_CASE("Test rpc enable toggle feature - default enabled.", "[default values]")
+{
+  rpc::config::RPCConfig serverConfig;
+  REQUIRE(serverConfig.is_enabled() == true);
+}
+
+TEST_CASE("Test rpc enable toggle feature. Enabled by configuration", "[rpc][enabled]")
+{
+  rpc::config::RPCConfig serverConfig;
+
+  auto confStr{R"({"rpc": {"enabled": true}})"};
+  std::cout << "'" << confStr << "'" << std::endl;
+  YAML::Node configNode = YAML::Load(confStr);
+  serverConfig.load(configNode["rpc"]);
+  REQUIRE(serverConfig.is_enabled() == true);
+}
+
+TEST_CASE("Test rpc  enable toggle feature. Disabled by configuration", "[rpc][disabled]")
+{
+  rpc::config::RPCConfig serverConfig;
+
+  auto confStr{R"({"rpc": {"enabled":false}})"};
+
+  REQUIRE_NOTHROW([&]() {
+    YAML::Node configNode = YAML::Load(confStr);
+    serverConfig.load(configNode["rpc"]);
+  }());
+  REQUIRE(serverConfig.is_enabled() == false);
+}
+
+// TEST UDS Server configuration
+namespace
+{
+namespace trp = rpc::comm;
+// This class is defined to get access to the protected config object inside the IPCSocketServer class.
+struct LocalSocketTest : public trp::IPCSocketServer {
+  inline static const std::string _name = "LocalSocketTest";
+  bool
+  configure(YAML::Node const &params) override
+  {
+    return trp::IPCSocketServer::configure(params);
+  }
+  void
+  run() override
+  {
+  }
+  std::error_code
+  init() override
+  {
+    return trp::IPCSocketServer::init();
+  }
+  bool
+  stop() override
+  {
+    return true;
+  }
+  std::string const &
+  name() const override
+  {
+    return _name;
+  }
+  trp::IPCSocketServer::Config const &
+  get_conf() const
+  {
+    return _conf;
+  }
+};
+} // namespace
+
+TEST_CASE("Test configuration parsing from a YAML node. UDS values", "[string]")
+{
+  rpc::config::RPCConfig serverConfig;
+
+  auto confStr{R"({"rpc": { "enabled": true, "unix": { "lock_path_name": ")" + lockPath + R"(", "sock_path_name": ")" + sockPath +
+               R"(",  "backlog": 5,"max_retry_on_transient_errors": 64 }}})"};
+  YAML::Node configNode = YAML::Load(confStr);
+  serverConfig.load(configNode["rpc"]);
+
+  REQUIRE(serverConfig.get_comm_type() == rpc::config::RPCConfig::CommType::UNIX);
+
+  auto       socket = std::make_unique<LocalSocketTest>();
+  auto const ret    = socket->configure(serverConfig.get_comm_config_params());
+  REQUIRE(ret);
+  REQUIRE(socket->get_conf().backlog == default_backlog);
+  REQUIRE(socket->get_conf().maxRetriesOnTransientErrors == default_maxRetriesOnTransientErrors);
+  REQUIRE(socket->get_conf().sockPathName == sockPath);
+  REQUIRE(socket->get_conf().lockPathName == lockPath);
+  REQUIRE(socket->get_conf().incomingRequestMaxBufferSize == default_incoming_req_max_size);
+}
+
+TEST_CASE("Test configuration parsing from a file. UDS Server", "[file]")
+{
+  fs::path configPath = fs::path("tests/config") / "jsonrpc.yaml";
+
+  // define here to later compare.
+  std::string sockPathName{configPath.string() + "jsonrpc20_test2.sock"};
+  std::string lockPathName{configPath.string() + "jsonrpc20_test2.lock"};
+
+  auto confStr{R"({"rpc": { "enabled": true, "unix": { "lock_path_name": ")" + lockPathName + R"(", "sock_path_name": ")" +
+               sockPathName + R"(",  "backlog": 5,"max_retry_on_transient_errors": 64 }}})"};
+  // write the config.
+  std::ofstream ofs(configPath.string(), std::ofstream::out);
+  // Yes, we write json into the yaml, remember, YAML is a superset of JSON, yaml parser can handle this.
+  ofs << confStr;
+  ofs.close();
+
+  rpc::config::RPCConfig serverConfig;
+  // on any error reading the file, default values will be used.
+  serverConfig.load_from_file(configPath.string());
+
+  REQUIRE(serverConfig.get_comm_type() == rpc::config::RPCConfig::CommType::UNIX);
+
+  auto        socket = std::make_unique<LocalSocketTest>();
+  auto const &ret    = socket->configure(serverConfig.get_comm_config_params());
+  REQUIRE(ret);
+  REQUIRE(socket->get_conf().backlog == 5);
+  REQUIRE(socket->get_conf().maxRetriesOnTransientErrors == 64);
+  REQUIRE(socket->get_conf().sockPathName == sockPathName);
+  REQUIRE(socket->get_conf().lockPathName == lockPathName);
+}

@@ -30,29 +30,32 @@ Classes
    This is the abstract base class for objects allocated in a :class:`HdrHeap`. This allows updating
    objects in a heap in a generic way, without having to locate all of the pointers to the objects.
 
-   The type of an instance stored in a heap must be one of the following values.
+.. class:: HdrHeapObjType
 
-   .. enumerator:: HDR_HEAP_OBJ_EMPTY = 0
+   This is the enum class for type of a :class:`HdrHeapObjImpl`.
+   The type of a :class:`HdrHeapObjImpl` instance stored in a heap must be one of the following values.
+
+   .. enumerator:: EMPTY = 0
 
       Used to mark invalid objects, ones not yet constructed or ones that have been destroyed.
 
-   .. enumerator:: HDR_HEAP_OBJ_RAW = 1
+   .. enumerator:: RAW = 1
 
       Some sort of raw object, I have no idea.
 
-   .. enumerator:: HDR_HEAP_OBJ_URL = 2
+   .. enumerator:: URL = 2
 
       A URL object.
 
-   .. enumerator:: HDR_HEAP_OBJ_HTTP_HEADER = 3
+   .. enumerator:: HTTP_HEADER = 3
 
       The header for an HTTP request or response.
 
-   .. enumerator:: HDR_HEAP_OBJ_MIME_HEADER = 4
+   .. enumerator:: MIME_HEADER = 4
 
       A MIME header, containing MIME style fields with names and values.
 
-   .. enumerator:: HDR_HEAP_OBJ_FIELD_BLOCK = 5
+   .. enumerator:: FIELD_BLOCK = 5
 
       Who the heck knows?
 
@@ -141,7 +144,8 @@ Classes
 
 .. topic:: Header Heap Class Structure
 
-   .. figure:: /uml/images/hdr-heap-class.svg
+   .. uml:: /uml/hdr-heap-class.plantuml
+      :align: center
 
 
 Implementation
@@ -169,7 +173,7 @@ becomes the writable string heap for the header heap.
 Each heap object is responsible for providing a :code:`move_strings` method which copies its strings
 to a new string heap, passed as an argument. This is a source of pointer invalidation for other
 parts of the core and the plugin API. For the latter, insulating from such string movement is the
-point of the :c:type:`TSMLoc` type.
+point of the :cpp:type:`TSMLoc` type.
 
 String Allocation
 -----------------
@@ -187,7 +191,8 @@ sufficient space to allocate the new string.
 
 .. topic:: Decision Diagram
 
-   .. figure:: /uml/images/hdr-heap-str-alloc.svg
+   .. uml:: /uml/hdr-heap-str-alloc.plantuml
+      :align: center
 
 Object Allocation
 -----------------

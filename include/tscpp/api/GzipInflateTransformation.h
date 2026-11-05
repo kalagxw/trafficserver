@@ -21,6 +21,8 @@
  * @brief Gzip Inflate Transformation can be used to decompress gzipped content.
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include <string_view>
@@ -82,7 +84,7 @@ namespace transformations
     ~GzipInflateTransformation() override;
 
   private:
-    GzipInflateTransformationState *state_; /** Internal state for Gzip Deflate Transformations */
+    std::unique_ptr<GzipInflateTransformationState> state_; /** Internal state for Gzip Deflate Transformations */
   };
 
 } // namespace transformations

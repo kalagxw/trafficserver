@@ -1,0 +1,688 @@
+/*
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+*/
+#include <algorithm>
+#include <sstream>
+
+#include "cripts/Lulu.hpp"
+#include "cripts/Preamble.hpp"
+
+namespace cripts
+{
+
+std::vector<cripts::string_view>
+Url::Component::Split(const char delim)
+{
+  return cripts::Splitter(GetSV(), delim);
+}
+
+cripts::string_view
+Url::Scheme::GetSV()
+{
+  if (_owner && _data.empty()) {
+    const char *value = nullptr;
+    int         len   = 0;
+
+    _ensure_initialized(_owner);
+    value = TSUrlSchemeGet(_owner->_bufp, _owner->_urlp, &len);
+    _data = cripts::string_view(value, len);
+  }
+
+  return _data;
+}
+
+Url::Scheme
+Url::Scheme::operator=(cripts::string_view scheme)
+{
+  CAssert(!_owner->ReadOnly()); // This can not be a read-only URL
+  _ensure_initialized(_owner);
+  TSUrlSchemeSet(_owner->_bufp, _owner->_urlp, scheme.data(), scheme.size());
+  _owner->_modified = true;
+  Reset();
+  _loaded = false;
+
+  return *this;
+}
+
+cripts::string_view
+Url::Host::GetSV()
+{
+  if (_owner && _data.empty()) {
+    const char *value = nullptr;
+    int         len   = 0;
+
+    _ensure_initialized(_owner);
+    value   = TSUrlHostGet(_owner->_bufp, _owner->_urlp, &len);
+    _data   = cripts::string_view(value, len);
+    _loaded = true;
+  }
+
+  return _data;
+}
+
+Url::Host
+Url::Host::operator=(cripts::string_view host)
+{
+  _ensure_initialized(_owner);
+  CAssert(!_owner->ReadOnly()); // This can not be a read-only URL
+  TSUrlHostSet(_owner->_bufp, _owner->_urlp, host.data(), host.size());
+  _owner->_modified = true;
+  Reset();
+  _loaded = false;
+
+  return *this;
+}
+
+Url::Port::operator integer() // This should not be explicit
+{
+  _ensure_initialized(_owner);
+  if (_owner && _port < 0) {
+    _port = TSUrlPortGet(_owner->_bufp, _owner->_urlp);
+  }
+
+  return _port;
+}
+
+Url::Port
+Url::Port::operator=(int port)
+{
+  _ensure_initialized(_owner);
+  CAssert(!_owner->ReadOnly()); // This can not be a read-only URL
+  TSUrlPortSet(_owner->_bufp, _owner->_urlp, port);
+  _owner->_modified = true;
+  Reset();
+
+  return *this;
+}
+
+cripts::string_view
+Url::Path::GetSV()
+{
+  if (_state && _state->segments.size() > 0) {
+    std::ostringstream path;
+
+    std::ranges::copy(_state->segments, std::ostream_iterator<cripts::string_view>(path, "/"));
+    _state->storage.reserve(_state->size);
+    _state->storage = std::string_view(path.str());
+    if (_state->storage.size() > 0) {
+      _state->storage.pop_back(); // Removes the trailing /
+    }
+
+    return {_state->storage};
+  } else if (_owner && _data.empty()) {
+    const char *value = nullptr;
+    int         len   = 0;
+
+    _ensure_initialized(_owner);
+    value = TSUrlPathGet(_owner->_bufp, _owner->_urlp, &len);
+    _data = cripts::string_view(value, len);
+    if (_state) {
+      _state->size = len;
+    }
+    _loaded = true;
+  }
+
+  return _data;
+}
+
+Url::Path::String
+Url::Path::operator[](Segments::size_type ix)
+{
+  Url::Path::String ret;
+
+  _ensure_initialized(_owner);
+  _parser(); // Make sure the segments are loaded
+  if (_state && ix < _state->segments.size()) {
+    ret._initialize(_state->segments[ix], this, ix);
+  }
+
+  return ret; // RVO
+}
+
+Url::Path &
+Url::Path::operator=(cripts::string_view path)
+{
+  _ensure_initialized(_owner);
+  CAssert(!_owner->ReadOnly()); // This can not be a read-only URL
+  TSUrlPathSet(_owner->_bufp, _owner->_urlp, path.data(), path.size());
+  _owner->_modified = true;
+  Reset();
+  _loaded = false;
+
+  return *this;
+}
+
+cripts::string
+Url::Path::operator+=(cripts::string_view add)
+{
+  cripts::string str;
+
+  if (add.size() > 0) {
+    str.assign(GetSV());
+    str += add;
+    operator=(str);
+  }
+
+  return str; // RVO
+}
+
+Url::Path::String &
+Url::Path::String::operator=(const cripts::string_view str)
+{
+  _ensure_initialized(_owner->_owner);
+  CAssert(!_owner->_owner->ReadOnly()); // This can not be a read-only URL
+  CAssert(_owner->_state);              // Should have been allocated by operator[]/_parser()
+  _owner->_state->size          -= _owner->_state->segments[_ix].size();
+  _owner->_state->segments[_ix]  = str;
+  _owner->_state->size          += str.size();
+  _owner->_state->modified       = true;
+
+  return *this;
+}
+
+void
+Url::Path::Reset()
+{
+  Component::Reset();
+
+  _state.reset();
+}
+
+void
+Url::Path::Push(cripts::string_view val)
+{
+  _parser();
+  auto &s    = _ensure_state();
+  s.modified = true;
+  s.segments.push_back(val);
+}
+
+void
+Url::Path::Insert(Segments::size_type ix, cripts::string_view val)
+{
+  _parser();
+  auto &s    = _ensure_state();
+  s.modified = true;
+  s.segments.insert(s.segments.begin() + ix, val);
+}
+
+void
+Url::Path::_parser()
+{
+  auto &s = _ensure_state();
+
+  if (s.segments.size() == 0) {
+    s.segments = Split('/');
+  }
+}
+
+Url::Query::Parameter &
+Url::Query::Parameter::operator=(const cripts::string_view str)
+{
+  CAssert(!_owner->_state || !_owner->_state->standalone);
+  _ensure_initialized(_owner->_owner);
+  CAssert(!_owner->_owner->ReadOnly()); // This can not be a read-only URL
+  auto &s    = _owner->_ensure_state();
+  auto  iter = s.hashed.find(_name);
+
+  if (iter != s.hashed.end()) {
+    iter->second = str; // Can be an empty string here!
+  } else {
+    s.ordered.push_back(_name);
+    s.hashed[_name] = str;
+  }
+  s.modified = true;
+
+  return *this;
+}
+
+cripts::string_view
+Url::Query::GetSV()
+{
+  if (!_state || !_state->standalone) {
+    _ensure_initialized(_owner);
+  }
+  if (_state && _state->ordered.size() > 0) {
+    _state->storage.clear();
+    _state->storage.reserve(_state->size);
+
+    // ToDo: This is wonky, has to be a better std:: iteration to do here
+    for (const auto key : _state->ordered) {
+      auto iter = _state->hashed.find(key);
+
+      if (_state->storage.size() > 0) {
+        _state->storage += "&";
+      }
+
+      if (iter != _state->hashed.end()) {
+        _state->storage += iter->first;
+        if (iter->second.size() > 0) {
+          _state->storage += '=';
+          _state->storage += iter->second;
+        }
+      }
+    }
+
+    return {_state->storage};
+  }
+
+  // This gets weird when we modify the query parameter components, and can possibly empty
+  // the entire query parameter. At which point, we don't want to reload the string_view
+  // from the URL object inside of ATS...
+  if (_owner && !_loaded) {
+    const char *value = nullptr;
+    int         len   = 0;
+
+    value = TSUrlHttpQueryGet(_owner->_bufp, _owner->_urlp, &len);
+    _data = cripts::string_view(value, len);
+    if (_state) {
+      _state->size = len;
+    }
+    _loaded = true;
+  }
+
+  return _data;
+}
+
+Url::Query &
+Url::Query::operator=(cripts::string_view query)
+{
+  CAssert(!_state || !_state->standalone);
+  _ensure_initialized(_owner);
+  CAssert(!_owner->ReadOnly()); // This can not be a read-only URL
+  TSUrlHttpQuerySet(_owner->_bufp, _owner->_urlp, query.data(), query.size());
+  _owner->_modified = true;
+  Reset();
+  _loaded = false;
+
+  return *this;
+}
+
+cripts::string
+Url::Query::operator+=(cripts::string_view add)
+{
+  cripts::string str;
+
+  if (add.size() > 0) {
+    str.assign(GetSV());
+    str += add;
+    operator=(str);
+  }
+
+  return str; // RVO
+}
+
+Url::Query::Parameter
+Url::Query::operator[](cripts::string_view param)
+{
+  // Make sure the hash and vector are populated, but only if we have an owner
+  if (!_state || !_state->standalone) {
+    _ensure_initialized(_owner);
+  }
+  _parser();
+
+  Parameter ret;
+  auto      iter = _state->hashed.find(param);
+
+  if (iter != _state->hashed.end()) {
+    ret._initialize(iter->first, iter->second, this);
+  } else {
+    ret._initialize(param, "", this);
+  }
+
+  return ret;
+}
+
+void
+Url::Query::Erase(cripts::string_view param)
+{
+  // Make sure the hash and vector are populated
+  _parser();
+
+  auto &s     = *_state;
+  auto  iter  = s.hashed.find(param);
+  auto  viter = std::ranges::find(s.ordered, param);
+
+  if (iter != s.hashed.end()) {
+    s.size -= iter->second.size(); // Size of the erased value
+    s.hashed.erase(iter);
+
+    CAssert(viter != s.ordered.end());
+    s.size -= viter->size(); // Length of the erased key
+    s.ordered.erase(viter);
+
+    if (s.ordered.size() == 0) {
+      Reset();
+      // After Reset() the state is gone; re-create it just so _modified can be tracked.
+      _ensure_state().modified = true;
+    } else {
+      s.modified = true;
+    }
+  }
+}
+
+void
+Url::Query::Erase(std::initializer_list<cripts::string_view> list, bool keep)
+{
+  if (keep) {
+    // Make sure the hash and vector are populated
+    _parser();
+
+    auto &s = *_state;
+
+    for (auto viter = s.ordered.begin(); viter != s.ordered.end();) {
+      if (list.end() == std::ranges::find(list, *viter)) {
+        // Duplicate keys (?a=1&a=2) share one hashed entry, so a later occurrence may
+        // already be gone -- guard the lookup; attacker input must not abort.
+        if (auto iter = s.hashed.find(*viter); iter != s.hashed.end()) {
+          s.size -= iter->second.size(); // Size of the erased value
+          s.hashed.erase(iter);
+        }
+        s.size     -= viter->size(); // Length of the erased key
+        viter       = s.ordered.erase(viter);
+        s.modified  = true;
+      } else {
+        ++viter;
+      }
+    }
+    if (s.ordered.size() == 0) {
+      Reset();
+    }
+  } else {
+    for (auto &it : list) {
+      Erase(it);
+    }
+  }
+}
+
+void
+Url::Query::Reset()
+{
+  Component::Reset();
+
+  _state.reset();
+}
+
+void
+Url::Query::_parser()
+{
+  auto &s = _ensure_state();
+
+  if (s.ordered.size() == 0) {
+    for (const auto sv : Split('&')) {
+      const auto          eq  = sv.find_first_of('=');
+      cripts::string_view key = sv.substr(0, eq);
+      cripts::string_view val;
+
+      if (eq != cripts::string_view::npos) {
+        val = sv.substr(eq + 1);
+      }
+
+      s.ordered.push_back(key); // Keep the order
+      s.hashed[key] = val;
+    }
+  }
+}
+
+cripts::string
+Url::String()
+{
+  cripts::string ret;
+
+  CAssert(_context);
+  _ensure_initialized(this);
+  int   full_len = 0;
+  char *full_str = TSUrlStringGet(_bufp, _urlp, &full_len);
+
+  if (full_str) {
+    ret.assign(full_str, full_len);
+    TSfree(static_cast<void *>(full_str));
+  }
+
+  return ret;
+}
+
+Pristine::URL &
+Pristine::URL::_get(cripts::Context *context)
+{
+  auto &slot = context->_urls.pristine;
+
+  if (!slot) {
+    slot = std::make_unique<Pristine::URL>();
+    slot->set_context(context);
+  }
+  _ensure_initialized(slot.get());
+  return *slot;
+}
+
+void
+Pristine::URL::_initialize()
+{
+  TSAssert(_context->state.txnp);
+  if (TSHttpTxnPristineUrlGet(_context->state.txnp, &_bufp, &_urlp) != TS_SUCCESS) {
+    _context->state.error.Fail();
+  } else {
+    super_type::_initialize(); // Only if successful
+  }
+}
+
+void
+Client::URL::_initialize()
+{
+  if (_context->rriValid()) {
+    super_type::_initialize();
+    _bufp      = _context->rri->requestBufp;
+    _hdr_loc   = _context->rri->requestHdrp;
+    _urlp      = _context->rri->requestUrl;
+    _owns_urlp = false;
+  } else {
+    Client::Request &req = Client::Request::_get(_context); // Repurpose / create the shared request object
+
+    _bufp    = req.BufP();
+    _hdr_loc = req.MLoc();
+
+    if (TSHttpHdrUrlGet(_bufp, _hdr_loc, &_urlp) != TS_SUCCESS) {
+      _context->state.error.Fail();
+    } else {
+      super_type::_initialize();
+      _owns_urlp = true;
+    }
+  }
+}
+
+Client::URL &
+Client::URL::_get(cripts::Context *context)
+{
+  _ensure_initialized(&context->_urls.request);
+  return context->_urls.request;
+}
+
+bool
+Client::URL::_update()
+{
+  _ensure_initialized(this);
+  path.Flush();
+  query.Flush();
+
+  return _modified;
+}
+
+void
+Remap::From::URL::_initialize()
+{
+  if (_context->rriValid()) {
+    super_type::_initialize();
+    _bufp    = _context->rri->requestBufp;
+    _hdr_loc = _context->rri->requestHdrp;
+    _urlp    = _context->rri->mapFromUrl;
+  } else {
+    _context->state.error.Fail();
+  }
+}
+
+Remap::From::URL &
+Remap::From::URL::_get(cripts::Context *context)
+{
+  auto &slot = context->_urls.remap.from;
+
+  if (!slot) {
+    slot = std::make_unique<Remap::From::URL>();
+    slot->set_context(context);
+  }
+  _ensure_initialized(slot.get());
+  return *slot;
+}
+
+void
+Remap::To::URL::_initialize()
+{
+  if (_context->rriValid()) {
+    super_type::_initialize();
+    _bufp    = _context->rri->requestBufp;
+    _hdr_loc = _context->rri->requestHdrp;
+    _urlp    = _context->rri->mapToUrl;
+  } else {
+    _context->state.error.Fail();
+  }
+}
+
+Remap::To::URL &
+Remap::To::URL::_get(cripts::Context *context)
+{
+  auto &slot = context->_urls.remap.to;
+
+  if (!slot) {
+    slot = std::make_unique<Remap::To::URL>();
+    slot->set_context(context);
+  }
+  _ensure_initialized(slot.get());
+  return *slot;
+}
+
+Cache::URL &
+Cache::URL::_get(cripts::Context *context)
+{
+  _ensure_initialized(&context->_cache.url);
+  return context->_cache.url;
+}
+
+void
+Cache::URL::_initialize()
+{
+  Cache::URL      *url = &_context->_cache.url;
+  Client::Request &req = Client::Request::_get(_context); // Repurpose / create the shared request object
+
+  switch (_context->state.hook) {
+  // In these hooks, the internal cache-url has been properly set
+  case TS_HTTP_SEND_RESPONSE_HDR_HOOK:
+  case TS_HTTP_READ_RESPONSE_HDR_HOOK:
+  case TS_HTTP_SEND_REQUEST_HDR_HOOK:
+  case TS_HTTP_CACHE_LOOKUP_COMPLETE_HOOK:
+  case TS_HTTP_TXN_CLOSE_HOOK:
+    if (TSUrlCreate(req.BufP(), &url->_urlp) == TS_SUCCESS) {
+      TSAssert(_context->state.txnp);
+      if (TSHttpTxnCacheLookupUrlGet(_context->state.txnp, req.BufP(), url->_urlp) != TS_SUCCESS) {
+        _context->state.error.Fail();
+        return;
+      }
+    } else {
+      _context->state.error.Fail();
+      return;
+    }
+    break;
+  default: { // This means we have to clone. ToDo: For now, this is implicitly using Client::URL
+    Client::URL &src = Client::URL::_get(_context);
+
+    if (TSUrlClone(req.BufP(), req.BufP(), src.UrlP(), &url->_urlp) != TS_SUCCESS) {
+      _context->state.error.Fail();
+      return;
+    }
+  } break;
+  }
+
+  // Only if we succeeded above
+  super_type::_initialize();
+  _bufp    = req.BufP();
+  _hdr_loc = req.MLoc();
+}
+
+// This has to be implemented here, since the cripts::Context is not complete yet
+bool
+Cache::URL::_update()
+{
+  // For correctness, we will also make sure the Path and Query objects are flushed
+  path.Flush();
+  query.Flush();
+
+  if (_modified) {
+    _ensure_initialized(&_context->_cache.url);
+    TSAssert(_context->state.txnp);
+    _modified = false;
+    if (TS_SUCCESS == TSHttpTxnCacheLookupUrlSet(_context->state.txnp, _bufp, _urlp)) {
+      if (_context->p_instance.DebugOn()) {
+        _context->p_instance.debug("Successfully setting cache-key to {}", String());
+      }
+      return true;
+    } else {
+      if (_context->p_instance.DebugOn()) {
+        _context->p_instance.debug("Could not set the cache key to {}", String());
+      }
+      _context->state.error.Fail();
+      return false;
+    }
+  }
+
+  return false;
+}
+
+// ToDo: This may need more work, to understand which hooks the parent URL is actually available
+Parent::URL &
+Parent::URL::_get(cripts::Context *context)
+{
+  auto &slot = context->_urls.parent;
+
+  if (!slot) {
+    slot = std::make_unique<Parent::URL>();
+    slot->set_context(context);
+  }
+  _ensure_initialized(slot.get());
+  return *slot;
+}
+
+void
+Parent::URL::_initialize()
+{
+  Client::Request &req = Client::Request::_get(_context); // Repurpose / create the shared request object
+
+  if (TSUrlCreate(req.BufP(), &_urlp) == TS_SUCCESS) {
+    TSAssert(_context->state.txnp);
+    if (TSHttpTxnParentSelectionUrlGet(_context->state.txnp, req.BufP(), _urlp) != TS_SUCCESS) {
+      _context->state.error.Fail();
+      return;
+    }
+  } else {
+    _context->state.error.Fail();
+    return;
+  }
+
+  // Only if successful above
+  super_type::_initialize();
+  _bufp    = req.BufP();
+  _hdr_loc = req.MLoc();
+}
+
+} // namespace cripts

@@ -64,8 +64,9 @@ It can be enabled globally for |TS| by adding the following to your
 
 With no further options, this will enable the following default behavior:
 
-*  Enable caching of both compressed and uncompressed versions of origin
-   responses as :term:`alternates <alternate>`.
+*  Enable caching of compressed responses. Uncompressed and compressed versions
+   are maintained as separate :term:`alternates <alternate>` via
+   ``Vary: Accept-Encoding``.
 
 *  Compress objects with `text/*` content types for every origin.
 
@@ -98,16 +99,49 @@ Per site configuration for remap plugin should be ignored.
 cache
 -----
 
-When set to ``true``, causes |TS| to cache both the compressed and uncompressed
-versions of the content as :term:`alternates <alternate>`. When set to
-``false``, |TS| will cache only the compressed or decompressed variant returned
-by the origin. Enabled by default.
+Controls which version of the response is stored in cache when the compress
+transform runs (i.e., when the client sends ``Accept-Encoding``).
+
+When set to ``true``, the compressed (transformed) response is cached. When set
+to ``false``, the uncompressed (untransformed) response is cached and
+compression is performed on-the-fly for subsequent cache hits.
+
+.. note::
+
+   The plugin always adds ``Vary: Accept-Encoding`` to compressible responses.
+   This causes |TS| to use separate cache :term:`alternates <alternate>` (keys)
+   for requests with different ``Accept-Encoding`` values. Which body
+   representation is actually stored in cache still depends on the ``cache``
+   option: with ``cache true`` the compressed response is cached, while with
+   ``cache false`` only the uncompressed response is cached and compression is
+   performed on-the-fly for clients that send ``Accept-Encoding``.
+
+Enabled by default.
 
 range-request
 -------------
 
-When set to ``true``, causes |TS| to compress responses to Range Requests.
-Disabled by default. Setting this to true while setting cache to false leads to delivering corrupted content.
+This config controls behavior of this plugin when a client send ``Range`` header and ``Accept-Encoding`` header in the same time.
+
+====================== =================================================================
+Value                  Description
+====================== =================================================================
+none                   Do nothing
+true                   Same as ``none`` for compatibility
+remove-range           Remove ``Range`` header if the request has both headers
+remove-accept-encoding Remove ``Accept-Encoding`` header if the request has both headers
+no-compression         Do NOT compress Partial Content (default)
+false                  Same as ``no-compression`` for compatiblity
+====================== =================================================================
+
+.. important::
+
+   Do NOT set this to ``none`` (or ``true``) if the cache config is set to ``false``. This combination will deliver corrupted content.
+
+
+.. important::
+
+   Some plugins (like cache_range_request) remove ``Range`` header. If you set ``remove-range`` or ``remove-accept-encoding``, be careful with the order of plugins.
 
 compressible-content-type
 -------------------------
@@ -131,7 +165,17 @@ it only makes sense to compress files above a certain size threshold.
 Compressing files below 150 bytes can actually make them larger. This setting
 only applies if the response explicitly sends Content-Length. Regardless of
 this setting, responses with ``Content-Length: 0`` are considered not
-compressible.
+compressible. Defaults to 1024 bytes.
+
+content_type_ignore_parameters
+------------------------------
+
+When set to ``true``, parameter substrings of a response ``Content-Type`` header
+value (for example ``; charset=utf-8``) are ignored for the purpose of
+``compressible-content-type`` pattern matching, unless the pattern itself
+includes a ``;``. This allows a pattern like ``application/json`` to match
+responses such as ``application/json; charset=utf-8``. When set to ``false``,
+the full value including parameters is used for matching. Defaults to ``false``.
 
 allow
 --------
@@ -173,12 +217,93 @@ supported-algorithms
 
 Provides the compression algorithms that are supported, a comma separate list
 of values. This will allow |TS| to selectively support ``gzip``, ``deflate``,
-and brotli (``br``) compression. The default is ``gzip``. Multiple algorithms can
-be selected using ',' delimiter, for instance, ``supported-algorithms
-deflate,gzip,br``. Note that this list must **not** contain any white-spaces!
+brotli (``br``), and zstd (``zstd``) compression. The default is ``gzip``.
+Multiple algorithms can be selected using ',' delimiter, for instance,
+``supported-algorithms deflate,gzip,br,zstd``. Note that this list must **not**
+contain any white-spaces!
+
+============== =================================================================
+Algorithm      Description
+============== =================================================================
+gzip           Standard gzip compression (default, widely supported)
+deflate        Deflate compression (RFC 1951)
+br             Brotli compression (modern, efficient)
+zstd           Zstandard compression (fast, high compression ratio)
+============== =================================================================
 
 Note that if :ts:cv:`proxy.config.http.normalize_ae` is ``1``, only gzip will
-be considered, and if it is ``2``, only br or gzip will be considered.
+be considered, if it is ``2``, only br or gzip will be considered, if it is ``4``,
+only zstd, br, or gzip will be considered, and if it is ``5``, all combinations
+of zstd, br, and gzip will be considered.
+
+gzip-compression-level
+-----------------------
+
+Sets the compression level for gzip compression. Valid values are 1-9, where
+1 is fastest compression (lowest compression ratio) and 9 is slowest compression
+(highest compression ratio). The default is 6, which provides a good balance
+between compression speed and ratio.
+
+brotli-compression-level
+-------------------------
+
+Sets the compression level for Brotli compression. Valid values are 0-11, where
+0 is fastest compression (lowest compression ratio) and 11 is slowest compression
+(highest compression ratio). The default is 6, which provides a good balance
+between compression speed and ratio.
+
+brotli-lgwin
+------------
+
+Sets the window size for Brotli compression. Valid values are 10-24, where
+larger values provide better compression but use more memory. The default is 16.
+This parameter controls the sliding window size used during compression:
+
+- 10: 1KB window (fastest, least memory)
+- 16: 64KB window (default, good balance)
+- 24: 16MB window (slowest, most memory, best compression)
+
+zstd-compression-level
+----------------------
+
+Sets the compression level for Zstandard compression. Valid values are 1-22, where
+1 is fastest compression (lowest compression ratio) and 22 is slowest compression
+(highest compression ratio). The default is 12, which provides an excellent
+balance between compression speed and ratio for web content.
+
+ETags and Conditional Requests
+==============================
+
+A compressed response's bytes differ from the origin's, so the plugin sends it
+with a weak ``ETag``: a strong ``"abc"`` from the origin goes out as
+``W/"abc"``. Uncompressed responses keep the origin's ``ETag``, and an ``ETag``
+that is already weak is left unchanged. A ``304 Not Modified`` for a request
+whose ``200`` would be compressed carries the same weak ``ETag``.
+
+Weak ``ETag`` values only satisfy weak comparison (:rfc:`9110#section-8.8.3`),
+which determines what clients holding a compressed copy can do:
+
+* ``If-None-Match`` compares weakly, so cache validation works: a client
+  sending ``If-None-Match: W/"abc"`` receives a ``304`` while its copy is
+  current. ``If-Modified-Since`` works as usual.
+* ``If-Match`` and ``If-Range`` compare strongly, so a weak ``ETag`` never
+  satisfies them. ``If-Match`` with a weak ``ETag`` fails with ``412``, and
+  ``If-Range`` with one is ignored, returning the full ``200`` instead of a
+  ``206``. ``If-Match: *`` still matches.
+
+Clients that need a strong validator, for example to resume a download with
+``If-Range`` or to guard a ``PUT`` with ``If-Match``, should request the
+uncompressed representation (``Accept-Encoding: identity``, or no
+``Accept-Encoding``), whose ``ETag`` is the origin's own. Alternatively,
+``If-Unmodified-Since`` can stand in for ``If-Match`` when the origin sends
+``Last-Modified``.
+
+.. note::
+
+   With ``cache false``, |TS| evaluates ``If-Match`` against the cached
+   uncompressed copy. A strong ``If-Match`` with the origin's ``ETag``
+   therefore succeeds and returns the compressed response, even though that
+   response's weak ``ETag`` could not strongly match.
 
 Examples
 ========
@@ -195,6 +320,10 @@ might create a configuration with the following options::
    compressible-status-code 200, 206
    minimum-content-length 860
    flush false
+   gzip-compression-level 6
+   brotli-compression-level 6
+   brotli-lgwin 16
+   zstd-compression-level 12
 
    # Now set a configuration for www.example.com
    [www.example.com]
@@ -209,16 +338,42 @@ might create a configuration with the following options::
    enabled true
    compressible-content-type text/*
    compressible-content-type application/json
+   content_type_ignore_parameters true
    flush true
    supported-algorithms gzip,deflate
 
-   # Supports brotli compression
+   # Supports brotli compression with custom settings
    [brotli.compress.com]
    enabled true
    compressible-content-type text/*
    compressible-content-type application/json
+   content_type_ignore_parameters true
    flush true
    supported-algorithms br,gzip
+   brotli-compression-level 8
+   brotli-lgwin 20
+
+   # Supports zstd compression for high efficiency
+   [zstd.compress.com]
+   enabled true
+   compressible-content-type text/*
+   compressible-content-type application/json
+   compressible-content-type application/javascript
+   flush true
+   supported-algorithms zstd,gzip
+   zstd-compression-level 15
+
+   # Supports all compression algorithms with optimized settings
+   [all.compress.com]
+   enabled true
+   compressible-content-type text/*
+   compressible-content-type application/json
+   flush true
+   supported-algorithms zstd,br,gzip,deflate
+   gzip-compression-level 7
+   brotli-compression-level 9
+   brotli-lgwin 18
+   zstd-compression-level 10
 
    # This origin does it all
    [bar.example.com]

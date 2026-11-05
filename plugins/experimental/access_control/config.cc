@@ -28,11 +28,12 @@
 
 #include "common.h"
 #include "config.h"
+#include "tsutil/StringCompare.h"
 
 static bool
 isTrue(const char *arg)
 {
-  return (nullptr == arg || 0 == strncasecmp("true", arg, 4) || 0 == strncasecmp("1", arg, 1) || 0 == strncasecmp("yes", arg, 3));
+  return (nullptr == arg || ts::iequals("true", arg) || ts::iequals("1", arg) || ts::iequals("yes", arg));
 }
 
 /**
@@ -82,7 +83,7 @@ makeConfigPath(const String &path)
  */
 template <class T>
 void
-loadLine(T &container, const String &line)
+loadLine(T & /* container ATS_UNUSED */, const String & /* line ATS_UNUSED */)
 {
 }
 
@@ -93,17 +94,17 @@ template <>
 void
 loadLine<StringMap>(StringMap &map, const String &line)
 {
-  String key;
-  String value;
+  String             key;
+  String             value;
   std::istringstream ss(line);
   std::getline(ss, key, '=');
   std::getline(ss, value, '=');
   trim(key);
   trim(value);
-  map[key] = value;
+  map[key] = std::move(value);
 
 #ifdef ACCESS_CONTROL_LOG_SECRETS
-  AccessControlDebug("Adding secrets[%s]='%s'", key.c_str(), value.c_str());
+  AccessControlDebug("Adding secrets[%s]='%s'", key.c_str(), map[key].c_str());
 #endif
 }
 
@@ -116,10 +117,10 @@ loadLine<StringVector>(StringVector &vector, const String &line)
 {
   String trimmedLine(line);
   trim(trimmedLine);
-  vector.push_back(trimmedLine);
+  vector.push_back(std::move(trimmedLine));
 
 #ifdef ACCESS_CONTROL_LOG_SECRETS
-  AccessControlDebug("Adding secrets[%d]='%s'", (int)(vector.size() - 1), trimmedLine.c_str());
+  AccessControlDebug("Adding secrets[%d]='%s'", (int)(vector.size() - 1), vector.back().c_str());
 #endif
 }
 
@@ -130,7 +131,7 @@ template <typename T>
 static bool
 load(T &container, const String &filename)
 {
-  String line;
+  String            line;
   String::size_type pos;
 
   String path(makeConfigPath(filename));
@@ -169,23 +170,25 @@ load(T &container, const String &filename)
 bool
 AccessControlConfig::init(int argc, char *argv[])
 {
-  static const struct option longopt[] = {{const_cast<char *>("invalid-syntax-status-code"), optional_argument, nullptr, 'a'},
-                                          {const_cast<char *>("invalid-signature-status-code"), optional_argument, nullptr, 'b'},
-                                          {const_cast<char *>("invalid-timing-status-code"), optional_argument, nullptr, 'c'},
-                                          {const_cast<char *>("invalid-scope-status-code"), optional_argument, nullptr, 'd'},
-                                          {const_cast<char *>("invalid-origin-response"), optional_argument, nullptr, 'e'},
-                                          {const_cast<char *>("internal-error-status-code"), optional_argument, nullptr, 'f'},
-                                          {const_cast<char *>("check-cookie"), optional_argument, nullptr, 'g'},
-                                          {const_cast<char *>("symmetric-keys-map"), optional_argument, nullptr, 'h'},
-                                          {const_cast<char *>("reject-invalid-token-requests"), optional_argument, nullptr, 'i'},
-                                          {const_cast<char *>("extract-subject-to-header"), optional_argument, nullptr, 'j'},
-                                          {const_cast<char *>("extract-tokenid-to-header"), optional_argument, nullptr, 'k'},
-                                          {const_cast<char *>("extract-status-to-header"), optional_argument, nullptr, 'l'},
-                                          {const_cast<char *>("token-response-header"), optional_argument, nullptr, 'm'},
-                                          {const_cast<char *>("use-redirects"), optional_argument, nullptr, 'n'},
-                                          {const_cast<char *>("include-uri-paths-file"), optional_argument, nullptr, 'o'},
-                                          {const_cast<char *>("exclude-uri-paths-file"), optional_argument, nullptr, 'p'},
-                                          {nullptr, 0, nullptr, 0}};
+  static const struct option longopt[] = {
+    {const_cast<char *>("invalid-syntax-status-code"),    optional_argument, nullptr, 'a'},
+    {const_cast<char *>("invalid-signature-status-code"), optional_argument, nullptr, 'b'},
+    {const_cast<char *>("invalid-timing-status-code"),    optional_argument, nullptr, 'c'},
+    {const_cast<char *>("invalid-scope-status-code"),     optional_argument, nullptr, 'd'},
+    {const_cast<char *>("invalid-origin-response"),       optional_argument, nullptr, 'e'},
+    {const_cast<char *>("internal-error-status-code"),    optional_argument, nullptr, 'f'},
+    {const_cast<char *>("check-cookie"),                  optional_argument, nullptr, 'g'},
+    {const_cast<char *>("symmetric-keys-map"),            optional_argument, nullptr, 'h'},
+    {const_cast<char *>("reject-invalid-token-requests"), optional_argument, nullptr, 'i'},
+    {const_cast<char *>("extract-subject-to-header"),     optional_argument, nullptr, 'j'},
+    {const_cast<char *>("extract-tokenid-to-header"),     optional_argument, nullptr, 'k'},
+    {const_cast<char *>("extract-status-to-header"),      optional_argument, nullptr, 'l'},
+    {const_cast<char *>("token-response-header"),         optional_argument, nullptr, 'm'},
+    {const_cast<char *>("use-redirects"),                 optional_argument, nullptr, 'n'},
+    {const_cast<char *>("include-uri-paths-file"),        optional_argument, nullptr, 'o'},
+    {const_cast<char *>("exclude-uri-paths-file"),        optional_argument, nullptr, 'p'},
+    {nullptr,                                             0,                 nullptr, 0  }
+  };
 
   bool status = true;
   optind      = 0;
@@ -286,7 +289,7 @@ AccessControlConfig::init(int argc, char *argv[])
   }
 
   /* Support only KeyValuePair syntax for now */
-  _tokenFactory = new AccessTokenFactory(_kvpAccessTokenConfig, _symmetricKeysMap, _debugLevel);
+  _tokenFactory = std::make_unique<AccessTokenFactory>(_kvpAccessTokenConfig, _symmetricKeysMap, _debugLevel);
   if (nullptr == _tokenFactory) {
     AccessControlDebug("failed to initialize the access token factory");
     return false;
@@ -311,8 +314,8 @@ AccessControlConfig::loadMultiPatternsFromFile(const String &filename, bool deny
   String path(makeConfigPath(filename));
 
   std::ifstream ifstr;
-  String regex;
-  unsigned lineno = 0;
+  String        regex;
+  unsigned      lineno = 0;
 
   ifstr.open(path.c_str());
   if (!ifstr) {
@@ -321,12 +324,12 @@ AccessControlConfig::loadMultiPatternsFromFile(const String &filename, bool deny
   }
 
   /* Have the multiplattern be named as same as the filename, would be used only for debugging. */
-  MultiPattern *multiPattern;
+  std::unique_ptr<MultiPattern> multiPattern;
   if (denylist) {
-    multiPattern = new NonMatchingMultiPattern(filename);
+    multiPattern = std::make_unique<NonMatchingMultiPattern>(filename);
     AccessControlDebug("NonMatchingMultiPattern('%s')", filename.c_str());
   } else {
-    multiPattern = new MultiPattern(filename);
+    multiPattern = std::make_unique<MultiPattern>(filename);
     AccessControlDebug("MultiPattern('%s')", filename.c_str());
   }
   if (nullptr == multiPattern) {
@@ -337,7 +340,6 @@ AccessControlConfig::loadMultiPatternsFromFile(const String &filename, bool deny
   AccessControlDebug("loading multi-pattern '%s' from '%s'", filename.c_str(), path.c_str());
 
   while (std::getline(ifstr, regex)) {
-    Pattern *p;
     String::size_type pos;
 
     ++lineno;
@@ -352,28 +354,25 @@ AccessControlConfig::loadMultiPatternsFromFile(const String &filename, bool deny
       continue;
     }
 
-    p = new Pattern();
+    auto p = std::make_unique<Pattern>();
 
     if (nullptr != p && p->init(regex)) {
       if (denylist) {
         AccessControlDebug("Added pattern '%s' to deny list uri-path multi-pattern '%s'", regex.c_str(), filename.c_str());
-        multiPattern->add(p);
+        multiPattern->add(std::move(p));
       } else {
         AccessControlDebug("Added pattern '%s' to allow list uri-path multi-pattern '%s'", regex.c_str(), filename.c_str());
-        multiPattern->add(p);
+        multiPattern->add(std::move(p));
       }
     } else {
       AccessControlError("%s:%u: failed to parse regex '%s'", path.c_str(), lineno, regex.c_str());
-      delete p;
     }
   }
 
   ifstr.close();
 
   if (!multiPattern->empty()) {
-    _uriPathScope.add(multiPattern);
-  } else {
-    delete multiPattern;
+    _uriPathScope.add(std::move(multiPattern));
   }
 
   return true;

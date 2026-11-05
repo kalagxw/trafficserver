@@ -26,23 +26,17 @@
 #include <list>
 
 #include <cstring>
-#include "ComponentBase.h"
 #include "StringHash.h"
 #include "HttpHeader.h"
 #include "Utils.h"
 
 namespace EsiLib
 {
-class Variables : private ComponentBase
+class Variables
 {
 public:
-  Variables(const char *debug_tag, ComponentBase::Debug debug_func, ComponentBase::Error error_func,
-            Utils::HeaderValueList allowlistCookies)
-    : ComponentBase(debug_tag, debug_func, error_func),
-      _headers_parsed(false),
-      _query_string(""),
-      _query_string_parsed(false),
-      _cookie_jar_created(false)
+  Variables(void *cont_addr, Utils::HeaderValueList allowlistCookies)
+    : _headers_parsed(false), _query_string(""), _query_string_parsed(false), _cookie_jar_created(false), _cont_addr(cont_addr)
   {
     _allowlistCookies.insert(_allowlistCookies.end(), allowlistCookies.begin(), allowlistCookies.end());
   };
@@ -95,10 +89,10 @@ public:
 
   void clear();
 
-  ~Variables() override { _releaseCookieJar(); };
+  ~Variables() { _releaseCookieJar(); };
 
   // noncopyable
-  Variables(const Variables &) = delete;            // non-copyable
+  Variables(const Variables &)            = delete; // non-copyable
   Variables &operator=(const Variables &) = delete; // non-copyable
 
 private:
@@ -134,16 +128,16 @@ private:
   StringHash _dict_data[N_SPECIAL_HEADERS];
 
   inline std::string &_toUpperCase(std::string &str) const;
-  inline int _searchHeaders(const std::string headers[], const char *name, int name_len) const;
-  bool _parseDictVariable(const std::string &variable, const char *&header, int &header_len, const char *&attr,
-                          int &attr_len) const;
-  void _parseCookieString(const char *str, int str_len);
-  void _parseUserAgentString(const char *str, int str_len);
-  void _parseAcceptLangString(const char *str, int str_len);
-  inline void _parseSimpleHeader(SimpleHeader hdr, const std::string &value);
-  inline void _parseSimpleHeader(SimpleHeader hdr, const char *value, int value_len);
-  void _parseSpecialHeader(SpecialHeader hdr, const char *value, int value_len);
-  void _parseCachedHeaders();
+  inline int          _searchHeaders(const std::string headers[], const char *name, int name_len) const;
+  bool                _parseDictVariable(const std::string &variable, const char *&header, int &header_len, const char *&attr,
+                                         int &attr_len) const;
+  void                _parseCookieString(const char *str, int str_len);
+  void                _parseUserAgentString(const char *str, int str_len);
+  void                _parseAcceptLangString(const char *str, int str_len);
+  inline void         _parseSimpleHeader(SimpleHeader hdr, const std::string &value);
+  inline void         _parseSimpleHeader(SimpleHeader hdr, const char *value, int value_len);
+  void                _parseSpecialHeader(SpecialHeader hdr, const char *value, int value_len);
+  void                _parseCachedHeaders();
 
   inline void _insert(StringHash &hash, const std::string &key, const std::string &value);
 
@@ -151,16 +145,16 @@ private:
   Utils::HeaderValueList _cached_special_headers[N_SPECIAL_HEADERS];
 
   Utils::HeaderValueList _allowlistCookies;
-  std::string _cookie_str;
-  bool _headers_parsed;
-  std::string _query_string;
-  bool _query_string_parsed;
+  std::string            _cookie_str;
+  bool                   _headers_parsed;
+  std::string            _query_string;
+  bool                   _query_string_parsed;
 
   void _parseHeader(const char *name, int name_len, const char *value, int value_len);
   void _parseQueryString(const char *query_string, int query_string_len);
 
   StringKeyHash<StringHash> _sub_cookies;
-  bool _cookie_jar_created;
+  bool                      _cookie_jar_created;
 
   void _parseSubCookies();
 
@@ -174,6 +168,8 @@ private:
   }
 
   mutable std::string _cached_sub_cookie_value;
-  const std::string &_getSubCookieValue(const std::string &cookie_str, size_t cookie_part_divider) const;
+  const std::string  &_getSubCookieValue(const std::string &cookie_str, size_t cookie_part_divider) const;
+
+  void *_cont_addr;
 };
 }; // namespace EsiLib

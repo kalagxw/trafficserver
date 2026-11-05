@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -106,8 +106,8 @@ TextBuffer::copyFrom(const void *source, unsigned num_bytes)
   memcpy(nextAdd, source, num_bytes);
   spaceLeft -= num_bytes;
 
-  nextAdd += num_bytes;
-  nextAdd[0] = '\0';
+  nextAdd    += num_bytes;
+  nextAdd[0]  = '\0';
 
   return num_bytes;
 }
@@ -126,7 +126,7 @@ TextBuffer::enlargeBuffer(unsigned N)
 {
   unsigned addedSize = 0;
   unsigned newSize   = (currentSize ? currentSize : 1) * 2;
-  char *newSpace;
+  char    *newSpace;
 
   if (spaceLeft < N) {
     while ((newSize - currentSize) < N) {
@@ -137,10 +137,10 @@ TextBuffer::enlargeBuffer(unsigned N)
 
     newSpace = static_cast<char *>(ats_realloc(bufferStart, newSize));
     if (newSpace != nullptr) {
-      nextAdd     = newSpace + static_cast<unsigned>(nextAdd - bufferStart);
-      bufferStart = newSpace;
-      spaceLeft += addedSize;
-      currentSize = newSize;
+      nextAdd      = newSpace + static_cast<unsigned>(nextAdd - bufferStart);
+      bufferStart  = newSpace;
+      spaceLeft   += addedSize;
+      currentSize  = newSize;
     } else {
       // Out of Memory, Sigh
       return -1;
@@ -179,7 +179,7 @@ TextBuffer::rawReadFromFile(int fd)
     // Error on read
     return readSize;
   } else {
-    nextAdd = nextAdd + readSize;
+    nextAdd    = nextAdd + readSize;
     spaceLeft -= readSize;
     return readSize;
   }
@@ -223,9 +223,9 @@ TextBuffer::readFromFD(int fd)
     // Error on read
     return readSize;
   } else {
-    nextAdd    = nextAdd + readSize;
-    nextAdd[0] = '\0';
-    spaceLeft -= readSize + 1;
+    nextAdd     = nextAdd + readSize;
+    nextAdd[0]  = '\0';
+    spaceLeft  -= readSize + 1;
     return readSize;
   }
 }
@@ -250,8 +250,8 @@ TextBuffer::vformat(const char *fmt, va_list ap)
       // count does not include the NUL, we can just increment and the next format will
       // overwrite the previous NUL.
       this->spaceLeft -= num;
-      this->nextAdd += num;
-      done = true;
+      this->nextAdd   += num;
+      done             = true;
     } else {
       if (enlargeBuffer(num + 1) == -1) {
         return;

@@ -98,8 +98,8 @@ source_file = _build/locale/pot/admin-guide/files/plugin.config.en.pot
 source_lang = en
 
 [apache-traffic-server-6x.admin-guide--files--records_config_en]
-file_filter = locale/<lang>/LC_MESSAGES/admin-guide/files/records.config.en.po
-source_file = _build/locale/pot/admin-guide/files/records.config.en.pot
+file_filter = locale/<lang>/LC_MESSAGES/admin-guide/files/records.yaml.en.po
+source_file = _build/locale/pot/admin-guide/files/records.yaml.en.pot
 source_lang = en
 
 [apache-traffic-server-6x.admin-guide--files--remap_config_en]
@@ -417,19 +417,9 @@ file_filter = locale/<lang>/LC_MESSAGES/admin-guide/plugins/memcache.en.po
 source_file = _build/locale/pot/admin-guide/plugins/memcache.en.pot
 source_lang = en
 
-[apache-traffic-server-6x.admin-guide--plugins--metalink_en]
-file_filter = locale/<lang>/LC_MESSAGES/admin-guide/plugins/metalink.en.po
-source_file = _build/locale/pot/admin-guide/plugins/metalink.en.pot
-source_lang = en
-
 [apache-traffic-server-6x.admin-guide--plugins--mp4_en]
 file_filter = locale/<lang>/LC_MESSAGES/admin-guide/plugins/mp4.en.po
 source_file = _build/locale/pot/admin-guide/plugins/mp4.en.pot
-source_lang = en
-
-[apache-traffic-server-6x.admin-guide--plugins--mysql_remap_en]
-file_filter = locale/<lang>/LC_MESSAGES/admin-guide/plugins/mysql_remap.en.po
-source_file = _build/locale/pot/admin-guide/plugins/mysql_remap.en.pot
 source_lang = en
 
 [apache-traffic-server-6x.admin-guide--plugins--regex_remap_en]
@@ -437,9 +427,9 @@ file_filter = locale/<lang>/LC_MESSAGES/admin-guide/plugins/regex_remap.en.po
 source_file = _build/locale/pot/admin-guide/plugins/regex_remap.en.pot
 source_lang = en
 
-[apache-traffic-server-6x.admin-guide--plugins--s3_auth_en]
-file_filter = locale/<lang>/LC_MESSAGES/admin-guide/plugins/s3_auth.en.po
-source_file = _build/locale/pot/admin-guide/plugins/s3_auth.en.pot
+[apache-traffic-server-6x.admin-guide--plugins-origin_server_auth_en]
+file_filter = locale/<lang>/LC_MESSAGES/admin-guide/plugins/origin_server_auth_en.en.po
+source_file = _build/locale/pot/admin-guide/plugins/origin_server_auth_en.en.pot
 source_lang = en
 
 [apache-traffic-server-6x.admin-guide--plugins--sslheaders_en]
@@ -495,16 +485,6 @@ source_lang = en
 [apache-traffic-server-6x.admin-guide--transparent-proxy--router-inline_en]
 file_filter = locale/<lang>/LC_MESSAGES/admin-guide/transparent-proxy/router-inline.en.po
 source_file = _build/locale/pot/admin-guide/transparent-proxy/router-inline.en.pot
-source_lang = en
-
-[apache-traffic-server-6x.admin-guide--transparent-proxy--wccp-configuration_en]
-file_filter = locale/<lang>/LC_MESSAGES/admin-guide/transparent-proxy/wccp-configuration.en.po
-source_file = _build/locale/pot/admin-guide/transparent-proxy/wccp-configuration.en.pot
-source_lang = en
-
-[apache-traffic-server-6x.admin-guide--transparent-proxy--wccp-service-config_en]
-file_filter = locale/<lang>/LC_MESSAGES/admin-guide/transparent-proxy/wccp-service-config.en.po
-source_file = _build/locale/pot/admin-guide/transparent-proxy/wccp-service-config.en.pot
 source_lang = en
 
 [apache-traffic-server-6x.appendices--faq_en]
@@ -570,11 +550,6 @@ source_lang = en
 [apache-traffic-server-6x.appendices--command-line--traffic_via_en]
 file_filter = locale/<lang>/LC_MESSAGES/appendices/command-line/traffic_via.en.po
 source_file = _build/locale/pot/appendices/command-line/traffic_via.en.pot
-source_lang = en
-
-[apache-traffic-server-6x.appendices--command-line--traffic_wccp_en]
-file_filter = locale/<lang>/LC_MESSAGES/appendices/command-line/traffic_wccp.en.po
-source_file = _build/locale/pot/appendices/command-line/traffic_wccp.en.pot
 source_lang = en
 
 [apache-traffic-server-6x.appendices--command-line--tspush_en]
@@ -697,9 +672,9 @@ file_filter = locale/<lang>/LC_MESSAGES/developer-guide/api/functions/TSContMute
 source_file = _build/locale/pot/developer-guide/api/functions/TSContMutexGet.en.pot
 source_lang = en
 
-[apache-traffic-server-6x.developer-guide--api--functions--TSContSchedule_en]
-file_filter = locale/<lang>/LC_MESSAGES/developer-guide/api/functions/TSContSchedule.en.po
-source_file = _build/locale/pot/developer-guide/api/functions/TSContSchedule.en.pot
+[apache-traffic-server-6x.developer-guide--api--functions--TSContScheduleOnPool_en]
+file_filter = locale/<lang>/LC_MESSAGES/developer-guide/api/functions/TSContScheduleOnPool.en.po
+source_file = _build/locale/pot/developer-guide/api/functions/TSContScheduleOnPool.en.pot
 source_lang = en
 
 [apache-traffic-server-6x.developer-guide--api--functions--TSDebug_en]
@@ -2137,11 +2112,6 @@ file_filter = locale/<lang>/LC_MESSAGES/developer-guide/release-process/index.en
 source_file = _build/locale/pot/developer-guide/release-process/index.en.pot
 source_lang = en
 
-[apache-traffic-server-6x.developer-guide--testing-with-vagrant--index_en]
-file_filter = locale/<lang>/LC_MESSAGES/developer-guide/testing-with-vagrant/index.en.po
-source_file = _build/locale/pot/developer-guide/testing-with-vagrant/index.en.pot
-source_lang = en
-
 [apache-traffic-server-6x.developer-guide--troubleshooting-tips--unable-to-load-plugins_en]
 file_filter = locale/<lang>/LC_MESSAGES/developer-guide/troubleshooting-tips/unable-to-load-plugins.en.po
 source_file = _build/locale/pot/developer-guide/troubleshooting-tips/unable-to-load-plugins.en.pot
@@ -2182,16 +2152,6 @@ file_filter = locale/<lang>/LC_MESSAGES/admin-guide/configuration/transparent-pr
 source_file = _build/locale/pot/admin-guide/configuration/transparent-proxy/router-inline.en.pot
 source_lang = en
 
-[apache-traffic-server-6x.admin-guide--configuration--transparent-proxy--wccp-configuration_en]
-file_filter = locale/<lang>/LC_MESSAGES/admin-guide/configuration/transparent-proxy/wccp-configuration.en.po
-source_file = _build/locale/pot/admin-guide/configuration/transparent-proxy/wccp-configuration.en.pot
-source_lang = en
-
-[apache-traffic-server-6x.admin-guide--configuration--transparent-proxy--wccp-service-config_en]
-file_filter = locale/<lang>/LC_MESSAGES/admin-guide/configuration/transparent-proxy/wccp-service-config.en.po
-source_file = _build/locale/pot/admin-guide/configuration/transparent-proxy/wccp-service-config.en.pot
-source_lang = en
-
 [apache-traffic-server-6x.developer-guide--plugins--hooks-and-transactions--trafficserver-timers_en]
 file_filter = locale/<lang>/LC_MESSAGES/developer-guide/plugins/hooks-and-transactions/trafficserver-timers.en.po
 source_file = _build/locale/pot/developer-guide/plugins/hooks-and-transactions/trafficserver-timers.en.pot
@@ -2206,4 +2166,3 @@ source_lang = en
 file_filter = locale/<lang>/LC_MESSAGES/developer-guide/documentation/plugins.en.po
 source_file = _build/locale/pot/developer-guide/documentation/plugins.en.pot
 source_lang = en
-

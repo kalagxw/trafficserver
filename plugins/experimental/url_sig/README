@@ -17,25 +17,22 @@ plugin, and only share them with the content owner.
 Signed URLs do not replace DRM.
 
 Quick install:
-	You can build with ./configure --enable-experimental-plugins or
-	with tsxs:
-
-		Make sure devel packages for traffic-server are installed.
-		Make sure that 'tsxs' is in your path.
-		Make sure versions of this plugin and ATS are compatible.
-
-			make -f Makefile.tsxs
-			make -f Makefile.tsxs install
+	You can build with ./configure --enable-experimental-plugins
 
 	add @plugin=url_sig.so @pparam=<config file> to the remap rule you want
 	to be signed
 
 
 Edge cache debugging
-	To enable the TSDebug verbose logging, change records.config to have:
+	To enable the TSDebug verbose logging, change records.yaml to have:
 
-		CONFIG proxy.config.diags.debug.enabled INT 1
-		CONFIG proxy.config.diags.debug.tags STRING url_sig
+  ```yaml
+  records:
+    diags:
+      debug:
+        enabled: 1
+        tags: url_sig
+  ```
 
 	and do a traffic_ctl config reload; Debug output will go to traffic.out.
 	Failed transactions (signature check fails that is) will be logged
@@ -103,11 +100,6 @@ Signing a URL using path parameters instead of using a query string.
 
 
 Example
-	Build, install
-
-		make -f Makefile.tsxs
-		make -f Makefile.tsxs install
-
 	Create the config file, using the genkeys script, or otherwise.
 
 		$ ./genkeys.pl  > /usr/local/trafficserver-master/etc/trafficserver/sign_test.config

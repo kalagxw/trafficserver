@@ -15,7 +15,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSHttpTxnServerPacketDscpSet
 ****************************
@@ -46,7 +46,4 @@ Description
 See Also
 ========
 
-`Traffic Shaping`_
-
-.. _Traffic Shaping:
-                 https://cwiki.apache.org/confluence/display/TS/Traffic+Shaping
+:ref:`admin-traffic-shaping`

@@ -22,16 +22,28 @@
 
 #include <cstdio>
 #include <cstdarg>
+#include <cstdlib>
 #include <iostream>
 #include <ostream>
+#include <sys/stat.h>
+#include <string>
+#include <utility>
 
 #include "parser.h"
+#include "cidr.h"
 
+#if TS_USE_HRW_MAXMINDDB
+#include <maxminddb.h>
+#endif
+
+namespace header_rewrite_ns
+{
 const char PLUGIN_NAME[]     = "TEST_header_rewrite";
 const char PLUGIN_NAME_DBG[] = "TEST_dbg_header_rewrite";
+} // namespace header_rewrite_ns
 
-extern "C" void
-TSError(const char *fmt, ...)
+void
+TSError(const char *fmt, ...) noexcept
 {
   va_list args;
 
@@ -46,7 +58,7 @@ class ParserTest : public Parser
 public:
   ParserTest(const std::string &line) : res(true)
   {
-    Parser::parse_line(line);
+    parse_succeeded = Parser::parse_line(line);
     std::cout << "Finished parser test: " << line << std::endl;
   }
 
@@ -67,6 +79,7 @@ public:
   }
 
   bool res;
+  bool parse_succeeded = false;
 };
 
 class SimpleTokenizerTest : public HRWSimpleTokenizer
@@ -113,6 +126,19 @@ test_parsing()
     CHECK_EQ(p.getTokens().size(), 2U);
     CHECK_EQ(p.getTokens()[0], "cond");
     CHECK_EQ(p.getTokens()[1], "%{READ_REQUEST_HDR_HOOK}");
+
+    END_TEST();
+  }
+
+  {
+    ParserTest   p("cond %{POST_REMAP_HOOK}");
+    TSHttpHookID hook = TS_HTTP_LAST_HOOK;
+
+    CHECK_EQ(p.getTokens().size(), 2U);
+    CHECK_EQ(p.getTokens()[0], "cond");
+    CHECK_EQ(p.getTokens()[1], "%{POST_REMAP_HOOK}");
+    CHECK_EQ(p.cond_is_hook(hook), true);
+    CHECK_EQ(hook, TS_HTTP_POST_REMAP_HOOK);
 
     END_TEST();
   }
@@ -236,12 +262,46 @@ test_parsing()
   }
 
   {
+    ParserTest p(R"(cond %{INBOUND:REMOTE-ADDR} {192.168.201.0/24,10.0.0.0/8})");
+
+    CHECK_EQ(p.getTokens().size(), 3UL);
+    CHECK_EQ(p.getTokens()[0], "cond");
+    CHECK_EQ(p.getTokens()[1], "%{INBOUND:REMOTE-ADDR}");
+    CHECK_EQ(p.getTokens()[2], "{192.168.201.0/24,10.0.0.0/8}");
+
+    END_TEST();
+  }
+
+  {
+    ParserTest p(R"(cond %{INBOUND:REMOTE-ADDR} { 192.168.201.0/24,10.0.0.0/8 })");
+
+    CHECK_EQ(p.getTokens().size(), 3UL);
+    CHECK_EQ(p.getTokens()[0], "cond");
+    CHECK_EQ(p.getTokens()[1], "%{INBOUND:REMOTE-ADDR}");
+    CHECK_EQ(p.getTokens()[2], "{ 192.168.201.0/24,10.0.0.0/8 }");
+
+    END_TEST();
+  }
+
+  {
     ParserTest p("add-header X-HeaderRewriteApplied true");
 
     CHECK_EQ(p.getTokens().size(), 3UL);
     CHECK_EQ(p.getTokens()[0], "add-header");
     CHECK_EQ(p.getTokens()[1], "X-HeaderRewriteApplied");
     CHECK_EQ(p.getTokens()[2], "true");
+
+    END_TEST();
+  }
+
+  {
+    ParserTest p("set-header X-Path %{CLIENT-URL:PATH [NORM]} [L]");
+
+    CHECK_EQ(p.getTokens().size(), 4UL);
+    CHECK_EQ(p.getTokens()[0], "set-header");
+    CHECK_EQ(p.getTokens()[1], "X-Path");
+    CHECK_EQ(p.getTokens()[2], "%{CLIENT-URL:PATH [NORM]}");
+    CHECK_EQ(p.getTokens()[3], "[L]");
 
     END_TEST();
   }
@@ -389,6 +449,30 @@ test_parsing()
     END_TEST();
   }
 
+  { /* modifiers with no condition or operator to attach them to */
+    ParserTest p("[L]");
+
+    CHECK_EQ(p.parse_succeeded, false);
+
+    END_TEST();
+  }
+
+  { /* same, but long enough that the token is heap allocated rather than SSO */
+    ParserTest p("[AND,NOCASE,NOT,L,QSA,I,EXT,PRE]");
+
+    CHECK_EQ(p.parse_succeeded, false);
+
+    END_TEST();
+  }
+
+  for (const auto *line : {"cond", "cond [L]", "cond [AND,NOCASE,NOT,L,QSA,I,EXT,PRE]"}) {
+    ParserTest p(line);
+
+    CHECK_EQ(p.parse_succeeded, false);
+
+    END_TEST();
+  }
+
   return errors;
 }
 
@@ -510,15 +594,331 @@ test_tokenizer()
     END_TEST();
   }
 
+  {
+    SimpleTokenizerTest p("{a}%{PATH}");
+    CHECK_EQ(p.get_tokens().size(), 2UL);
+    CHECK_EQ(p.get_tokens()[0], "{a}");
+    CHECK_EQ(p.get_tokens()[1], "%{PATH}");
+
+    END_TEST();
+  }
+
+  {
+    SimpleTokenizerTest p("<a>%{PATH}");
+    CHECK_EQ(p.get_tokens().size(), 2UL);
+    CHECK_EQ(p.get_tokens()[0], "<a>");
+    CHECK_EQ(p.get_tokens()[1], "%{PATH}");
+
+    END_TEST();
+  }
+
+  return errors;
+}
+
+#if TS_USE_HRW_MAXMINDDB
+
+static bool
+file_exists(const char *path)
+{
+  struct stat st;
+  return stat(path, &st) == 0;
+}
+
+static int
+open_test_mmdb(MMDB_s &mmdb, const char *path)
+{
+  int status = MMDB_open(path, MMDB_MODE_MMAP, &mmdb);
+  if (MMDB_SUCCESS != status) {
+    std::cerr << "Cannot open " << path << ": " << MMDB_strerror(status) << std::endl;
+    return 1;
+  }
+  return 0;
+}
+
+static std::string
+lookup_country(MMDB_s &mmdb, const char *ip)
+{
+  int                  gai_error, mmdb_error;
+  MMDB_lookup_result_s result = MMDB_lookup_string(&mmdb, ip, &gai_error, &mmdb_error);
+
+  if (gai_error != 0 || MMDB_SUCCESS != mmdb_error || !result.found_entry) {
+    return "(lookup_failed)";
+  }
+
+  MMDB_entry_data_s entry_data;
+
+  // Try nested path first (GeoLite2 style)
+  int status = MMDB_get_value(&result.entry, &entry_data, "country", "iso_code", NULL);
+  if (MMDB_SUCCESS == status && entry_data.has_data && entry_data.type == MMDB_DATA_TYPE_UTF8_STRING) {
+    return std::string(entry_data.utf8_string, entry_data.data_size);
+  }
+
+  // Try flat path (vendor style)
+  status = MMDB_get_value(&result.entry, &entry_data, "country_code", NULL);
+  if (MMDB_SUCCESS == status && entry_data.has_data && entry_data.type == MMDB_DATA_TYPE_UTF8_STRING) {
+    return std::string(entry_data.utf8_string, entry_data.data_size);
+  }
+
+  return "(not_found)";
+}
+
+static uint32_t
+lookup_asn(MMDB_s &mmdb, const char *ip)
+{
+  int                  gai_error, mmdb_error;
+  MMDB_lookup_result_s result = MMDB_lookup_string(&mmdb, ip, &gai_error, &mmdb_error);
+
+  if (gai_error != 0 || MMDB_SUCCESS != mmdb_error || !result.found_entry) {
+    return 0;
+  }
+
+  MMDB_entry_data_s entry_data;
+  int               status = MMDB_get_value(&result.entry, &entry_data, "autonomous_system_number", NULL);
+  if (MMDB_SUCCESS == status && entry_data.has_data && entry_data.type == MMDB_DATA_TYPE_UINT32) {
+    return entry_data.uint32;
+  }
+  return 0;
+}
+
+// Test that we can read country codes from a flat-schema MMDB (vendor databases
+// where country_code is a top-level string field).
+int
+test_flat_schema()
+{
+  const char *path = getenv("MMDB_TEST_FLAT");
+  if (path == nullptr || !file_exists(path)) {
+    std::cout << "SKIP: flat-schema test mmdb not found (set MMDB_TEST_FLAT)" << std::endl;
+    return 0;
+  }
+
+  std::cout << "Testing flat-schema MMDB: " << path << std::endl;
+  int    errors = 0;
+  MMDB_s mmdb;
+  if (open_test_mmdb(mmdb, path) != 0) {
+    return 1;
+  }
+
+  std::string country = lookup_country(mmdb, "8.8.8.8");
+  if (country != "US") {
+    std::cerr << "FAIL: flat schema 8.8.8.8 expected 'US', got '" << country << "'" << std::endl;
+    ++errors;
+  } else {
+    std::cout << "  PASS: flat 8.8.8.8 country = " << country << std::endl;
+  }
+
+  country = lookup_country(mmdb, "1.2.3.4");
+  if (country != "KR") {
+    std::cerr << "FAIL: flat schema 1.2.3.4 expected 'KR', got '" << country << "'" << std::endl;
+    ++errors;
+  } else {
+    std::cout << "  PASS: flat 1.2.3.4 country = " << country << std::endl;
+  }
+
+  uint32_t asn = lookup_asn(mmdb, "8.8.8.8");
+  if (asn != 15169) {
+    std::cerr << "FAIL: flat schema 8.8.8.8 expected ASN 15169, got " << asn << std::endl;
+    ++errors;
+  } else {
+    std::cout << "  PASS: flat 8.8.8.8 ASN = " << asn << std::endl;
+  }
+
+  // Loopback should not be found
+  country = lookup_country(mmdb, "127.0.0.1");
+  if (country != "(lookup_failed)") {
+    std::cerr << "FAIL: flat schema 127.0.0.1 expected no entry, got '" << country << "'" << std::endl;
+    ++errors;
+  } else {
+    std::cout << "  PASS: flat 127.0.0.1 correctly not found" << std::endl;
+  }
+
+  MMDB_close(&mmdb);
+  return errors;
+}
+
+// Test that we can read country codes from a nested-schema MMDB (GeoLite2/GeoIP2/DBIP
+// where country is country -> iso_code).
+int
+test_nested_schema()
+{
+  const char *path = getenv("MMDB_TEST_NESTED");
+  if (path == nullptr || !file_exists(path)) {
+    std::cout << "SKIP: nested-schema test mmdb not found (set MMDB_TEST_NESTED)" << std::endl;
+    return 0;
+  }
+
+  std::cout << "Testing nested-schema MMDB: " << path << std::endl;
+  int    errors = 0;
+  MMDB_s mmdb;
+  if (open_test_mmdb(mmdb, path) != 0) {
+    return 1;
+  }
+
+  std::string country = lookup_country(mmdb, "8.8.8.8");
+  if (country != "US") {
+    std::cerr << "FAIL: nested schema 8.8.8.8 expected 'US', got '" << country << "'" << std::endl;
+    ++errors;
+  } else {
+    std::cout << "  PASS: nested 8.8.8.8 country = " << country << std::endl;
+  }
+
+  country = lookup_country(mmdb, "1.2.3.4");
+  if (country != "KR") {
+    std::cerr << "FAIL: nested schema 1.2.3.4 expected 'KR', got '" << country << "'" << std::endl;
+    ++errors;
+  } else {
+    std::cout << "  PASS: nested 1.2.3.4 country = " << country << std::endl;
+  }
+
+  uint32_t asn = lookup_asn(mmdb, "8.8.8.8");
+  if (asn != 15169) {
+    std::cerr << "FAIL: nested schema 8.8.8.8 expected ASN 15169, got " << asn << std::endl;
+    ++errors;
+  } else {
+    std::cout << "  PASS: nested 8.8.8.8 ASN = " << asn << std::endl;
+  }
+
+  country = lookup_country(mmdb, "127.0.0.1");
+  if (country != "(lookup_failed)") {
+    std::cerr << "FAIL: nested schema 127.0.0.1 expected no entry, got '" << country << "'" << std::endl;
+    ++errors;
+  } else {
+    std::cout << "  PASS: nested 127.0.0.1 correctly not found" << std::endl;
+  }
+
+  MMDB_close(&mmdb);
+  return errors;
+}
+
+int
+test_maxmind_geo()
+{
+  int errors  = 0;
+  errors     += test_flat_schema();
+  errors     += test_nested_schema();
+  return errors;
+}
+#endif
+
+static std::string
+cidr_mask_v6_str(const char *addr_str, int prefix)
+{
+  in6_addr addr{};
+
+  if (inet_pton(AF_INET6, addr_str, &addr) != 1) {
+    return "<invalid address>";
+  }
+
+  int           zero_bytes = 0;
+  unsigned char mask       = 0;
+
+  cidr_v6_params(prefix, zero_bytes, mask);
+  cidr_apply_v6(addr, zero_bytes, mask);
+
+  char out[INET6_ADDRSTRLEN]{};
+
+  if (inet_ntop(AF_INET6, &addr, out, sizeof(out)) == nullptr) {
+    return "<inet_ntop failed>";
+  }
+
+  return std::string(out);
+}
+
+int
+test_cidr()
+{
+  int errors = 0;
+
+  auto check_qualifier = [&errors](std::string_view qualifier, CidrQualifierError expected_error, int expected_v4,
+                                   int expected_v6) {
+    int v4 = 24;
+    int v6 = 48;
+
+    auto const error = cidr_parse_qualifier(qualifier, v4, v6);
+    if (error != expected_error || v4 != expected_v4 || v6 != expected_v6) {
+      std::cerr << "FAIL: CIDR qualifier '" << qualifier << "' parsed as error=" << static_cast<int>(error) << ", v4=" << v4
+                << ", v6=" << v6 << "; expected error=" << static_cast<int>(expected_error) << ", v4=" << expected_v4
+                << ", v6=" << expected_v6 << std::endl;
+      ++errors;
+    }
+  };
+
+  check_qualifier("16", CidrQualifierError::NONE, 16, 48);
+  check_qualifier("18,42", CidrQualifierError::NONE, 18, 42);
+  check_qualifier("18/42", CidrQualifierError::NONE, 18, 42);
+  check_qualifier("18:42", CidrQualifierError::NONE, 18, 42);
+  check_qualifier(",8", CidrQualifierError::NONE, 24, 8);
+  check_qualifier("24,", CidrQualifierError::NONE, 24, 48);
+  check_qualifier("0,0", CidrQualifierError::NONE, 0, 0);
+  check_qualifier("abc", CidrQualifierError::IPV4, 24, 48);
+  check_qualifier("33", CidrQualifierError::IPV4, 24, 48);
+  check_qualifier("24,abc", CidrQualifierError::IPV6, 24, 48);
+  check_qualifier("24,129", CidrQualifierError::IPV6, 24, 48);
+  check_qualifier("24,8,7", CidrQualifierError::IPV6, 24, 48);
+
+  // IPv4 masks, in network byte order. /0 must be 0 (and must not shift by 32).
+  // Out-of-range prefixes clamp to [0, 32].
+  const std::pair<int, in_addr_t> v4cases[] = {
+    {-1, 0                 }, // clamps to /0
+    {0,  0                 },
+    {24, htonl(0xFFFFFF00u)},
+    {32, htonl(0xFFFFFFFFu)},
+    {33, htonl(0xFFFFFFFFu)}, // clamps to /32
+  };
+
+  for (auto const &[prefix, expect] : v4cases) {
+    in_addr_t const got = cidr_v4_mask(prefix);
+
+    if (got != expect) {
+      std::cerr << "FAIL: cidr_v4_mask(/" << prefix << ") = " << std::hex << got << ", expected " << expect << std::dec
+                << std::endl;
+      ++errors;
+    } else {
+      std::cout << "  PASS: cidr_v4_mask(/" << prefix << ")" << std::endl;
+    }
+  }
+
+  // IPv6 masks. The source has bits set in every byte so non-byte-aligned
+  // prefixes (the actual regression) produce distinct results. Out-of-range
+  // prefixes clamp to [0, 128].
+  const char                        *src       = "2001:db8:abcd:ef13:3456:789a:bcde:f012";
+  const std::pair<int, const char *> v6cases[] = {
+    {129, "2001:db8:abcd:ef13:3456:789a:bcde:f012"}, // clamps to /128
+    {128, "2001:db8:abcd:ef13:3456:789a:bcde:f012"},
+    {64,  "2001:db8:abcd:ef13::"                  },
+    {63,  "2001:db8:abcd:ef12::"                  },
+    {60,  "2001:db8:abcd:ef10::"                  },
+    {52,  "2001:db8:abcd:e000::"                  },
+    {48,  "2001:db8:abcd::"                       },
+    {0,   "::"                                    },
+    {-1,  "::"                                    }, // clamps to /0
+  };
+
+  for (auto const &[prefix, expect] : v6cases) {
+    std::string const got = cidr_mask_v6_str(src, prefix);
+
+    if (got != expect) {
+      std::cerr << "FAIL: " << src << " /" << prefix << " = " << got << ", expected " << expect << std::endl;
+      ++errors;
+    } else {
+      std::cout << "  PASS: " << src << " /" << prefix << " = " << got << std::endl;
+    }
+  }
+
   return errors;
 }
 
 int
 main()
 {
-  if (test_parsing() || test_processing() || test_tokenizer()) {
+  if (test_parsing() || test_processing() || test_tokenizer() || test_cidr()) {
     return 1;
   }
+
+#if TS_USE_HRW_MAXMINDDB
+  if (test_maxmind_geo()) {
+    return 1;
+  }
+#endif
 
   return 0;
 }

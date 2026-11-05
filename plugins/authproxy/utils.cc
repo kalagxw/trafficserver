@@ -26,14 +26,17 @@
 #include <getopt.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <string_view>
+
+DbgCtl Auth_dbg_ctl{"authproxy"};
 
 void
 HttpDebugHeader(TSMBuffer mbuf, TSMLoc mhdr)
 {
-  HttpIoBuffer iobuf;
-  int64_t nbytes;
-  int64_t avail;
-  const char *ptr;
+  HttpIoBuffer    iobuf;
+  int64_t         nbytes;
+  int64_t         avail;
+  const char     *ptr;
   TSIOBufferBlock blk;
 
   TSHttpHdrPrint(mbuf, mhdr, iobuf.buffer);
@@ -81,10 +84,39 @@ HttpSetMimeHeader(TSMBuffer mbuf, TSMLoc mhdr, const char *name, const char *val
   TSHandleMLocRelease(mbuf, mhdr, mloc);
 }
 
+void
+HttpSetMimeHeader(TSMBuffer mbuf, TSMLoc mhdr, const std::string_view name, const std::string_view value)
+{
+  TSMLoc mloc;
+  mloc = TSMimeHdrFieldFind(mbuf, mhdr, name.data(), name.size());
+  if (mloc == TS_NULL_MLOC) {
+    TSReleaseAssert(TSMimeHdrFieldCreateNamed(mbuf, mhdr, name.data(), name.size(), &mloc) == TS_SUCCESS);
+  } else {
+    TSReleaseAssert(TSMimeHdrFieldValuesClear(mbuf, mhdr, mloc) == TS_SUCCESS);
+  }
+
+  TSReleaseAssert(TSMimeHdrFieldValueStringInsert(mbuf, mhdr, mloc, 0 /* index */, value.data(), value.size()) == TS_SUCCESS);
+  TSReleaseAssert(TSMimeHdrFieldAppend(mbuf, mhdr, mloc) == TS_SUCCESS);
+
+  TSHandleMLocRelease(mbuf, mhdr, mloc);
+}
+
+void
+HttpRemoveMimeHeader(TSMBuffer mbuf, TSMLoc mhdr, const char *name)
+{
+  TSMLoc mloc;
+
+  // A field may be repeated on multiple lines; destroy every instance.
+  while ((mloc = TSMimeHdrFieldFind(mbuf, mhdr, name, -1)) != TS_NULL_MLOC) {
+    TSReleaseAssert(TSMimeHdrFieldDestroy(mbuf, mhdr, mloc) == TS_SUCCESS);
+    TSHandleMLocRelease(mbuf, mhdr, mloc);
+  }
+}
+
 unsigned
 HttpGetContentLength(TSMBuffer mbuf, TSMLoc mhdr)
 {
-  TSMLoc mloc;
+  TSMLoc   mloc;
   unsigned value = 0;
 
   mloc = TSMimeHdrFieldFind(mbuf, mhdr, TS_MIME_FIELD_CONTENT_LENGTH, -1);
@@ -100,12 +132,12 @@ bool
 HttpIsChunkedEncoding(TSMBuffer mbuf, TSMLoc mhdr)
 {
   TSMLoc mloc;
-  bool ischunked = false;
+  bool   ischunked = false;
 
   mloc = TSMimeHdrFieldFind(mbuf, mhdr, TS_MIME_FIELD_TRANSFER_ENCODING, -1);
   if (mloc != TS_NULL_MLOC) {
     const char *str;
-    int len;
+    int         len;
 
     str = TSMimeHdrFieldValueStringGet(mbuf, mhdr, mloc, -1 /* index */, &len);
     if (str && len) {

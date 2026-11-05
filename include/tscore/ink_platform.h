@@ -3,7 +3,7 @@
   Platform specific defines and includes, this is to make the build
   more portable.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -60,57 +60,33 @@
 struct ifafilt;
 #include <net/if.h>
 
-#ifdef HAVE_STDLIB_H
 #include <stdlib.h> // NOLINT(modernize-deprecated-headers)
-#endif
-#include <ctype.h> // NOLINT(modernize-deprecated-headers)
-#ifdef HAVE_STRING_H
+#include <ctype.h>  // NOLINT(modernize-deprecated-headers)
 #include <string.h> // NOLINT(modernize-deprecated-headers)
-#endif
-#ifdef HAVE_STRINGS_H
-#include <strings.h>
-#endif
-#ifdef HAVE_SYS_TYPES_H
+
 #include <sys/types.h>
-#endif
-#ifdef HAVE_SYS_STAT_H
 #include <sys/stat.h>
-#endif
-#ifdef HAVE_UNISTD_H
+
 #include <unistd.h>
-#endif
-#ifdef HAVE_NETINET_IN_H
+
 #include <netinet/in.h>
-#endif
-#ifdef HAVE_NETINET_IN_SYSTM_H
 #include <netinet/in_systm.h>
-#endif
-#ifdef HAVE_NETINET_TCP_H
+// This is a bit of a hack, to get the more linux specific tcp_info struct ...
+#if __has_include(<linux/tcp.h>)
+#include <linux/tcp.h>
+#else
 #include <netinet/tcp.h>
 #endif
-#ifdef HAVE_NETINET_IP_H
 #include <netinet/ip.h>
-#endif
-#ifdef HAVE_NETINET_IP_ICMP_H
 #include <netinet/ip_icmp.h>
-#endif
-#ifdef HAVE_NETDB_H
+
 #include <netdb.h>
-#endif
-#ifdef HAVE_ARPA_INET_H
+
 #include <arpa/inet.h>
-#endif
-#ifdef HAVE_ARPA_NAMESER_H
 #include <arpa/nameser.h>
-#endif
-#ifdef HAVE_ARPA_NAMESER_COMPAT_H
 #include <arpa/nameser_compat.h>
-#endif
 
 #include <signal.h> // NOLINT(modernize-deprecated-headers)
-#ifdef HAVE_SIGINFO_H
-#include <siginfo.h>
-#endif
 
 #if TS_USE_EPOLL
 #include <sys/epoll.h>
@@ -118,68 +94,38 @@ struct ifafilt;
 #if TS_USE_KQUEUE
 #include <sys/event.h>
 #endif
-#if TS_USE_PORT
-#include <port.h>
-#endif
 
-#ifdef HAVE_VALUES_H
-#include <values.h>
-#endif
-#ifdef HAVE_ALLOCA_H
+#if __has_include(<alloca.h>)
 #include <alloca.h>
 #endif
 
-#ifdef HAVE_CPIO_H
-#include <cpio.h>
-#if defined(MAGIC)
-#undef MAGIC
-#endif
-#endif
+#include "tscore/ink_endian.h"
 
-#ifdef HAVE_STROPTS_H
-#include <stropts.h>
-#endif
-
-#include "ink_endian.h"
-
-#ifdef HAVE_SYS_IOCTL_H
 #include <sys/ioctl.h>
-#endif
-#ifdef HAVE_SYS_SOCKIO_H
-#include <sys/sockio.h>
+
+#if defined(__linux__)
+using in_addr_t = unsigned int;
 #endif
 
-#if defined(linux)
-typedef unsigned int in_addr_t;
-#endif
-
-#ifdef HAVE_SYS_SYSINFO_H
+#if __has_include(<sys/sysinfo.h>)
 #include <sys/sysinfo.h>
 #endif
 
-#if defined(darwin) || defined(freebsd)
-#ifdef HAVE_SYS_SYSCTL_H
+#if defined(__APPLE__) || defined(__FreeBSD__)
+#if __has_include(<sys/sysctl.h>)
 #include <sys/sysctl.h>
 #endif
 #endif
 
-#ifdef HAVE_SYS_SYSTEMINFO_H
-#include <sys/systeminfo.h>
-#endif
-
-#ifdef HAVE_DLFCN_H
 #include <dlfcn.h>
-#endif
 
-#ifdef HAVE_FLOAT_H
 #include <float.h> // NOLINT(modernize-deprecated-headers)
-#endif
 
-#ifdef HAVE_SYS_SYSMACROS_H
+#if __has_include(<sys/sysmacros.h>)
 #include <sys/sysmacros.h>
 #endif
 
-#ifdef HAVE_SYS_PRCTL_H
+#if __has_include(<sys/prctl.h>)
 #include <sys/prctl.h>
 #endif
 
@@ -193,11 +139,16 @@ typedef unsigned int in_addr_t;
        //                 windows-260,etc)
 #endif
 
-// This is a little bit of a hack for now, until MPTCP has landed upstream in Linux land.
-#ifndef MPTCP_ENABLED
-#if defined(linux)
-#define MPTCP_ENABLED 42
-#else
-#define MPTCP_ENABLED 0
+// If kernel headers do not support IPPROTO_MPTCP definition
+#ifndef IPPROTO_MPTCP
+#define IPPROTO_MPTCP 262
 #endif
+
+#ifndef SOL_MPTCP
+#define SOL_MPTCP 284
+#endif
+
+// Undefined in upstream until 5.16
+#ifndef MPTCP_INFO
+#define MPTCP_INFO 1
 #endif

@@ -31,6 +31,7 @@ Table of Contents:
    installation/index.en
    configuration/index.en
    interaction/index.en
+   graceful-shutdown.en
    security/index.en
    storage/index.en
    plugins/index.en
@@ -40,6 +41,7 @@ Table of Contents:
    layer-4-routing.en
    performance/index.en
    files/index.en
+   tools/index.en
 
 Audience
 ========

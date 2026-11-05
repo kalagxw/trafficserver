@@ -30,7 +30,7 @@
 #include "tscpp/api/RemapPlugin.h"
 #include "tscpp/api/TransactionPlugin.h"
 
-#define PLUGIN_NAME "server_push_preload"
+#define PLUGIN_NAME   "server_push_preload"
 #define PRELOAD_PARAM "rel=preload"
 #define NOPUSH_OPTION "nopush"
 
@@ -41,8 +41,7 @@ static regex linkRegexp("<([^>]+)>;(.+)");
 
 namespace
 {
-GlobalPlugin *globalPlugin;
-RemapPlugin *remapPlugin;
+DbgCtl dbg_ctl{PLUGIN_NAME};
 } // namespace
 
 class ServerPushTransaction : public TransactionPlugin
@@ -68,9 +67,9 @@ public:
       return;
     }
 
-    ClientRequest &request = transaction.getClientRequest();
-    Response &response     = transaction.getClientResponse();
-    Headers &headers       = response.getHeaders();
+    ClientRequest &request  = transaction.getClientRequest();
+    Response      &response = transaction.getClientResponse();
+    Headers       &headers  = response.getHeaders();
 
     const Url &clientUrl = request.getPristineUrl();
 
@@ -80,27 +79,27 @@ public:
       for (header_field_value_iterator hit = field.begin(); hit != field.end(); ++hit) {
         const string &link = *hit;
 
-        TSDebug(PLUGIN_NAME, "Parsing link header: %s", link.c_str());
+        Dbg(dbg_ctl, "Parsing link header: %s", link.c_str());
         smatch matches;
 
         if (regex_search(link, matches, linkRegexp)) {
           string url = matches[1].str();
-          TSDebug(PLUGIN_NAME, "Found link header match: %s", url.c_str());
+          Dbg(dbg_ctl, "Found link header match: %s", url.c_str());
 
-          set<string> params = split(matches[2].str(), ';');
-          auto preload       = params.find(PRELOAD_PARAM);
+          set<string> params  = split(matches[2].str(), ';');
+          auto        preload = params.find(PRELOAD_PARAM);
           if (preload == params.end()) {
             continue;
           }
 
           auto noPush = params.find(NOPUSH_OPTION);
           if (noPush != params.end()) {
-            TSDebug(PLUGIN_NAME, "Skipping nopush link: %s", link.c_str());
+            Dbg(dbg_ctl, "Skipping nopush link: %s", link.c_str());
             continue;
           }
 
           Request request(url);
-          Url &linkUrl = request.getUrl();
+          Url    &linkUrl = request.getUrl();
 
           if (linkUrl.getHost().empty()) {
             linkUrl.setHost(clientUrl.getHost());
@@ -110,10 +109,10 @@ public:
             linkUrl.setPort(clientUrl.getPort());
           }
           string lu = linkUrl.getUrlString();
-          TSDebug(PLUGIN_NAME, "Push preloaded content: %s", lu.c_str());
+          Dbg(dbg_ctl, "Push preloaded content: %s", lu.c_str());
           TSHttpTxnServerPush(txnp, lu.c_str(), lu.length());
         } else {
-          TSDebug(PLUGIN_NAME, "No match found for link header: %s", link.c_str());
+          Dbg(dbg_ctl, "No match found for link header: %s", link.c_str());
         }
       }
     }
@@ -123,8 +122,8 @@ public:
   split(const string &params, char delim)
   {
     stringstream ss(params);
-    string s;
-    set<string> tokens;
+    string       s;
+    set<string>  tokens;
     while (getline(ss, s, delim)) {
       s.erase(find_if(s.rbegin(), s.rend(), [](unsigned char c) { return !std::isspace(c); }).base(), s.end()); // trim left
       s.erase(s.begin(), find_if(s.begin(), s.end(), [](unsigned char c) { return !std::isspace(c); }));        // trim right
@@ -140,7 +139,8 @@ public:
   explicit ServerPushRemap(void **instance_handle) : RemapPlugin(instance_handle) {}
 
   Result
-  doRemap(const Url &map_from_url, const Url &map_to_url, Transaction &transaction, bool &redirect) override
+  doRemap(const Url & /* map_from_url ATS_UNUSED */, const Url & /* map_to_url ATS_UNUSED */, Transaction &transaction,
+          bool & /* redirect ATS_UNUSED */) override
   {
     transaction.addPlugin(new ServerPushTransaction(transaction));
     return RESULT_DID_REMAP;
@@ -163,18 +163,18 @@ public:
 void
 TSPluginInit(int argc ATSCPPAPI_UNUSED, const char *argv[] ATSCPPAPI_UNUSED)
 {
-  TSDebug(PLUGIN_NAME, "Init");
+  Dbg(dbg_ctl, "Init");
   if (!RegisterGlobalPlugin("ServerPushPreloadPlugin", PLUGIN_NAME, "dev@trafficserver.apache.org")) {
     return;
   }
-  globalPlugin = new ServerPushGlobal();
+  new ServerPushGlobal();
 }
 
 TSReturnCode
 TSRemapNewInstance(int argc ATSCPPAPI_UNUSED, char *argv[] ATSCPPAPI_UNUSED, void **instance_handle, char *errbuf ATSCPPAPI_UNUSED,
                    int errbuf_size ATSCPPAPI_UNUSED)
 {
-  TSDebug(PLUGIN_NAME, "New Instance");
-  remapPlugin = new ServerPushRemap(instance_handle);
+  Dbg(dbg_ctl, "New Instance");
+  *instance_handle = new ServerPushRemap(instance_handle);
   return TS_SUCCESS;
 }

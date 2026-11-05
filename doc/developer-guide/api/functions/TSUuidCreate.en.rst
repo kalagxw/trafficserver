@@ -16,7 +16,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSUuidCreate
 ************
@@ -92,17 +92,17 @@ Finally, :func:`TSClientRequestUuidGet` can be used to extract
 the client request uuid from a transaction. The output buffer must be of
 sufficient length, minimum of ``TS_CRUUID_STRING_LEN`` + 1 bytes. This
 produces the same string as the log tag %<cruuid> generates, and it will
-be NULL terminated.
+be null terminated.
 
 Return Values
 =============
 
 The :type:`TSUuid` type is an opaque pointer to an internal representation of
 the UUID object. Several of the functions returns a normal Traffic Server
-return status code, :type:`TSReturnCode`. You should verify the success of
+return status code, :enum:`TSReturnCode`. You should verify the success of
 those APIs, of course.
 
-The :func:`TSUuidStringGet` function will return ``NULL`` if the :type:`TSUuid`
+The :func:`TSUuidStringGet` function will return ``nullptr`` if the :type:`TSUuid`
 object is not properly initialized. Likewise, :func:`TSUuidVersionGet` would
 then return ``TS_UUID_UNDEFINED``.
 

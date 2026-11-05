@@ -53,7 +53,7 @@ msgstr "この章では下記のトピックをカバーします。"
 
 #: ../../developer-guide/plugins/continuations/index.en.rst:38
 msgid "`Mutexes and Data`_"
-msgstr "ミューテックスとデータ"
+msgstr "`ミューテックスとデータ`_"
 
 #: ../../developer-guide/plugins/continuations/index.en.rst:114
 msgid ""
@@ -220,8 +220,8 @@ msgstr ""
 
 #: ../../developer-guide/plugins/continuations/index.en.rst:56
 msgid ""
-"uses ``TSCacheXXX``, ``TSNetXXX``, ``TSHostLookup``, or ``TSContSchedule`` "
+"uses ``TSCacheXXX``, ``TSNetXXX``, ``TSHostLookup``, or ``TSContScheduleOnPool`` "
 "APIs"
 msgstr ""
-"``TSCacheXXX``, ``TSNetXXX``, ``TSHostLookup``, もしくは ``TSContSchedule`` "
+"``TSCacheXXX``, ``TSNetXXX``, ``TSHostLookup``, もしくは ``TSContScheduleOnPool`` "
 "API を使用する。"

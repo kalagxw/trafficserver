@@ -26,14 +26,19 @@ namespace ats
 {
 namespace io
 {
-  IO *
+  std::unique_ptr<IO>
   IO::read(TSVConn v, TSCont c, const int64_t s)
   {
     assert(s > 0);
-    IO *io  = new IO();
+    auto io = std::make_unique<IO>();
     io->vio = TSVConnRead(v, c, io->buffer, s);
     return io;
   }
 
 } // namespace io
 } // namespace ats
+
+namespace multiplexer_ns
+{
+DbgCtl dbg_ctl{PLUGIN_TAG};
+}

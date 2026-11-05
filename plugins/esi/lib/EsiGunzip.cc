@@ -23,28 +23,19 @@
 
 #include "EsiGunzip.h"
 #include "gzip.h"
+#include <ts/ts.h>
 #include <cctype>
 #include <cstdint>
 
 using std::string;
 using namespace EsiLib;
 
-EsiGunzip::EsiGunzip(const char *debug_tag, ComponentBase::Debug debug_func, ComponentBase::Error error_func)
-  : ComponentBase(debug_tag, debug_func, error_func), _downstream_length(0), _total_data_length(0)
-{
-  _init    = false;
-  _success = true;
-  // zlib _zstrm variables are initialized when they are required in stream_decode
-  // coverity[uninit_member]
-  // coverity[uninit_ctor]
-}
-
 bool
 EsiGunzip::stream_finish()
 {
   if (_init) {
     if (inflateEnd(&_zstrm) != Z_OK) {
-      _errorLog("[%s] inflateEnd failed!", __FUNCTION__);
+      TSError("[%s] inflateEnd failed!", __FUNCTION__);
       _success = false;
     }
     _init = false;
@@ -66,7 +57,7 @@ EsiGunzip::stream_decode(const char *data, int data_len, std::string &udata)
     _zstrm.avail_in = 0;
 
     if (inflateInit2(&_zstrm, MAX_WBITS + 16) != Z_OK) {
-      _errorLog("[%s] inflateInit2 failed!", __FUNCTION__);
+      TSError("[%s] inflateInit2 failed!", __FUNCTION__);
       _success = false;
       return false;
     }
@@ -76,34 +67,37 @@ EsiGunzip::stream_decode(const char *data, int data_len, std::string &udata)
   if (data && (data_len > 0)) {
     _zstrm.next_in  = reinterpret_cast<Bytef *>(const_cast<char *>(data));
     _zstrm.avail_in = data_len;
-    char raw_buf[BUF_SIZE];
-    int inflate_result;
+    char    raw_buf[BUF_SIZE];
+    int     inflate_result;
     int32_t curr_buf_size;
 
     do {
-      _zstrm.next_out  = reinterpret_cast<Bytef *>(raw_buf);
-      _zstrm.avail_out = BUF_SIZE;
-      inflate_result   = inflate(&_zstrm, Z_SYNC_FLUSH);
-      curr_buf_size    = -1;
-      if ((inflate_result == Z_OK) || (inflate_result == Z_BUF_ERROR)) {
+      _zstrm.next_out            = reinterpret_cast<Bytef *>(raw_buf);
+      _zstrm.avail_out           = BUF_SIZE;
+      auto const avail_in_before = _zstrm.avail_in;
+      inflate_result             = inflate(&_zstrm, Z_SYNC_FLUSH);
+      if ((inflate_result == Z_OK) || (inflate_result == Z_BUF_ERROR) || (inflate_result == Z_STREAM_END)) {
         curr_buf_size = BUF_SIZE - _zstrm.avail_out;
-      } else if (inflate_result == Z_STREAM_END) {
-        curr_buf_size = BUF_SIZE - _zstrm.avail_out;
+      } else {
+        TSError("[%s] Failure while inflating; error code %d", __FUNCTION__, inflate_result);
+        _success = false;
+        return false;
       }
       if (curr_buf_size > BUF_SIZE) {
-        _errorLog("[%s] buf too large", __FUNCTION__);
+        TSError("[%s] buf too large", __FUNCTION__);
         break;
       }
-      if (curr_buf_size < 1) {
-        _errorLog("[%s] buf below zero", __FUNCTION__);
+      if (curr_buf_size < 1 && avail_in_before == _zstrm.avail_in) {
         break;
       }
 
       // push empty object onto list and add data to in-list object to
       // avoid data copy for temporary
-      buf_list.push_back(string());
-      string &curr_buf = buf_list.back();
-      curr_buf.assign(raw_buf, curr_buf_size);
+      if (curr_buf_size > 0) {
+        buf_list.push_back(string());
+        string &curr_buf = buf_list.back();
+        curr_buf.assign(raw_buf, curr_buf_size);
+      }
 
       if (inflate_result == Z_STREAM_END) {
         break;

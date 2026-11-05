@@ -2,7 +2,7 @@
 
   Internal SDK stuff
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -22,15 +22,8 @@
  */
 
 #pragma once
-#if !defined(__GNUC__)
-#include "I_EventSystem.h"
-#include "I_Cache.h"
-#include "I_Net.h"
-#else
-#include "P_EventSystem.h"
-#include "P_Cache.h"
-#include "P_Net.h"
-#endif
+#include "iocore/eventsystem/VConnection.h"
+#include "ts/apidefs.h"
 
 enum INKContInternalMagic_t {
   INKCONT_INTERN_MAGIC_ALIVE = 0x00009631,
@@ -43,24 +36,24 @@ public:
   INKContInternal();
   INKContInternal(TSEventFunc funcp, TSMutex mutexp);
 
-  void init(TSEventFunc funcp, TSMutex mutexp, void *context = 0);
+  void         init(TSEventFunc funcp, TSMutex mutexp, void *context = 0);
   virtual void destroy();
 
   void handle_event_count(int event);
-  int handle_event(int event, void *edata);
+  int  handle_event(int event, void *edata);
 
 protected:
   virtual void clear();
   virtual void free();
 
 public:
-  void *mdata;
+  void       *mdata;
   TSEventFunc m_event_func;
-  int m_event_count;
-  int m_closed;
-  int m_deletable;
-  int m_deleted;
-  void *m_context;
+  int         m_event_count;
+  int         m_closed;
+  int         m_deletable;
+  int         m_deleted;
+  void       *m_context;
   // INKqa07670: Nokia memory leak bug fix
   INKContInternalMagic_t m_free_magic;
 };
@@ -95,8 +88,8 @@ protected:
   void free() override;
 
 public:
-  VIO m_read_vio;
-  VIO m_write_vio;
+  VIO          m_read_vio;
+  VIO          m_write_vio;
   VConnection *m_output_vc;
 };
 
@@ -115,10 +108,6 @@ public:
   sdk_assert(((INKContInternal *)_c)->mutex); \
   SCOPED_MUTEX_LOCK(ml, ((INKContInternal *)_c)->mutex, this_ethread());
 
-#ifdef __cplusplus
-extern "C" {
-#endif /* __cplusplus */
-
 TSReturnCode sdk_sanity_check_mutex(TSMutex);
 TSReturnCode sdk_sanity_check_hostlookup_structure(TSHostLookupResult);
 TSReturnCode sdk_sanity_check_iocore_structure(void *);
@@ -129,74 +118,9 @@ TSReturnCode sdk_sanity_check_iocore_structure(void *);
  *
  * ---------------------------------------------------------------------- */
 
-tsapi TSMutex TSMutexCreateInternal(void);
-tsapi int TSMutexCheck(TSMutex mutex);
+TSMutex TSMutexCreateInternal(void);
+int     TSMutexCheck(TSMutex mutex);
 
 /* IOBuffer */
-tsapi int64_t TSIOBufferBlockDataSizeGet(TSIOBufferBlock blockp);
-tsapi void TSIOBufferBlockDestroy(TSIOBufferBlock blockp);
-typedef void *INKUDPPacket;
-typedef void *INKUDPacketQueue;
-typedef void *INKUDPConn;
-/* ===== UDP Connections ===== */
-/****************************************************************************
- *  contact: OXYGEN
- ****************************************************************************/
-tsapi TSAction INKUDPBind(TSCont contp, unsigned int ip, int port);
-
-/****************************************************************************
- *  contact: OXYGEN
- ****************************************************************************/
-tsapi TSAction INKUDPSendTo(TSCont contp, INKUDPConn udp, unsigned int ip, int port, char *buf, int len);
-
-/****************************************************************************
- *  contact: OXYGEN
- ****************************************************************************/
-tsapi TSAction INKUDPRecvFrom(TSCont contp, INKUDPConn udp);
-
-/****************************************************************************
- *  Return file descriptor.
- *  contact: OXYGEN
- ****************************************************************************/
-tsapi int INKUDPConnFdGet(INKUDPConn udp);
-
-/* ===== UDP Packet ===== */
-/****************************************************************************
- *  contact: OXYGEN
- ****************************************************************************/
-tsapi INKUDPPacket INKUDPPacketCreate();
-
-/****************************************************************************
- *  contact: OXYGEN
- ****************************************************************************/
-tsapi TSIOBufferBlock INKUDPPacketBufferBlockGet(INKUDPPacket packet);
-
-/****************************************************************************
- *  contact: OXYGEN
- ****************************************************************************/
-tsapi unsigned int INKUDPPacketFromAddressGet(INKUDPPacket packet);
-
-/****************************************************************************
- *  contact: OXYGEN
- ****************************************************************************/
-tsapi int INKUDPPacketFromPortGet(INKUDPPacket packet);
-
-/****************************************************************************
- *  contact: OXYGEN
- ****************************************************************************/
-tsapi INKUDPConn INKUDPPacketConnGet(INKUDPPacket packet);
-
-/****************************************************************************
- *  contact: OXYGEN
- ****************************************************************************/
-tsapi void INKUDPPacketDestroy(INKUDPPacket packet);
-
-/* ===== Packet Queue ===== */
-/****************************************************************************
- *  contact: OXYGEN
- ****************************************************************************/
-tsapi INKUDPPacket INKUDPPacketGet(INKUDPacketQueue queuep);
-
-#ifdef __cplusplus
-}
-#endif /* __cplusplus */
+int64_t TSIOBufferBlockDataSizeGet(TSIOBufferBlock blockp);
+void    TSIOBufferBlockDestroy(TSIOBufferBlock blockp);

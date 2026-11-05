@@ -6,39 +6,39 @@ This directory contains the source code for Traffic Server documentation.
 
 ## Package Requirements
 Traffic Server documentation is built using the Sphinx documentation generator.
-The Sphinx build tool is distributed as a Python package. A Pipfile is provided
-to conveniently configure a Python virtual environment with the needed Sphinx
-packages.
+The Sphinx build tool is distributed as a Python package. A `pyproject.toml` is
+provided to conveniently configure a Python virtual environment with the needed
+Sphinx packages via uv.
 
 In addition to the Sphinx Python package requirements, building the
-documentation will also require Java and graphviz system packages to be
+documentation will also require Java, graphviz, and uv system packages to be
 installed.
 
 ## Build Steps
-By default, building the Traffic Server documentation is not configured via the
-Automake configure script. It is enabled using the `--enable-docs`
-configuration switch.
+Building the docs requires passing `-DENABLE_DOCS=ON` to cmake (docs generation
+is off by default), and then using the appropriate build target. The build steps
+will automatically install a virtual environment via uv using `doc/pyproject.toml`
+and do what is necessary to build the docs.
 
-Here is an example shell session that can be used to build the HTML version of
-the Traffic Server documentation:
-
-```bash
-cd doc
-
-# Create the Python virtual environment with Sphinx and other documentation
-# dependencies installed.
-pipenv install
-
-# Enter the Python virtual environment.
-pipenv shell
-
-# Configure and build an HTML version of the documentation.
-cd ../
-autoreconf -fi
-./configure --enable-docs
-cd doc
-make -j $(nproc) html
+### Building HTML Documentation
+```sh
+cmake -B docs-build -DENABLE_DOCS=ON
+cmake --build docs-build --target generate_docs
 ```
+
+The generated HTML docs will be in `docs-build/doc/docbuild/html`.
+
+### Building PDF Documentation
+```sh
+# Letter paper size (US standard)
+cmake --build docs-build --target generate_pdf
+
+# A4 paper size (International standard)
+cmake --build docs-build --target generate_pdf_a4
+```
+
+The generated PDF will be in `docs-build/doc/docbuild/latex/ApacheTrafficServer.pdf`
+(or `docs-build/doc/docbuild/latex-a4/` for A4 format).
 
 Once the build completes, you can use Python's
 [http.server](https://docs.python.org/3/library/http.server.html) module to
@@ -46,7 +46,7 @@ create a local test HTTP server to view the built documentation. **Note:**
 http.server is only designed for test purposes, not for production use.
 
 ```bash
-cd docbuild/html
+cd docs-build/doc/docbuild/html
 python3 -m http.server 8888
 Serving HTTP on 0.0.0.0 port 8888 (http://0.0.0.0:8888/) ...
 ```

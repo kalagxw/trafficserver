@@ -33,32 +33,32 @@ using std::string;
  */
 struct atscppapi::RequestState : noncopyable {
   TSMBuffer hdr_buf_ = nullptr;
-  TSMLoc hdr_loc_    = nullptr;
-  TSMLoc url_loc_    = nullptr;
-  Url url_;
-  Headers headers_;
+  TSMLoc    hdr_loc_ = nullptr;
+  TSMLoc    url_loc_ = nullptr;
+  Url       url_;
+  Headers   headers_;
   /* method and version are stored here for the case of an unbound request */
-  HttpMethod method_   = HTTP_METHOD_UNKNOWN;
-  HttpVersion version_ = HTTP_VERSION_UNKNOWN;
-  bool destroy_buf_    = false;
-  RequestState()       = default;
+  HttpMethod  method_      = HTTP_METHOD_UNKNOWN;
+  HttpVersion version_     = HTTP_VERSION_UNKNOWN;
+  bool        destroy_buf_ = false;
+  RequestState()           = default;
 };
 
 Request::Request()
 {
-  state_ = new RequestState();
+  state_ = std::make_unique<RequestState>();
 }
 
 Request::Request(void *hdr_buf, void *hdr_loc)
 {
-  state_ = new RequestState();
+  state_ = std::make_unique<RequestState>();
   init(hdr_buf, hdr_loc);
   LOG_DEBUG("Initialized request object %p with hdr_buf=%p and hdr_loc=%p", this, hdr_buf, hdr_loc);
 }
 
-Request::Request(const string &url_str, HttpMethod method, HttpVersion version)
+Request::Request(const std::string &url_str, HttpMethod method, HttpVersion version)
 {
-  state_               = new RequestState();
+  state_               = std::make_unique<RequestState>();
   state_->method_      = method;
   state_->version_     = version;
   state_->destroy_buf_ = true;
@@ -111,7 +111,7 @@ HttpMethod
 Request::getMethod() const
 {
   if (state_->hdr_buf_ && state_->hdr_loc_) {
-    int method_len;
+    int         method_len;
     const char *method_str = TSHttpHdrMethodGet(state_->hdr_buf_, state_->hdr_loc_, &method_len);
     if (method_str && method_len) {
       if (method_str == TS_HTTP_METHOD_GET) {
@@ -198,5 +198,4 @@ Request::~Request()
       TSMBufferDestroy(state_->hdr_buf_);
     }
   }
-  delete state_;
 }

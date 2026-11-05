@@ -31,24 +31,27 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <ts/ts.h>
+#include <tsutil/StringCompare.h>
 #include <cstring>
 #include <cstdlib>
 
-static char *redirect_url_header   = nullptr;
-static int redirect_url_header_len = 0;
-static int return_code             = TS_HTTP_STATUS_NONE;
+static DbgCtl dbg_ctl{"[custom_redirect]"};
+
+static char *redirect_url_header     = nullptr;
+static int   redirect_url_header_len = 0;
+static int   return_code             = TS_HTTP_STATUS_NONE;
 
 static void
 handle_response(TSHttpTxn txnp, TSCont /* contp ATS_UNUSED */)
 {
-  TSMBuffer resp_bufp;
-  TSMLoc resp_loc;
-  TSMBuffer req_bufp;
-  TSMLoc req_loc;
-  TSMLoc redirect_url_loc;
+  TSMBuffer    resp_bufp;
+  TSMLoc       resp_loc;
+  TSMBuffer    req_bufp;
+  TSMLoc       req_loc;
+  TSMLoc       redirect_url_loc;
   TSHttpStatus status;
-  const char *redirect_url_str;
-  int redirect_url_length;
+  const char  *redirect_url_str;
+  int          redirect_url_length;
 
   if (TSHttpTxnServerRespGet(txnp, &resp_bufp, &resp_loc) != TS_SUCCESS) {
     TSError("[custom_redirect] Couldn't retrieve server response header");
@@ -59,10 +62,10 @@ handle_response(TSHttpTxn txnp, TSCont /* contp ATS_UNUSED */)
       if (TSHttpTxnClientReqGet(txnp, &req_bufp, &req_loc) != TS_SUCCESS) {
         TSError("[custom_redirect] Couldn't retrieve server response header");
       } else {
-        int method_len;
+        int         method_len;
         const char *method = TSHttpHdrMethodGet(req_bufp, req_loc, &method_len);
-        if ((return_code == TS_HTTP_STATUS_NONE || return_code == status) &&
-            ((strncasecmp(method, TS_HTTP_METHOD_GET, TS_HTTP_LEN_GET) == 0))) {
+        if ((return_code == TS_HTTP_STATUS_NONE || return_code == status) && method != nullptr &&
+            ts::iequals(std::string_view{method, static_cast<std::string_view::size_type>(method_len)}, TS_HTTP_METHOD_GET)) {
           redirect_url_loc = TSMimeHdrFieldFind(resp_bufp, resp_loc, redirect_url_header, redirect_url_header_len);
 
           if (redirect_url_loc) {
@@ -93,13 +96,13 @@ plugin_main_handler(TSCont contp, TSEvent event, void *edata)
   switch (event) {
   case TS_EVENT_HTTP_READ_RESPONSE_HDR: {
     TSHttpTxn txnp = static_cast<TSHttpTxn>(edata);
-    TSDebug("[custom_redirect1]", "MAIN_HANDLER::TS_HTTP_READ_RESPONSE_HDR_HOOK");
+    Dbg(dbg_ctl, "MAIN_HANDLER::TS_HTTP_READ_RESPONSE_HDR_HOOK");
     handle_response(txnp, contp);
     break;
   }
 
   default: {
-    TSDebug("[custom_redirect]", "default event");
+    Dbg(dbg_ctl, "default event");
     break;
   }
   }

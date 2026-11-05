@@ -32,17 +32,19 @@
 #include <openssl/ssl.h>
 
 #define PLUGIN_NAME "ssl_sni_allowlist"
-#define PCP "[" PLUGIN_NAME "] "
+#define PCP         "[" PLUGIN_NAME "] "
 
 namespace
 {
+DbgCtl dbg_ctl{PLUGIN_NAME};
+
 int
 CB_servername_allowlist(TSCont /* contp */, TSEvent /* event */, void *edata)
 {
-  TSVConn ssl_vc         = reinterpret_cast<TSVConn>(edata);
-  TSSslConnection sslobj = TSVConnSslConnectionGet(ssl_vc);
-  SSL *ssl               = reinterpret_cast<SSL *>(sslobj);
-  const char *servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+  TSVConn         ssl_vc     = reinterpret_cast<TSVConn>(edata);
+  TSSslConnection sslobj     = TSVConnSslConnectionGet(ssl_vc);
+  SSL            *ssl        = reinterpret_cast<SSL *>(sslobj);
+  const char     *servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
 
   bool do_blind_tunnel = true;
   if (servername != nullptr) {
@@ -58,7 +60,7 @@ CB_servername_allowlist(TSCont /* contp */, TSEvent /* event */, void *edata)
     }
   }
   if (do_blind_tunnel) {
-    TSDebug(PLUGIN_NAME, "SNI callback: do blind tunnel for %s", servername);
+    Dbg(dbg_ctl, "SNI callback: do blind tunnel for %s", servername);
     TSVConnTunnel(ssl_vc);
     return TS_SUCCESS; // Don't re-enable so we interrupt processing
   }
@@ -70,11 +72,11 @@ CB_servername_allowlist(TSCont /* contp */, TSEvent /* event */, void *edata)
 
 // Called by ATS as our initialization point
 void
-TSPluginInit(int argc, const char *argv[])
+TSPluginInit(int /* argc ATS_UNUSED */, const char ** /* argv ATS_UNUSED */)
 {
-  bool success = false;
+  bool                     success = false;
   TSPluginRegistrationInfo info;
-  TSCont cb_sni = nullptr; // sni callback continuation
+  TSCont                   cb_sni = nullptr; // sni callback continuation
 
   info.plugin_name   = PLUGIN_NAME;
   info.vendor_name   = "Apache Software Foundation";
@@ -94,7 +96,7 @@ TSPluginInit(int argc, const char *argv[])
   if (!success) {
     TSError(PCP "not initialized");
   }
-  TSDebug(PLUGIN_NAME, "Plugin %s", success ? "online" : "offline");
+  Dbg(dbg_ctl, "Plugin %s", success ? "online" : "offline");
 
   return;
 }

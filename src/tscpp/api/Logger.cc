@@ -32,8 +32,10 @@
 #include "tscpp/api/noncopyable.h"
 #include "logging_internal.h"
 
-using std::vector;
 using std::string;
+using std::vector;
+
+DbgCtl atscppapi::dbg_ctl{"atscppapi"};
 
 using atscppapi::Logger;
 
@@ -41,14 +43,14 @@ using atscppapi::Logger;
  * @private
  */
 struct atscppapi::LoggerState : noncopyable {
-  std::string filename_;
-  bool add_timestamp_           = false;
-  bool rename_file_             = false;
-  Logger::LogLevel level_       = Logger::LOG_LEVEL_NO_LOG;
-  bool rolling_enabled_         = false;
-  int rolling_interval_seconds_ = -1;
-  TSTextLogObject text_log_obj_ = nullptr;
-  bool initialized_             = false;
+  std::string      filename_;
+  bool             add_timestamp_            = false;
+  bool             rename_file_              = false;
+  Logger::LogLevel level_                    = Logger::LOG_LEVEL_NO_LOG;
+  bool             rolling_enabled_          = false;
+  int              rolling_interval_seconds_ = -1;
+  TSTextLogObject  text_log_obj_             = nullptr;
+  bool             initialized_              = false;
 
   LoggerState()
 
@@ -61,7 +63,7 @@ struct atscppapi::LoggerState : noncopyable {
 namespace
 {
 // Since the TSTextLog API doesn't support override the log file sizes (I will add this to TS api at some point)
-// we will use the roll size specified by default in records.config.
+// we will use the roll size specified by default in records.yaml.
 const int ROLL_ON_TIME = 1; // See RollingEnabledValues in LogConfig.h
 } // namespace
 
@@ -70,7 +72,7 @@ const int ROLL_ON_TIME = 1; // See RollingEnabledValues in LogConfig.h
  */
 Logger::Logger()
 {
-  state_ = new LoggerState();
+  state_ = std::make_unique<LoggerState>();
 }
 
 Logger::~Logger()
@@ -78,8 +80,6 @@ Logger::~Logger()
   if (state_->initialized_ && state_->text_log_obj_) {
     TSTextLogObjectDestroy(state_->text_log_obj_);
   }
-
-  delete state_;
 }
 
 /*
@@ -202,8 +202,8 @@ const int DEFAULT_BUFFER_SIZE_FOR_VARARGS = 8 * 1024;
 // We use a macro here because varargs would be a pain to forward via a helper
 // function
 #define TS_TEXT_LOG_OBJECT_WRITE(level)                                                                               \
-  char buffer[DEFAULT_BUFFER_SIZE_FOR_VARARGS];                                                                       \
-  int n;                                                                                                              \
+  char    buffer[DEFAULT_BUFFER_SIZE_FOR_VARARGS];                                                                    \
+  int     n;                                                                                                          \
   va_list ap;                                                                                                         \
   while (true) {                                                                                                      \
     va_start(ap, fmt);                                                                                                \

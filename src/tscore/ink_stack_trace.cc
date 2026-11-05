@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -74,8 +74,8 @@ ink_backtrace(const int n)
   }
 
   const int m = n + 1;
-  void *callstack[m];
-  int frames = backtrace(callstack, m);
+  void     *callstack[m];
+  int       frames = backtrace(callstack, m);
 
   const void *symbol = nullptr;
   if (frames == m && callstack[n] != nullptr) {
@@ -91,8 +91,9 @@ void
 ink_stack_trace_dump()
 {
   const char msg[] = "ink_stack_trace_dump not implemented on this operating system\n";
-  if (write(STDERR_FILENO, msg, sizeof(msg) - 1) == -1)
+  if (write(STDERR_FILENO, msg, sizeof(msg) - 1) == -1) {
     return;
+  }
 }
 
 const void *

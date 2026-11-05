@@ -31,9 +31,11 @@
 #include <cinttypes>
 #include <string_view>
 #include <array>
+#include <sys/un.h>
 
 #include "ts/ts.h"
 #include "ts/remap.h"
+#include "ts/remap_version.h"
 #include "headers.h"
 #include "rules.h"
 #include "configs.h"
@@ -49,7 +51,8 @@ static const std::array<const std::string_view, 6> FILTER_HEADERS{
    {TS_MIME_FIELD_IF_MODIFIED_SINCE, static_cast<size_t>(TS_MIME_LEN_IF_MODIFIED_SINCE)},
    {TS_MIME_FIELD_IF_NONE_MATCH, static_cast<size_t>(TS_MIME_LEN_IF_NONE_MATCH)},
    {TS_MIME_FIELD_IF_RANGE, static_cast<size_t>(TS_MIME_LEN_IF_RANGE)},
-   {TS_MIME_FIELD_IF_UNMODIFIED_SINCE, static_cast<size_t>(TS_MIME_LEN_IF_UNMODIFIED_SINCE)}}};
+   {TS_MIME_FIELD_IF_UNMODIFIED_SINCE, static_cast<size_t>(TS_MIME_LEN_IF_UNMODIFIED_SINCE)}}
+};
 
 ///////////////////////////////////////////////////////////////////////////
 // Hold the global background fetch state. This is currently shared across all
@@ -60,8 +63,8 @@ using OutstandingRequests = std::unordered_map<std::string, bool>;
 class BgFetchState
 {
 public:
-  BgFetchState()                     = default;
-  BgFetchState(BgFetchState const &) = delete;
+  BgFetchState()                       = default;
+  BgFetchState(BgFetchState const &)   = delete;
   void operator=(BgFetchState const &) = delete;
 
   static BgFetchState &
@@ -77,7 +80,7 @@ public:
   createLog(const std::string &log_name)
   {
     if (!_log) {
-      TSDebug(PLUGIN_NAME, "Creating log name %s", log_name.c_str());
+      Dbg(Bg_dbg_ctl, "Creating log name %s", log_name.c_str());
       TSAssert(TS_SUCCESS == TSTextLogObjectCreate(log_name.c_str(), TS_LOG_MODE_ADD_TIMESTAMP, &_log));
     } else {
       TSError("[%s] A log file was already create, ignoring creation of %s", PLUGIN_NAME, log_name.c_str());
@@ -104,7 +107,7 @@ public:
     }
     TSMutexUnlock(_lock);
 
-    TSDebug(PLUGIN_NAME, "BgFetchState.acquire(): ret = %d, url = %s", ret, url.c_str());
+    Dbg(Bg_dbg_ctl, "BgFetchState.acquire(): ret = %d, url = %s", ret, url.c_str());
 
     return ret;
   }
@@ -114,22 +117,21 @@ public:
   {
     bool ret;
 
-    TSMutexLock(_lock);
+    TSMutexLockGuard lock(_lock);
     if (_urls.end() == _urls.find(url)) {
       ret = false;
     } else {
       _urls.erase(url);
       ret = true;
     }
-    TSMutexUnlock(_lock);
 
     return ret;
   }
 
 private:
   OutstandingRequests _urls;
-  TSTextLogObject _log = nullptr;
-  TSMutex _lock        = TSMutexCreate();
+  TSTextLogObject     _log  = nullptr;
+  TSMutex             _lock = TSMutexCreate();
 };
 
 //////////////////////////////////////////////////////////////////////////////
@@ -192,25 +194,25 @@ struct BgFetchData {
   void schedule();
   void log(TSEvent event) const;
 
-  TSMBuffer mbuf = TSMBufferCreate();
-  TSMLoc hdr_loc = TS_NULL_MLOC;
-  TSMLoc url_loc = TS_NULL_MLOC;
+  TSMBuffer mbuf    = TSMBufferCreate();
+  TSMLoc    hdr_loc = TS_NULL_MLOC;
+  TSMLoc    url_loc = TS_NULL_MLOC;
 
   struct sockaddr_storage client_ip;
 
   // This is for the actual background fetch / NetVC
-  TSVConn vc                          = nullptr;
-  TSIOBuffer req_io_buf               = nullptr;
-  TSIOBuffer resp_io_buf              = nullptr;
+  TSVConn          vc                 = nullptr;
+  TSIOBuffer       req_io_buf         = nullptr;
+  TSIOBuffer       resp_io_buf        = nullptr;
   TSIOBufferReader req_io_buf_reader  = nullptr;
   TSIOBufferReader resp_io_buf_reader = nullptr;
-  TSVIO r_vio                         = nullptr;
-  TSVIO w_vio                         = nullptr;
+  TSVIO            r_vio              = nullptr;
+  TSVIO            w_vio              = nullptr;
 
 private:
   std::string _url;
-  int64_t _bytes = 0;
-  TSCont _cont   = nullptr;
+  int64_t     _bytes = 0;
+  TSCont      _cont  = nullptr;
 };
 
 // This sets up the data and continuation properly, this is done outside
@@ -225,8 +227,8 @@ private:
 bool
 BgFetchData::initialize(TSMBuffer request, TSMLoc req_hdr, TSHttpTxn txnp)
 {
-  struct sockaddr const *ip = TSHttpTxnClientAddrGet(txnp);
-  bool ret                  = false;
+  struct sockaddr const *ip  = TSHttpTxnClientAddrGet(txnp);
+  bool                   ret = false;
 
   TSAssert(TS_NULL_MLOC == hdr_loc);
   TSAssert(TS_NULL_MLOC == url_loc);
@@ -236,8 +238,11 @@ BgFetchData::initialize(TSMBuffer request, TSMLoc req_hdr, TSHttpTxn txnp)
       memcpy(&client_ip, ip, sizeof(sockaddr_in));
     } else if (ip->sa_family == AF_INET6) {
       memcpy(&client_ip, ip, sizeof(sockaddr_in6));
+    } else if (ip->sa_family == AF_UNIX) {
+      memcpy(&client_ip, ip, sizeof(sockaddr_un));
     } else {
       TSError("[%s] Unknown address family %d", PLUGIN_NAME, ip->sa_family);
+      return false;
     }
   } else {
     TSError("[%s] Failed to get client host info", PLUGIN_NAME);
@@ -252,8 +257,8 @@ BgFetchData::initialize(TSMBuffer request, TSMLoc req_hdr, TSHttpTxn txnp)
     if (TS_SUCCESS == TSHttpTxnPristineUrlGet(txnp, &request, &p_url)) {
       if (TS_SUCCESS == TSUrlClone(mbuf, request, p_url, &url_loc)) {
         TSMLoc c_url = TS_NULL_MLOC;
-        int len;
-        char *url = nullptr;
+        int    len;
+        char  *url = nullptr;
 
         // Get the cache key URL (for now), since this has better lookup behavior when using
         // e.g. the cachekey plugin.
@@ -261,7 +266,7 @@ BgFetchData::initialize(TSMBuffer request, TSMLoc req_hdr, TSHttpTxn txnp)
           if (TS_SUCCESS == TSHttpTxnCacheLookupUrlGet(txnp, request, c_url)) {
             url = TSUrlStringGet(request, c_url, &len);
             TSHandleMLocRelease(request, TS_NULL_MLOC, c_url);
-            TSDebug(PLUGIN_NAME, "Cache URL is %.*s", len, url);
+            Dbg(Bg_dbg_ctl, "Cache URL is %.*s", len, url);
           }
         }
 
@@ -274,13 +279,13 @@ BgFetchData::initialize(TSMBuffer request, TSMLoc req_hdr, TSHttpTxn txnp)
             const char *hostp = TSUrlHostGet(mbuf, url_loc, &len);
 
             if (set_header(mbuf, hdr_loc, TS_MIME_FIELD_HOST, TS_MIME_LEN_HOST, hostp, len)) {
-              TSDebug(PLUGIN_NAME, "Set header Host: %.*s", len, hostp);
+              Dbg(Bg_dbg_ctl, "Set header Host: %.*s", len, hostp);
             }
 
             // Next, remove the Range headers and IMS (conditional) headers from the request
             for (auto const &header : FILTER_HEADERS) {
               if (remove_header(mbuf, hdr_loc, header.data(), header.size()) > 0) {
-                TSDebug(PLUGIN_NAME, "Removed the %s header from request", header.data());
+                Dbg(Bg_dbg_ctl, "Removed the %s header from request", header.data());
               }
             }
 
@@ -325,7 +330,7 @@ BgFetchData::log(TSEvent event) const
 {
   TSTextLogObject log = BgFetchState::getInstance().getLog();
 
-  if (log || TSIsDebugTagSet(PLUGIN_NAME)) {
+  if (log || Bg_dbg_ctl.on()) {
     const char *status;
 
     switch (event) {
@@ -347,7 +352,7 @@ BgFetchData::log(TSEvent event) const
     }
 
     // ToDo: Also deal with per-remap tagging
-    TSDebug(PLUGIN_NAME, "%s %" PRId64 " %s %s", "-", _bytes, status, _url.c_str());
+    Dbg(Bg_dbg_ctl, "%s %" PRId64 " %s %s", "-", _bytes, status, _url.c_str());
     if (log) {
       TSTextLogObjectWrite(log, "%s %" PRId64 " %s %s", "-", _bytes, status, _url.c_str());
     }
@@ -362,31 +367,31 @@ static int
 cont_bg_fetch(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
 {
   BgFetchData *data = static_cast<BgFetchData *>(TSContDataGet(contp));
-  int64_t avail;
+  int64_t      avail;
 
   switch (event) {
   case TS_EVENT_IMMEDIATE:
   case TS_EVENT_TIMEOUT:
     // Debug info for this particular bg fetch (put all debug in here please)
-    if (TSIsDebugTagSet(PLUGIN_NAME)) {
-      char buf[INET6_ADDRSTRLEN];
+    if (Bg_dbg_ctl.on()) {
+      char            buf[INET6_ADDRSTRLEN];
       const sockaddr *sockaddress = reinterpret_cast<const sockaddr *>(&data->client_ip);
 
       switch (sockaddress->sa_family) {
       case AF_INET:
         inet_ntop(AF_INET, &(((struct sockaddr_in *)sockaddress)->sin_addr), buf, INET_ADDRSTRLEN);
-        TSDebug(PLUGIN_NAME, "Client IPv4 = %s", buf);
+        Dbg(Bg_dbg_ctl, "Client IPv4 = %s", buf);
         break;
       case AF_INET6:
         inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)sockaddress)->sin6_addr), buf, INET6_ADDRSTRLEN);
-        TSDebug(PLUGIN_NAME, "Client IPv6 = %s", buf);
+        Dbg(Bg_dbg_ctl, "Client IPv6 = %s", buf);
         break;
       default:
         TSError("[%s] Unknown address family %d", PLUGIN_NAME, sockaddress->sa_family);
         break;
       }
-      TSDebug(PLUGIN_NAME, "Starting background fetch, replaying:");
-      dump_headers(data->mbuf, data->hdr_loc);
+      Dbg(Bg_dbg_ctl, "Starting background fetch, replaying:");
+      dump_headers(data->hdr_loc);
     }
 
     // Setup the NetVC for background fetch
@@ -394,7 +399,6 @@ cont_bg_fetch(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
     if ((data->vc = TSHttpConnectWithPluginId(reinterpret_cast<sockaddr *>(&data->client_ip), PLUGIN_NAME, 0)) != nullptr) {
       TSHttpHdrPrint(data->mbuf, data->hdr_loc, data->req_io_buf);
       // We never send a body with the request. ToDo: Do we ever need to support that ?
-      TSIOBufferWrite(data->req_io_buf, "\r\n", 2);
 
       data->r_vio = TSVConnRead(data->vc, contp, data->resp_io_buf, INT64_MAX);
       data->w_vio = TSVConnWrite(data->vc, contp, data->req_io_buf_reader, TSIOBufferReaderAvail(data->req_io_buf_reader));
@@ -407,7 +411,7 @@ cont_bg_fetch(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
   case TS_EVENT_VCONN_WRITE_COMPLETE:
     // TSVConnShutdown(data->vc, 0, 1);
     // TSVIOReenable(data->w_vio);
-    TSDebug(PLUGIN_NAME, "Write Complete");
+    Dbg(Bg_dbg_ctl, "Write Complete");
     break;
 
   case TS_EVENT_VCONN_READ_READY:
@@ -423,13 +427,13 @@ cont_bg_fetch(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
   case TS_EVENT_VCONN_INACTIVITY_TIMEOUT:
   case TS_EVENT_ERROR:
     if (event == TS_EVENT_VCONN_INACTIVITY_TIMEOUT) {
-      TSDebug(PLUGIN_NAME, "Encountered Inactivity Timeout");
+      Dbg(Bg_dbg_ctl, "Encountered Inactivity Timeout");
       TSVConnAbort(data->vc, TS_VC_CLOSE_ABORT);
     } else {
       TSVConnClose(data->vc);
     }
 
-    TSDebug(PLUGIN_NAME, "Closing down background transaction, event= %s(%d)", TSHttpEventNameLookup(event), event);
+    Dbg(Bg_dbg_ctl, "Closing down background transaction, event= %s(%d)", TSHttpEventNameLookup(event), event);
     avail = TSIOBufferReaderAvail(data->resp_io_buf_reader);
     data->addBytes(avail);
     TSIOBufferReaderConsume(data->resp_io_buf_reader, avail);
@@ -442,7 +446,7 @@ cont_bg_fetch(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
     break;
 
   default:
-    TSDebug(PLUGIN_NAME, "Unhandled event: %s (%d)", TSHttpEventNameLookup(event), event);
+    Dbg(Bg_dbg_ctl, "Unhandled event: %s (%d)", TSHttpEventNameLookup(event), event);
     break;
   }
 
@@ -460,7 +464,7 @@ cont_check_cacheable(TSCont contp, TSEvent /* event ATS_UNUSED */, void *edata)
   // ToDo: If we want to support per-remap configurations, we have to pass along the data here
   TSHttpTxn txnp = static_cast<TSHttpTxn>(edata);
   TSMBuffer response, request;
-  TSMLoc resp_hdr, req_hdr;
+  TSMLoc    resp_hdr, req_hdr;
 
   if (TS_SUCCESS == TSHttpTxnServerRespGet(txnp, &response, &resp_hdr)) {
     if (TS_SUCCESS == TSHttpTxnClientReqGet(txnp, &request, &req_hdr)) {
@@ -469,7 +473,7 @@ cont_check_cacheable(TSCont contp, TSEvent /* event ATS_UNUSED */, void *edata)
       bool cacheable = TSHttpTxnIsCacheable(txnp, nullptr, response);
       TSHttpHdrStatusSet(response, resp_hdr, TS_HTTP_STATUS_PARTIAL_CONTENT);
 
-      TSDebug(PLUGIN_NAME, "Testing: request / response is cacheable?");
+      Dbg(Bg_dbg_ctl, "Testing: request / response is cacheable?");
       if (cacheable) {
         BgFetchData *data = new BgFetchData();
 
@@ -509,7 +513,7 @@ static int
 cont_handle_response(TSCont contp, TSEvent event, void *edata)
 {
   // ToDo: If we want to support per-remap configurations, we have to pass along the data here
-  TSHttpTxn txnp        = static_cast<TSHttpTxn>(edata);
+  TSHttpTxn      txnp   = static_cast<TSHttpTxn>(edata);
   BgFetchConfig *config = static_cast<BgFetchConfig *>(TSContDataGet(contp));
 
   if (nullptr == config) {
@@ -520,7 +524,7 @@ cont_handle_response(TSCont contp, TSEvent event, void *edata)
     case TS_EVENT_HTTP_READ_RESPONSE_HDR:
       if (config->bgFetchAllowed(txnp)) {
         TSMBuffer response;
-        TSMLoc resp_hdr;
+        TSMLoc    resp_hdr;
 
         if (TS_SUCCESS == TSHttpTxnServerRespGet(txnp, &response, &resp_hdr)) {
           // ToDo: Check the MIME type first, to see if it's a type we care about.
@@ -528,7 +532,7 @@ cont_handle_response(TSCont contp, TSEvent event, void *edata)
 
           // Only deal with 206 and possibly 304 responses from Origin
           TSHttpStatus status = TSHttpHdrStatusGet(response, resp_hdr);
-          TSDebug(PLUGIN_NAME, "Testing: response status code: %d?", status);
+          Dbg(Bg_dbg_ctl, "Testing: response status code: %d?", status);
           if (TS_HTTP_STATUS_PARTIAL_CONTENT == status || (config->allow304() && TS_HTTP_STATUS_NOT_MODIFIED == status)) {
             // Everything looks good so far, add a TXN hook for SEND_RESPONSE_HDR
             TSCont localcontp = TSContCreate(cont_check_cacheable, nullptr);
@@ -542,7 +546,7 @@ cont_handle_response(TSCont contp, TSEvent event, void *edata)
       break;
     default:
       TSError("[%s] Unknown event for this plugin", PLUGIN_NAME);
-      TSDebug(PLUGIN_NAME, "unknown event for this plugin");
+      Dbg(Bg_dbg_ctl, "unknown event for this plugin");
       break;
     }
   }
@@ -577,11 +581,11 @@ TSPluginInit(int argc, const char *argv[])
     if (!gConfig->logFile().empty()) {
       BgFetchState::getInstance().createLog(gConfig->logFile());
     }
-    TSDebug(PLUGIN_NAME, "Initialized");
+    Dbg(Bg_dbg_ctl, "Initialized");
     TSHttpHookAdd(TS_HTTP_READ_RESPONSE_HDR_HOOK, cont);
   } else {
     // ToDo: Hmmm, no way to fail a global plugin here?
-    TSDebug(PLUGIN_NAME, "Failed to initialize as global plugin");
+    Dbg(Bg_dbg_ctl, "Failed to initialize as global plugin");
   }
 }
 
@@ -593,19 +597,8 @@ TSPluginInit(int argc, const char *argv[])
 TSReturnCode
 TSRemapInit(TSRemapInterface *api_info, char *errbuf, int errbuf_size)
 {
-  TSDebug(PLUGIN_NAME, "background fetch remap init");
-  if (!api_info) {
-    strncpy(errbuf, "[tsremap_init] - Invalid TSRemapInterface argument", errbuf_size - 1);
-    return TS_ERROR;
-  }
-
-  if (api_info->tsremap_version < TSREMAP_VERSION) {
-    snprintf(errbuf, errbuf_size, "[TSRemapInit] - Incorrect API version %ld.%ld", api_info->tsremap_version >> 16,
-             (api_info->tsremap_version & 0xffff));
-    return TS_ERROR;
-  }
-
-  TSDebug(PLUGIN_NAME, "background fetch remap is successfully initialized");
+  CHECK_REMAP_API_COMPATIBILITY(api_info, errbuf, errbuf_size);
+  Dbg(Bg_dbg_ctl, "background fetch remap is successfully initialized");
   return TS_SUCCESS;
 }
 
@@ -615,9 +608,9 @@ TSRemapInit(TSRemapInterface *api_info, char *errbuf, int errbuf_size)
 TSReturnCode
 TSRemapNewInstance(int argc, char *argv[], void **ih, char * /* errbuf */, int /* errbuf_size */)
 {
-  TSCont cont           = TSContCreate(cont_handle_response, nullptr);
-  BgFetchConfig *config = new BgFetchConfig(cont);
-  bool success          = true;
+  TSCont         cont    = TSContCreate(cont_handle_response, nullptr);
+  BgFetchConfig *config  = new BgFetchConfig(cont);
+  bool           success = true;
 
   // The first two arguments are the "from" and "to" URL string. We need to
   // skip them, but we also require that there be an option to masquerade as
@@ -627,7 +620,7 @@ TSRemapNewInstance(int argc, char *argv[], void **ih, char * /* errbuf */, int /
 
   // This is for backwards compatibility, ugly! ToDo: Remove for ATS v9.0.0 IMO.
   if (argc > 1 && *argv[1] != '-') {
-    TSDebug(PLUGIN_NAME, "config file %s", argv[1]);
+    Dbg(Bg_dbg_ctl, "config file %s", argv[1]);
     if (!config->readConfig(argv[1])) {
       success = false;
     }
@@ -671,7 +664,7 @@ TSRemapDoRemap(void *ih, TSHttpTxn txnp, TSRemapRequestInfo * /* rri */)
   }
 
   TSMBuffer bufp;
-  TSMLoc req_hdrs;
+  TSMLoc    req_hdrs;
 
   if (TS_SUCCESS == TSHttpTxnClientReqGet(txnp, &bufp, &req_hdrs)) {
     TSMLoc field_loc = TSMimeHdrFieldFind(bufp, req_hdrs, TS_MIME_FIELD_RANGE, TS_MIME_LEN_RANGE);
@@ -684,7 +677,7 @@ TSRemapDoRemap(void *ih, TSHttpTxn txnp, TSRemapRequestInfo * /* rri */)
       BgFetchConfig *config = static_cast<BgFetchConfig *>(ih);
 
       TSHttpTxnHookAdd(txnp, TS_HTTP_READ_RESPONSE_HDR_HOOK, config->getCont());
-      TSDebug(PLUGIN_NAME, "TSRemapDoRemap() added hook, request was Range / If-Range");
+      Dbg(Bg_dbg_ctl, "TSRemapDoRemap() added hook, request was Range / If-Range");
       TSHandleMLocRelease(bufp, req_hdrs, field_loc);
     }
     TSHandleMLocRelease(bufp, TS_NULL_MLOC, req_hdrs);

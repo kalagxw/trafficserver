@@ -2,7 +2,7 @@
 
   HKDF utility
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -23,23 +23,34 @@
 
 #pragma once
 
-#ifdef OPENSSL_IS_BORINGSSL
+#include "tscore/ink_config.h"
+
+#if __has_include(<openssl/digest.h>)
 #include <openssl/digest.h>
 #include <openssl/cipher.h>
 #else
 #include <openssl/evp.h>
 #endif
 
+#if HAVE_OSSL_PARAM_CONSTRUCT_END
+#include <openssl/core.h>
+#endif
+
 class HKDF
 {
 public:
-  HKDF(const EVP_MD *digest);
+  HKDF(const char *digest);
   ~HKDF();
   int extract(uint8_t *dst, size_t *dst_len, const uint8_t *salt, size_t salt_len, const uint8_t *ikm, size_t ikm_len);
   int expand(uint8_t *dst, size_t *dst_len, const uint8_t *prk, size_t prk_len, const uint8_t *info, size_t info_len,
              uint16_t length);
 
 protected:
-  const EVP_MD *_digest = nullptr;
-  EVP_PKEY_CTX *_pctx   = nullptr;
+#if HAVE_OSSL_PARAM_CONSTRUCT_END
+  EVP_KDF_CTX *_kctx = nullptr;
+  OSSL_PARAM   params[5];
+#else
+  EVP_PKEY_CTX *_pctx      = nullptr;
+  const EVP_MD *_digest_md = nullptr;
+#endif
 };

@@ -35,8 +35,13 @@
 #include <string>
 #include <map>
 
-#define PN "ssl_client_verify_test"
+#define PN  "ssl_client_verify_test"
 #define PCP "[" PN " Plugin] "
+
+namespace
+{
+DbgCtl dbg_ctl{PN};
+}
 
 std::map<std::string, int> good_names;
 
@@ -53,7 +58,7 @@ check_names(X509 *cert)
   bool retval = false;
 
   // Check the common name
-  X509_NAME *subject = X509_get_subject_name(cert);
+  auto *subject = X509_get_subject_name(cert);
   if (subject) {
     int pos = -1;
     for (; !retval;) {
@@ -62,14 +67,10 @@ check_names(X509 *cert)
         break;
       }
 
-      X509_NAME_ENTRY *e = X509_NAME_get_entry(subject, pos);
-      ASN1_STRING *cn    = X509_NAME_ENTRY_get_data(e);
-#if OPENSSL_VERSION_NUMBER >= 0x010100000
+      auto *e         = X509_NAME_get_entry(subject, pos);
+      auto *cn        = X509_NAME_ENTRY_get_data(e);
       char *subj_name = strndup(reinterpret_cast<const char *>(ASN1_STRING_get0_data(cn)), ASN1_STRING_length(cn));
-#else
-      char *subj_name = strndup(reinterpret_cast<const char *>(ASN1_STRING_data(cn)), ASN1_STRING_length(cn));
-#endif
-      retval = check_name(subj_name);
+      retval          = check_name(subj_name);
       free(subj_name);
     }
   }
@@ -84,11 +85,7 @@ check_names(X509 *cert)
         name = sk_GENERAL_NAME_value(names, i);
         if (name->type == GEN_DNS) {
           char *dns =
-#if OPENSSL_VERSION_NUMBER >= 0x010100000
             strndup(reinterpret_cast<const char *>(ASN1_STRING_get0_data(name->d.dNSName)), ASN1_STRING_length(name->d.dNSName));
-#else
-            strndup(reinterpret_cast<const char *>(ASN1_STRING_data(name->d.dNSName)), ASN1_STRING_length(name->d.dNSName));
-#endif
           retval = check_name(dns);
           free(dns);
         }
@@ -107,8 +104,8 @@ CB_client_verify(TSCont cont, TSEvent event, void *edata)
   int count = reinterpret_cast<intptr_t>(TSContDataGet(cont));
 
   // Is this a good name or not?
-  TSEvent reenable_event = TS_EVENT_CONTINUE;
-  X509_STORE_CTX *ctx    = reinterpret_cast<X509_STORE_CTX *>(TSVConnSslVerifyCTXGet(ssl_vc));
+  TSEvent         reenable_event = TS_EVENT_CONTINUE;
+  X509_STORE_CTX *ctx            = reinterpret_cast<X509_STORE_CTX *>(TSVConnSslVerifyCTXGet(ssl_vc));
   if (ctx) {
     STACK_OF(X509) *chain = X509_STORE_CTX_get1_chain(ctx);
     // X509 *cert = X509_STORE_CTX_get_current_cert(ctx);
@@ -121,12 +118,13 @@ CB_client_verify(TSCont cont, TSEvent event, void *edata)
     if (!retval) {
       reenable_event = TS_EVENT_ERROR;
     }
+    sk_X509_pop_free(chain, X509_free);
   } else {
     reenable_event = TS_EVENT_ERROR;
   }
 
-  TSDebug(PN, "Client verify callback %d %p - event is %s %s", count, ssl_vc, event == TS_EVENT_SSL_VERIFY_CLIENT ? "good" : "bad",
-          reenable_event == TS_EVENT_ERROR ? "error HS" : "good HS");
+  Dbg(dbg_ctl, "Client verify callback %d %p - event is %s %s", count, ssl_vc, event == TS_EVENT_SSL_VERIFY_CLIENT ? "good" : "bad",
+      reenable_event == TS_EVENT_ERROR ? "error HS" : "good HS");
 
   // All done, reactivate things
   TSVConnReenableEx(ssl_vc, reenable_event);
@@ -136,7 +134,7 @@ CB_client_verify(TSCont cont, TSEvent event, void *edata)
 void
 parse_callbacks(int argc, const char *argv[], int &count)
 {
-  int i = 0;
+  int         i = 0;
   const char *ptr;
   for (i = 0; i < argc; i++) {
     if (argv[i][0] == '-') {
@@ -162,9 +160,9 @@ void
 setup_callbacks(int count)
 {
   TSCont cb = nullptr;
-  int i;
+  int    i;
 
-  TSDebug(PN, "Setup callbacks count=%d", count);
+  Dbg(dbg_ctl, "Setup callbacks count=%d", count);
   for (i = 0; i < count; i++) {
     cb = TSContCreate(&CB_client_verify, TSMutexCreate());
     TSContDataSet(cb, (void *)static_cast<intptr_t>(i));

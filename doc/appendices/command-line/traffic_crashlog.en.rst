@@ -37,6 +37,8 @@ for users to run directly.
 
 When :ref:`traffic_server` starts, it will launch a :program:`traffic_crashlog`
 process and keep it stopped, activating it only if a crash occurs.
+The crash report includes backtraces for all threads, with the crashing thread
+listed first.
 
 Options
 =======
@@ -48,8 +50,8 @@ Options
     This option specifies the host triple for the process that
     :program:`traffic_crashlog` should examine. If a supported host
     triple is specified, :program:`traffic_crashlog` expects to
-    receive a ``siginfo_t`` structure on it's standard input,
-    followed by a ``ucontext_t``.
+    receive the crashing thread ID, then a ``siginfo_t`` structure on
+    its standard input, followed by a ``ucontext_t``.
 
 .. option:: --target PID
 
@@ -74,12 +76,17 @@ Options
     immediately after it is launched. :program:`traffic_server`
     will allow it to continue only when a crash occurs.
 
+.. option:: --exec
+
+    This option will execute the given program argument after the crashlogging
+    occurs, but before control is returned to traffic_server.  That is,
+    it will run the program after traffic_server crashes, but before the process
+    is cleaned up.  The program will be passed as single argument which is the
+    pid of the target traffic_server process. Output from the program will be
+    saved to the crashlog file.
+
 Caveats
 =======
-
-:program:`traffic_crashlog` makes use of various Traffic Server management
-APIs. If :ref:`traffic_manager` is not available, the crash log will be
-incomplete.
 
 :program:`traffic_crashlog` may generate a crash log containing information you
 would rather not share outside your organization. Please examine the crash log
@@ -88,6 +95,5 @@ carefully before posting it in a public forum.
 See also
 ========
 
-:manpage:`records.config(5)`,
-:manpage:`traffic_manager(8)`,
+:manpage:`records.yaml(5)`,
 :manpage:`traffic_server(8)`

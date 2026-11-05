@@ -28,7 +28,7 @@
 
 #include <ts/ts.h>
 
-#define MP4_MAX_TRAK_NUM 6
+#define MP4_MAX_TRAK_NUM    6
 #define MP4_MAX_BUFFER_SIZE (10 * 1024 * 1024)
 #define MP4_MIN_BUFFER_SIZE 1024
 
@@ -64,7 +64,7 @@
   ((u_char *)(p))[6] = (u_char)((n) >> 8);            \
   ((u_char *)(p))[7] = (u_char)(n)
 
-typedef enum {
+enum TSMp4AtomID {
   MP4_TRAK_ATOM = 0,
   MP4_TKHD_ATOM,
   MP4_MDIA_ATOM,
@@ -92,20 +92,20 @@ typedef enum {
   MP4_CO64_ATOM,
   MP4_CO64_DATA,
   MP4_LAST_ATOM = MP4_CO64_DATA
-} TSMp4AtomID;
+};
 
-typedef struct {
+struct mp4_atom_header {
   u_char size[4];
   u_char name[4];
-} mp4_atom_header;
+};
 
-typedef struct {
+struct mp4_atom_header64 {
   u_char size[4];
   u_char name[4];
   u_char size64[8];
-} mp4_atom_header64;
+};
 
-typedef struct {
+struct mp4_mvhd_atom {
   u_char size[4];
   u_char name[4];
   u_char version[1];
@@ -125,9 +125,9 @@ typedef struct {
   u_char selection_duration[4];
   u_char current_time[4];
   u_char next_track_id[4];
-} mp4_mvhd_atom;
+};
 
-typedef struct {
+struct mp4_mvhd64_atom {
   u_char size[4];
   u_char name[4];
   u_char version[1];
@@ -147,9 +147,9 @@ typedef struct {
   u_char selection_duration[4];
   u_char current_time[4];
   u_char next_track_id[4];
-} mp4_mvhd64_atom;
+};
 
-typedef struct {
+struct mp4_tkhd_atom {
   u_char size[4];
   u_char name[4];
   u_char version[1];
@@ -167,9 +167,9 @@ typedef struct {
   u_char matrix[36];
   u_char width[4];
   u_char height[4];
-} mp4_tkhd_atom;
+};
 
-typedef struct {
+struct mp4_tkhd64_atom {
   u_char size[4];
   u_char name[4];
   u_char version[1];
@@ -187,9 +187,9 @@ typedef struct {
   u_char matrix[36];
   u_char width[4];
   u_char height[4];
-} mp4_tkhd64_atom;
+};
 
-typedef struct {
+struct mp4_mdhd_atom {
   u_char size[4];
   u_char name[4];
   u_char version[1];
@@ -200,9 +200,9 @@ typedef struct {
   u_char duration[4];
   u_char language[2];
   u_char quality[2];
-} mp4_mdhd_atom;
+};
 
-typedef struct {
+struct mp4_mdhd64_atom {
   u_char size[4];
   u_char name[4];
   u_char version[1];
@@ -213,9 +213,9 @@ typedef struct {
   u_char duration[8];
   u_char language[2];
   u_char quality[2];
-} mp4_mdhd64_atom;
+};
 
-typedef struct {
+struct mp4_stsd_atom {
   u_char size[4];
   u_char name[4];
   u_char version[1];
@@ -224,88 +224,88 @@ typedef struct {
 
   u_char media_size[4];
   u_char media_name[4];
-} mp4_stsd_atom;
+};
 
-typedef struct {
+struct mp4_stts_atom {
   u_char size[4];
   u_char name[4];
   u_char version[1];
   u_char flags[3];
   u_char entries[4];
-} mp4_stts_atom;
+};
 
-typedef struct {
+struct mp4_stts_entry {
   u_char count[4];
   u_char duration[4];
-} mp4_stts_entry;
+};
 
-typedef struct {
+struct mp4_stss_atom {
   u_char size[4];
   u_char name[4];
   u_char version[1];
   u_char flags[3];
   u_char entries[4];
-} mp4_stss_atom;
+};
 
-typedef struct {
+struct mp4_ctts_atom {
   u_char size[4];
   u_char name[4];
   u_char version[1];
   u_char flags[3];
   u_char entries[4];
-} mp4_ctts_atom;
+};
 
-typedef struct {
+struct mp4_ctts_entry {
   u_char count[4];
   u_char offset[4];
-} mp4_ctts_entry;
+};
 
-typedef struct {
+struct mp4_stsc_atom {
   u_char size[4];
   u_char name[4];
   u_char version[1];
   u_char flags[3];
   u_char entries[4];
-} mp4_stsc_atom;
+};
 
-typedef struct {
+struct mp4_stsc_entry {
   u_char chunk[4];
   u_char samples[4];
   u_char id[4];
-} mp4_stsc_entry;
+};
 
-typedef struct {
+struct mp4_stsz_atom {
   u_char size[4];
   u_char name[4];
   u_char version[1];
   u_char flags[3];
   u_char uniform_size[4];
   u_char entries[4];
-} mp4_stsz_atom;
+};
 
-typedef struct {
+struct mp4_stco_atom {
   u_char size[4];
   u_char name[4];
   u_char version[1];
   u_char flags[3];
   u_char entries[4];
-} mp4_stco_atom;
+};
 
-typedef struct {
+struct mp4_co64_atom {
   u_char size[4];
   u_char name[4];
   u_char version[1];
   u_char flags[3];
   u_char entries[4];
-} mp4_co64_atom;
+};
 
 class Mp4Meta;
-typedef int (Mp4Meta::*Mp4AtomHandler)(int64_t atom_header_size, int64_t atom_data_size);
+using Mp4AtomHandler = int (Mp4Meta::*)(int64_t, int64_t);
 
-typedef struct {
-  const char *name;
+struct mp4_atom_handler {
+  const char    *name;
   Mp4AtomHandler handler;
-} mp4_atom_handler;
+};
 
 class BufferHandle
 {
@@ -326,7 +326,7 @@ public:
   }
 
 public:
-  TSIOBuffer buffer       = nullptr;
+  TSIOBuffer       buffer = nullptr;
   TSIOBufferReader reader = nullptr;
 };
 
@@ -339,7 +339,7 @@ public:
 
 public:
   uint32_t timescale = 0;
-  int64_t duration   = 0;
+  int64_t  duration  = 0;
 
   uint32_t time_to_sample_entries     = 0; // stsc
   uint32_t sample_to_chunk_entries    = 0; // stsc
@@ -352,7 +352,7 @@ public:
   uint32_t start_chunk        = 0;
   uint32_t chunk_samples      = 0;
   uint64_t chunk_samples_size = 0;
-  off_t start_offset          = 0;
+  off_t    start_offset       = 0;
 
   size_t tkhd_size = 0;
   size_t mdhd_size = 0;
@@ -371,20 +371,13 @@ class Mp4Meta
 {
 public:
   Mp4Meta()
-
   {
-    memset(trak_vec, 0, sizeof(trak_vec));
     meta_buffer = TSIOBufferCreate();
     meta_reader = TSIOBufferReaderAlloc(meta_buffer);
   }
 
   ~Mp4Meta()
   {
-    uint32_t i;
-
-    for (i = 0; i < trak_num; i++)
-      delete trak_vec[i];
-
     if (meta_reader) {
       TSIOBufferReaderFree(meta_reader);
       meta_reader = nullptr;
@@ -398,9 +391,9 @@ public:
 
   int parse_meta(bool body_complete);
 
-  int post_process_meta();
+  int  post_process_meta();
   void mp4_meta_consume(int64_t size);
-  int mp4_atom_next(int64_t atom_size, bool wait = false);
+  int  mp4_atom_next(int64_t atom_size, bool wait = false);
 
   int mp4_read_atom(mp4_atom_handler *atom, int64_t size);
   int parse_root_atoms();
@@ -447,13 +440,13 @@ public:
   int mp4_update_trak_atom(Mp4Trak *trak);
 
   int64_t mp4_update_mdat_atom(int64_t start_offset);
-  int mp4_adjust_co64_atom(Mp4Trak *trak, off_t adjustment);
-  int mp4_adjust_stco_atom(Mp4Trak *trak, int32_t adjustment);
+  int     mp4_adjust_co64_atom(Mp4Trak *trak, off_t adjustment);
+  int     mp4_adjust_stco_atom(Mp4Trak *trak, int32_t adjustment);
 
   uint32_t mp4_find_key_sample(uint32_t start_sample, Mp4Trak *trak);
-  void mp4_update_mvhd_duration();
-  void mp4_update_tkhd_duration(Mp4Trak *trak);
-  void mp4_update_mdhd_duration(Mp4Trak *trak);
+  void     mp4_update_mvhd_duration();
+  void     mp4_update_tkhd_duration(Mp4Trak *trak);
+  void     mp4_update_mdhd_duration(Mp4Trak *trak);
 
 public:
   int64_t start          = 0; // requested start time, measured in milliseconds.
@@ -461,7 +454,7 @@ public:
   int64_t content_length = 0; // the size of the new mp4 file
   int64_t meta_atom_size = 0;
 
-  TSIOBuffer meta_buffer; // meta data to be parsed
+  TSIOBuffer       meta_buffer; // meta data to be parsed
   TSIOBufferReader meta_reader;
 
   int64_t meta_avail = 0;
@@ -476,18 +469,18 @@ public:
   BufferHandle mdat_data;
   BufferHandle out_handle;
 
-  Mp4Trak *trak_vec[MP4_MAX_TRAK_NUM];
+  std::array<std::unique_ptr<Mp4Trak>, MP4_MAX_TRAK_NUM> trak_vec;
 
   double rs   = 0;
   double rate = 0;
 
-  int64_t ftyp_size  = 0;
-  int64_t moov_size  = 0;
-  int64_t start_pos  = 0; // start position of the new mp4 file
+  int64_t  ftyp_size = 0;
+  int64_t  moov_size = 0;
+  int64_t  start_pos = 0; // start position of the new mp4 file
   uint32_t timescale = 0;
   uint32_t trak_num  = 0;
-  int64_t passed     = 0;
+  int64_t  passed    = 0;
 
   u_char mdat_atom_header[16];
-  bool meta_complete = false;
+  bool   meta_complete = false;
 };

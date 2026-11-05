@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -35,8 +35,8 @@ procfd_open(pid_t pid, const char *fname)
 static char *
 procfd_readlink(pid_t pid, const char *fname)
 {
-  char path[128];
-  ssize_t nbytes;
+  char           path[128];
+  ssize_t        nbytes;
   ats_scoped_str resolved(static_cast<char *>(ats_malloc(MAXPATHLEN + 1)));
 
   snprintf(path, sizeof(path), "/proc/%ld/%s", static_cast<long>(pid), fname);
@@ -55,7 +55,7 @@ static bool
 write_procfd_file(const char *filename, const char *label, FILE *fp, const crashlog_target &target)
 {
   ats_scoped_fd fd;
-  TextBuffer text(0);
+  TextBuffer    text(0);
   fd = procfd_open(target.pid, filename);
   if (fd != -1) {
     text.slurp(fd);
@@ -64,12 +64,6 @@ write_procfd_file(const char *filename, const char *label, FILE *fp, const crash
   }
 
   return !text.empty();
-}
-
-bool
-crashlog_write_regions(FILE *fp, const crashlog_target &target)
-{
-  return write_procfd_file("maps", "Memory Regions", fp, target);
 }
 
 bool
@@ -115,9 +109,9 @@ crashlog_write_exename(FILE *fp, const crashlog_target &target)
 bool
 crashlog_write_procname(FILE *fp, const crashlog_target &target)
 {
-  ats_scoped_fd fd;
+  ats_scoped_fd  fd;
   ats_scoped_str str;
-  TextBuffer text(0);
+  TextBuffer     text(0);
 
   fd = procfd_open(target.pid, "comm");
   if (fd != -1) {
@@ -139,77 +133,6 @@ crashlog_write_datime(FILE *fp, const crashlog_target &target)
   strftime(buf, sizeof(buf), "%a, %d %b %Y %T %z", &target.timestamp);
   fprintf(fp, LABELFMT "%s\n", "Date:", buf);
   return true;
-}
-
-bool
-crashlog_write_backtrace(FILE *fp, const crashlog_target &)
-{
-  TSString trace = nullptr;
-  TSMgmtError mgmterr;
-
-  // NOTE: sometimes we can't get a backtrace because the ptrace attach will fail with
-  // EPERM. I've seen this happen when a debugger is attached, which makes sense, but it
-  // can also happen without a debugger. Possibly in that case, there is a race with the
-  // kernel locking the process information?
-
-  if ((mgmterr = TSProxyBacktraceGet(0, &trace)) != TS_ERR_OKAY) {
-    char *msg = TSGetErrorMessage(mgmterr);
-    fprintf(fp, "Unable to retrieve backtrace: %s\n", msg);
-    TSfree(msg);
-    return false;
-  }
-
-  fprintf(fp, "%s", trace);
-  TSfree(trace);
-  return true;
-}
-
-bool
-crashlog_write_records(FILE *fp, const crashlog_target &)
-{
-  TSMgmtError mgmterr;
-  TSList list  = TSListCreate();
-  bool success = false;
-
-  if ((mgmterr = TSRecordGetMatchMlt(".", list)) != TS_ERR_OKAY) {
-    char *msg = TSGetErrorMessage(mgmterr);
-    fprintf(fp, "Unable to retrieve Traffic Server records: %s\n", msg);
-    TSfree(msg);
-    goto done;
-  }
-
-  // If the RPC call failed, the list will be empty, so we won't print anything. Otherwise,
-  // print all the results, freeing them as we go.
-  for (TSRecordEle *rec_ele = (TSRecordEle *)TSListDequeue(list); rec_ele; rec_ele = (TSRecordEle *)TSListDequeue(list)) {
-    if (!success) {
-      success = true;
-      fprintf(fp, "Traffic Server Configuration Records:\n");
-    }
-
-    switch (rec_ele->rec_type) {
-    case TS_REC_INT:
-      fprintf(fp, "%s %" PRId64 "\n", rec_ele->rec_name, rec_ele->valueT.int_val);
-      break;
-    case TS_REC_COUNTER:
-      fprintf(fp, "%s %" PRId64 "\n", rec_ele->rec_name, rec_ele->valueT.counter_val);
-      break;
-    case TS_REC_FLOAT:
-      fprintf(fp, "%s %f\n", rec_ele->rec_name, rec_ele->valueT.float_val);
-      break;
-    case TS_REC_STRING:
-      fprintf(fp, "%s %s\n", rec_ele->rec_name, rec_ele->valueT.string_val);
-      break;
-    default:
-      // just skip it ...
-      break;
-    }
-
-    TSRecordEleDestroy(rec_ele);
-  }
-
-done:
-  TSListDestroy(list);
-  return success;
 }
 
 bool
@@ -291,7 +214,7 @@ crashlog_write_registers(FILE *fp, const crashlog_target &target)
 
 // x86 register names as per ucontext.h.
 #if defined(__i386__)
-#define REGFMT "0x%08" PRIx32
+#define REGFMT     "0x%08" PRIx32
 #define REGCAST(x) ((uint32_t)(x))
   static const char *names[NGREG] = {
     "GS",  "FS",  "ES",     "DS",  "EDI", "ESI", "EBP", "ESP",  "EBX", "EDX",
@@ -300,7 +223,7 @@ crashlog_write_registers(FILE *fp, const crashlog_target &target)
 #endif
 
 #if defined(__x86_64__)
-#define REGFMT "0x%016" PRIx64
+#define REGFMT     "0x%016" PRIx64
 #define REGCAST(x) ((uint64_t)(x))
   static const char *names[NGREG] = {
     "R8",  "R9",  "R10", "R11", "R12", "R13", "R14",    "R15", "RDI",    "RSI",     "RBP", "RBX",

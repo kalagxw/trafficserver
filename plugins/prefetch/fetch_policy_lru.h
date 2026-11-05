@@ -78,10 +78,10 @@ struct LruHashHasher {
   }
 };
 
-typedef LruHash LruEntry;
-typedef std::list<LruEntry> LruList;
-typedef std::unordered_map<const LruHash *, LruList::iterator, LruHashHasher, LruHashHasher> LruMap;
-typedef LruMap::iterator LruMapIterator;
+using LruEntry       = LruHash;
+using LruList        = std::list<LruEntry>;
+using LruMap         = std::unordered_map<const LruHash *, LruList::iterator, LruHashHasher, LruHashHasher>;
+using LruMapIterator = LruMap::iterator;
 
 static LruEntry NULL_LRU_ENTRY; // Used to create an "empty" new LRUEntry
 
@@ -99,16 +99,16 @@ public:
   ~FetchPolicyLru() override{};
 
   /* Fetch policy interface methods */
-  bool init(const char *parameters) override;
-  bool acquire(const std::string &url) override;
-  bool release(const std::string &url) override;
+  bool        init(const char *parameters) override;
+  bool        acquire(const std::string &url) override;
+  bool        release(const std::string &url) override;
   const char *name() override;
-  size_t getMaxSize() override;
-  size_t getSize() override;
+  size_t      getMaxSize() override;
+  size_t      getSize() override;
 
 protected:
-  LruMap _map;
-  LruList _list;
+  LruMap             _map;
+  LruList            _list;
   LruList::size_type _maxSize = 10;
   LruList::size_type _size    = 0;
 };

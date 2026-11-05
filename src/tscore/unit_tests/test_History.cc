@@ -24,12 +24,12 @@
 #include <string_view>
 
 #include "tscore/History.h"
-#include "tscore/BufferWriter.h"
-#include "catch.hpp"
+#include "tsutil/ts_bw_format.h"
+#include <catch2/catch_test_macros.hpp>
 
 using std::string_view;
 
-#define REMEMBER(e, r) history.push_back(MakeSourceLocation(), e, r)
+#define REMEMBER(e, r)        history.push_back(MakeSourceLocation(), e, r)
 #define SM_REMEMBER(sm, e, r) sm->history.push_back(MakeSourceLocation(), e, r)
 
 // State Machine mock
@@ -59,22 +59,22 @@ TEST_CASE("History", "[libts][History]")
   REQUIRE(history[2].reentrancy == static_cast<short>(NO_REENTRANT));
 
   history[0].location.str(buf, sizeof(buf));
-  REQUIRE(string_view{buf} == "test_History.cc:48 (C_A_T_C_H_T_E_S_T_0)");
+  REQUIRE(string_view{buf} == "test_History.cc:48 (CATCH2_INTERNAL_TEST_0)");
 
   history[1].location.str(buf, sizeof(buf));
-  REQUIRE(string_view{buf} == "test_History.cc:49 (C_A_T_C_H_T_E_S_T_0)");
+  REQUIRE(string_view{buf} == "test_History.cc:49 (CATCH2_INTERNAL_TEST_0)");
 
-  ts::LocalBufferWriter<128> w;
-  SM<HISTORY_DEFAULT_SIZE> *sm = new SM<HISTORY_DEFAULT_SIZE>;
+  swoc::LocalBufferWriter<128> w;
+  SM<HISTORY_DEFAULT_SIZE>    *sm = new SM<HISTORY_DEFAULT_SIZE>;
   SM_REMEMBER(sm, 1, 1);
   SM_REMEMBER(sm, 2, 2);
   SM_REMEMBER(sm, 3, NO_REENTRANT);
 
   w.print("{}", sm->history[0].location);
-  REQUIRE(w.view() == "test_History.cc:69 (C_A_T_C_H_T_E_S_T_0)");
+  REQUIRE(w.view() == "test_History.cc:69 (CATCH2_INTERNAL_TEST_0)");
 
-  w.reset().print("{}", sm->history[1].location);
-  REQUIRE(w.view() == "test_History.cc:70 (C_A_T_C_H_T_E_S_T_0)");
+  w.clear().print("{}", sm->history[1].location);
+  REQUIRE(w.view() == "test_History.cc:70 (CATCH2_INTERNAL_TEST_0)");
 
   REQUIRE(sm->history[0].event == 1);
   REQUIRE(sm->history[0].reentrancy == 1);
@@ -105,11 +105,11 @@ TEST_CASE("History", "[libts][History]")
   REQUIRE(sm2->history.size() == 2);
   REQUIRE(sm2->history.overflowed() == true);
 
-  w.reset().print("{}", sm2->history[0].location);
-  REQUIRE(w.view() == "test_History.cc:103 (C_A_T_C_H_T_E_S_T_0)");
+  w.clear().print("{}", sm2->history[0].location);
+  REQUIRE(w.view() == "test_History.cc:103 (CATCH2_INTERNAL_TEST_0)");
 
-  w.reset().print("{}", sm2->history[1].location);
-  REQUIRE(w.view() == "test_History.cc:98 (C_A_T_C_H_T_E_S_T_0)");
+  w.clear().print("{}", sm2->history[1].location);
+  REQUIRE(w.view() == "test_History.cc:98 (CATCH2_INTERNAL_TEST_0)");
 
   sm2->history.clear();
   REQUIRE(sm2->history.size() == 0);

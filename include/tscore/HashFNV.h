@@ -1,6 +1,6 @@
 /** @file
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -40,12 +40,13 @@ struct ATSHash32FNV1a : ATSHash32 {
     update(data, len, ATSHash::nullxfrm());
   }
 
-  void final() override;
+  void     final() override;
   uint32_t get() const override;
-  void clear() override;
+  void     clear() override;
 
 private:
-  uint32_t hval;
+  static constexpr uint32_t fnv_init = 0x811c9dc5u;
+  uint32_t                  hval{fnv_init};
 };
 
 template <typename Transform>
@@ -71,12 +72,13 @@ struct ATSHash64FNV1a : ATSHash64 {
     update(data, len, ATSHash::nullxfrm());
   }
 
-  void final() override;
+  void     final() override;
   uint64_t get() const override;
-  void clear() override;
+  void     clear() override;
 
 private:
-  uint64_t hval;
+  static constexpr uint64_t fnv_init = 0xcbf29ce484222325ull;
+  uint64_t                  hval{fnv_init};
 };
 
 template <typename Transform>

@@ -25,4 +25,6 @@ Testing Traffic Server
 .. toctree::
    :maxdepth: 2
 
-   blackbox-testing.en
+   uranium-tests.en
+   uranium-api.en
+   config-reload-ext.en

@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -36,9 +36,9 @@
 #include <cstdint>
 #include <sys/time.h>
 #include <cstdlib>
-typedef int64_t ink_hrtime;
+using ink_hrtime = int64_t;
 
-int squid_timestamp_to_buf(char *buf, unsigned int buf_size, long timestamp_sec, long timestamp_usec);
+int   squid_timestamp_to_buf(char *buf, unsigned int buf_size, long timestamp_sec, long timestamp_usec);
 char *int64_to_str(char *buf, unsigned int buf_size, int64_t val, unsigned int *total_chars, unsigned int req_width = 0,
                    char pad_char = '0');
 
@@ -49,19 +49,19 @@ char *int64_to_str(char *buf, unsigned int buf_size, int64_t val, unsigned int *
 //////////////////////////////////////////////////////////////////////////////
 
 #define HRTIME_FOREVER (10 * HRTIME_DECADE)
-#define HRTIME_DECADE (10 * HRTIME_YEAR)
-#define HRTIME_YEAR (365 * HRTIME_DAY + HRTIME_DAY / 4)
-#define HRTIME_WEEK (7 * HRTIME_DAY)
-#define HRTIME_DAY (24 * HRTIME_HOUR)
-#define HRTIME_HOUR (60 * HRTIME_MINUTE)
-#define HRTIME_MINUTE (60 * HRTIME_SECOND)
-#define HRTIME_SECOND (1000 * HRTIME_MSECOND)
+#define HRTIME_DECADE  (10 * HRTIME_YEAR)
+#define HRTIME_YEAR    (365 * HRTIME_DAY + HRTIME_DAY / 4)
+#define HRTIME_WEEK    (7 * HRTIME_DAY)
+#define HRTIME_DAY     (24 * HRTIME_HOUR)
+#define HRTIME_HOUR    (60 * HRTIME_MINUTE)
+#define HRTIME_MINUTE  (60 * HRTIME_SECOND)
+#define HRTIME_SECOND  (1000 * HRTIME_MSECOND)
 #define HRTIME_MSECOND (1000 * HRTIME_USECOND)
 #define HRTIME_USECOND (1000 * HRTIME_NSECOND)
 #define HRTIME_NSECOND (static_cast<ink_hrtime>(1))
 
 #define HRTIME_APPROX_SECONDS(_x) ((_x) >> 30) // off by 7.3%
-#define HRTIME_APPROX_FACTOR (((float)(1 << 30)) / (((float)HRTIME_SECOND)))
+#define HRTIME_APPROX_FACTOR      (((float)(1 << 30)) / (((float)HRTIME_SECOND)))
 
 //////////////////////////////////////////////////////////////////////////////
 //
@@ -71,15 +71,15 @@ char *int64_to_str(char *buf, unsigned int buf_size, int64_t val, unsigned int *
 
 // simple macros
 
-#define HRTIME_YEARS(_x) ((_x)*HRTIME_YEAR)
-#define HRTIME_WEEKS(_x) ((_x)*HRTIME_WEEK)
-#define HRTIME_DAYS(_x) ((_x)*HRTIME_DAY)
-#define HRTIME_HOURS(_x) ((_x)*HRTIME_HOUR)
-#define HRTIME_MINUTES(_x) ((_x)*HRTIME_MINUTE)
-#define HRTIME_SECONDS(_x) ((_x)*HRTIME_SECOND)
-#define HRTIME_MSECONDS(_x) ((_x)*HRTIME_MSECOND)
-#define HRTIME_USECONDS(_x) ((_x)*HRTIME_USECOND)
-#define HRTIME_NSECONDS(_x) ((_x)*HRTIME_NSECOND)
+#define HRTIME_YEARS(_x)    ((_x) * HRTIME_YEAR)
+#define HRTIME_WEEKS(_x)    ((_x) * HRTIME_WEEK)
+#define HRTIME_DAYS(_x)     ((_x) * HRTIME_DAY)
+#define HRTIME_HOURS(_x)    ((_x) * HRTIME_HOUR)
+#define HRTIME_MINUTES(_x)  ((_x) * HRTIME_MINUTE)
+#define HRTIME_SECONDS(_x)  ((_x) * HRTIME_SECOND)
+#define HRTIME_MSECONDS(_x) ((_x) * HRTIME_MSECOND)
+#define HRTIME_USECONDS(_x) ((_x) * HRTIME_USECOND)
+#define HRTIME_NSECONDS(_x) ((_x) * HRTIME_NSECOND)
 
 // gratuitous wrappers
 
@@ -152,49 +152,49 @@ ink_hrtime_from_timeval(const struct timeval *tv)
 static inline ink_hrtime
 ink_hrtime_to_years(ink_hrtime t)
 {
-  return ((ink_hrtime)(t / HRTIME_YEAR));
+  return (t / HRTIME_YEAR);
 }
 
 static inline ink_hrtime
 ink_hrtime_to_weeks(ink_hrtime t)
 {
-  return ((ink_hrtime)(t / HRTIME_WEEK));
+  return (t / HRTIME_WEEK);
 }
 
 static inline ink_hrtime
 ink_hrtime_to_days(ink_hrtime t)
 {
-  return ((ink_hrtime)(t / HRTIME_DAY));
+  return (t / HRTIME_DAY);
 }
 
 static inline ink_hrtime
 ink_hrtime_to_mins(ink_hrtime t)
 {
-  return ((ink_hrtime)(t / HRTIME_MINUTE));
+  return (t / HRTIME_MINUTE);
 }
 
 static inline ink_hrtime
 ink_hrtime_to_sec(ink_hrtime t)
 {
-  return ((ink_hrtime)(t / HRTIME_SECOND));
+  return (t / HRTIME_SECOND);
 }
 
 static inline ink_hrtime
 ink_hrtime_to_msec(ink_hrtime t)
 {
-  return ((ink_hrtime)(t / HRTIME_MSECOND));
+  return (t / HRTIME_MSECOND);
 }
 
 static inline ink_hrtime
 ink_hrtime_to_usec(ink_hrtime t)
 {
-  return ((ink_hrtime)(t / HRTIME_USECOND));
+  return (t / HRTIME_USECOND);
 }
 
 static inline ink_hrtime
 ink_hrtime_to_nsec(ink_hrtime t)
 {
-  return ((ink_hrtime)(t / HRTIME_NSECOND));
+  return (t / HRTIME_NSECOND);
 }
 
 static inline struct timespec
@@ -210,7 +210,7 @@ ink_hrtime_to_timespec(ink_hrtime t)
 static inline struct timeval
 ink_hrtime_to_timeval(ink_hrtime t)
 {
-  int64_t usecs;
+  int64_t        usecs;
   struct timeval tv;
 
   usecs      = ink_hrtime_to_usec(t);
@@ -224,12 +224,14 @@ ink_hrtime_to_timeval(ink_hrtime t)
    which translates to (365 + 0.25)369*24*60*60 seconds   */
 #define NT_TIMEBASE_DIFFERENCE_100NSECS 116444736000000000i64
 
+extern int gSystemClock; // 0 == CLOCK_REALTIME, the default
+
 static inline ink_hrtime
-ink_get_hrtime_internal()
+ink_get_hrtime()
 {
 #if defined(freebsd) || HAVE_CLOCK_GETTIME
   timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
+  clock_gettime(static_cast<clockid_t>(gSystemClock), &ts);
   return ink_hrtime_from_timespec(&ts);
 #else
   timeval tv;
@@ -241,19 +243,19 @@ ink_get_hrtime_internal()
 static inline struct timeval
 ink_gettimeofday()
 {
-  return ink_hrtime_to_timeval(ink_get_hrtime_internal());
+  return ink_hrtime_to_timeval(ink_get_hrtime());
 }
 
 static inline int
 ink_time()
 {
-  return (int)ink_hrtime_to_sec(ink_get_hrtime_internal());
+  return static_cast<int>(ink_hrtime_to_sec(ink_get_hrtime()));
 }
 
 static inline int
 ink_hrtime_diff_msec(ink_hrtime t1, ink_hrtime t2)
 {
-  return (int)ink_hrtime_to_msec(t1 - t2);
+  return static_cast<int>(ink_hrtime_to_msec(t1 - t2));
 }
 
 static inline ink_hrtime

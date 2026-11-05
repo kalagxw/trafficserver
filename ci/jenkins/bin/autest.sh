@@ -23,14 +23,14 @@ sleep 30
 
 git branch --contains ${ghprbActualCommit} > /dev/null
 if [ $? = 0 -a ! -z "$ghprbActualCommit" ]; then
-    git diff HEAD~1 --name-only | egrep -E '^(build|iocore|proxy|tests|include|mgmt|plugins|proxy|src)/' > /dev/null
+    git diff HEAD~1 --name-only | egrep -E '^(build|tests|include|plugins|src)/' > /dev/null
     if [ $? = 1 ]; then
         echo "No relevant files changed, skipping run"
         exit 0
     fi
 fi
 
-# Set default encoding UTF-8 for AuTest
+# Set the default encoding to UTF-8 for the test suite.
 export LC_ALL=en_US.UTF-8
 export LANG=en_US.UTF-8
 echo "LC_ALL: $LC_ALL"
@@ -46,25 +46,19 @@ URL="https://ci.trafficserver.apache.org/autest"
 JOB_ID=${ghprbPullId:-${ATS_BRANCH:-master}}
 AUSB="ausb-${JOB_ID}.${BUILD_NUMBER}"
 SANDBOX="/var/tmp/${AUSB}"
-PROXY_VERIFIER_VERSIONS="/home/jenkins/proxy-verifier"
-PROXY_VERIFIER_VERSION_FILE="tests/proxy-verifier-version.txt"
-PROXY_VERIFIER_PREPARE="tests/prepare_proxy_verifier.sh"
 
 # Optional settings
 CCACHE=""
 WERROR=""
 DEBUG=""
-WCCP=""
 QUIC=""
 CURL=""
 AUTEST_DEBUG=""
 AUTEST_VERBOSE=""
-PROXY_VERIFIER_ARGUMENT=""
 
 [ "1" == "$enable_ccache" ] && CCACHE="--enable-ccache"
 [ "1" == "$enable_werror" ] && WERROR="--enable-werror"
 [ "1" == "$enable_debug" ] && DEBUG="--enable-debug"
-[ "1" == "$enable_wccp" ] && WCCP="--enable-wccp"
 [ "1" == "$enable_quic" ] && QUIC="--with-openssl=/opt/openssl-quic"
 [ "1" == "$disable_curl" ] && CURL="--disable-curl"
 [ "1" == "$enable_autest_debug" ] && AUTEST_DEBUG="--debug"
@@ -78,7 +72,6 @@ mkdir -p ${INSTALL}
 echo "CCACHE: $CCACHE"
 echo "WERROR: $WERROR"
 echo "DEBUG: $DEBUG"
-echo "WCCP: $WCCP"
 echo "QUIC: $QUIC"
 echo "CURL: $CURL"
 
@@ -93,7 +86,6 @@ autoreconf -if
     --enable-experimental-plugins \
     --enable-example-plugins \
     ${CCACHE} \
-    ${WCCP} \
     ${QUIC} \
     ${WERROR} \
     ${DEBUG} \
@@ -103,31 +95,15 @@ autoreconf -if
 ${ATS_MAKE} -j4 && ${ATS_MAKE} install
 [ -x ${INSTALL}/bin/traffic_server ] || exit -1
 
-# Now run autest
+# Now run the Uranium test suite.
 set +x
 echo -n "=======>>>>  Started on "
 date
 
-AUTEST="/usr/bin/autest"
-[ ! -x ${AUTEST} ] && AUTEST="/usr/local/bin/autest"
 set -x
 
-pv_version=""
-if [ -f "${PROXY_VERIFIER_VERSION_FILE}" ]; then
-  pv_version=`cat "${PROXY_VERIFIER_VERSION_FILE}"`
-elif [ -f "${PROXY_VERIFIER_PREPARE}" ]; then
-  pv_version=`awk -F'"' '/^pv_version/ {print $2}' "${PROXY_VERIFIER_PREPARE}"`
-fi
-if [ "x${pv_version}" != "x" ]; then
-  PROXY_VERIFIER_BIN="${PROXY_VERIFIER_VERSIONS}/${pv_version}/bin"
-  PROXY_VERIFIER_ARGUMENT="--proxy-verifier-bin ${PROXY_VERIFIER_BIN}"
-fi
-
-${AUTEST} \
-    -D ./tests/gold_tests \
-    --sandbox "$SANDBOX" \
-    --ats-bin "${INSTALL}/bin" \
-    $PROXY_VERIFIER_ARGUMENT \
+ATS_URTEST_SANDBOX="$SANDBOX" ./tests/urtest.sh \
+    --no-run-in-docker \
     $AUTEST_DEBUG \
     $AUTEST_VERBOSE
 status=$?

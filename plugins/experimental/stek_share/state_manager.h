@@ -19,6 +19,8 @@ limitations under the License.
 
 #pragma once
 
+#include <utility>
+
 #include <libnuraft/nuraft.hxx>
 
 #include "log_store.h"
@@ -34,55 +36,55 @@ public:
     // Initial cluster config, read from the list loaded from the configuration file.
     saved_config_ = nuraft::cs_new<nuraft::cluster_config>();
     for (auto const &s : server_list) {
-      int server_id                              = s.first;
-      std::string endpoint                       = s.second;
+      int                             server_id  = s.first;
+      std::string                     endpoint   = s.second;
       nuraft::ptr<nuraft::srv_config> new_server = nuraft::cs_new<nuraft::srv_config>(server_id, endpoint);
-      saved_config_->get_servers().push_back(new_server);
+      saved_config_->get_servers().push_back(std::move(new_server));
     }
   }
 
   ~STEKShareSMGR() {}
 
   nuraft::ptr<nuraft::cluster_config>
-  load_config()
+  load_config() override
   {
     return saved_config_;
   }
 
   void
-  save_config(const nuraft::cluster_config &config)
+  save_config(const nuraft::cluster_config &config) override
   {
     nuraft::ptr<nuraft::buffer> buf = config.serialize();
     saved_config_                   = nuraft::cluster_config::deserialize(*buf);
   }
 
   void
-  save_state(const nuraft::srv_state &state)
+  save_state(const nuraft::srv_state &state) override
   {
     nuraft::ptr<nuraft::buffer> buf = state.serialize();
     saved_state_                    = nuraft::srv_state::deserialize(*buf);
   }
 
   nuraft::ptr<nuraft::srv_state>
-  read_state()
+  read_state() override
   {
     return saved_state_;
   }
 
   nuraft::ptr<nuraft::log_store>
-  load_log_store()
+  load_log_store() override
   {
     return cur_log_store_;
   }
 
   int32_t
-  server_id()
+  server_id() override
   {
     return my_id_;
   }
 
   void
-  system_exit(const int exit_code)
+  system_exit(const int /* exit_code ATS_UNUSED */) override
   {
   }
 
@@ -93,10 +95,10 @@ public:
   }
 
 private:
-  int my_id_;
-  std::string my_endpoint_;
-  nuraft::ptr<STEKShareLogStore> cur_log_store_;
-  nuraft::ptr<nuraft::srv_config> my_srv_config_;
+  int                                 my_id_;
+  std::string                         my_endpoint_;
+  nuraft::ptr<STEKShareLogStore>      cur_log_store_;
+  nuraft::ptr<nuraft::srv_config>     my_srv_config_;
   nuraft::ptr<nuraft::cluster_config> saved_config_;
-  nuraft::ptr<nuraft::srv_state> saved_state_;
+  nuraft::ptr<nuraft::srv_state>      saved_state_;
 };

@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -21,15 +21,19 @@
   limitations under the License.
  */
 
-#include "tscore/I_Layout.h"
+#include <cstdio>
+#include <sysexits.h>
+
+#include "tscore/Layout.h"
 #include "tscore/runroot.h"
+#include "tscore/Demangle.h"
 #include "engine.h"
 
 using namespace std::literals;
 
 int
-main(int argc, const char **argv)
-{
+main([[maybe_unused]] int argc, const char **argv)
+try {
   LayoutEngine engine;
 
   int i = 0;
@@ -45,11 +49,12 @@ main(int argc, const char **argv)
     .add_option("--version", "-V", "Print version string");
 
   // info command
-  engine.parser.add_command("info", "Show the layout as default", [&]() { engine.info(); })
-    .add_option("--features", "", "Show the compiled features")
-    .add_option("--versions", "", "Show various library and other versioning information")
-    .add_option("--json", "-j", "Produce output in JSON format (when supported)")
-    .set_default();
+  auto &info_cmd = engine.parser.add_command("info", "Show the layout as default", [&]() { engine.info(); });
+  info_cmd.add_mutex_group("display_mode", false, "Display mode options");
+  info_cmd.add_option_to_group("display_mode", "--features", "", "Show the compiled features");
+  info_cmd.add_option_to_group("display_mode", "--versions", "", "Show various library and other versioning information");
+
+  info_cmd.add_option("--json", "-j", "Produce output in JSON format (when supported)").set_default();
   // init command
   engine.parser.add_command("init", "Initialize(create) the runroot sandbox", [&]() { engine.create_runroot(); })
     .add_option("--absolute", "-a", "Produce absolute path in the runroot.yaml")
@@ -76,4 +81,9 @@ main(int argc, const char **argv)
   engine.arguments.invoke();
 
   return engine.status_code;
+} catch (...) {
+  // This tool returns sysexits values exclusively; EX_SOFTWARE is the one for
+  // an internal fault, and matches what ink_fatal() exits with.
+  fprintf(stderr, "traffic_layout: terminating on an unhandled %s\n", ts::describe_current_exception().c_str());
+  return EX_SOFTWARE;
 }

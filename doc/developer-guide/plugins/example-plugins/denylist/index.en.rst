@@ -16,6 +16,7 @@
    under the License.
 
 .. include:: ../../../../common.defs
+.. default-domain:: cpp
 
 .. _developer-plugins-examples-denylist:
 
@@ -23,7 +24,7 @@ Denylist Plugin
 ****************
 
 The sample denylisting plugin included in the Traffic Server SDK is
-``denylist_1.c``. This plugin checks every incoming HTTP client request
+``denylist_1.cc``. This plugin checks every incoming HTTP client request
 against a list of listed web sites. If the client requests a
 listed site, then the plugin returns an ``Access forbidden``
 message to the client.
@@ -52,7 +53,7 @@ Traffic Server has a multi-threaded design, race conditions can occur if
 several threads try to access the same continuation's data.
 
 Here is how the static parent continuation is created in
-``denylist_1.c``:
+``denylist_1.cc``:
 
 .. code-block:: c
 
@@ -62,7 +63,7 @@ Here is how the static parent continuation is created in
       // ...
       TSCont contp;
 
-      contp = TSContCreate (denylist_plugin, NULL);
+      contp = TSContCreate (denylist_plugin, nullptr);
       // ...
    }
 
@@ -74,10 +75,15 @@ that might be sent to it:
 
 .. code-block:: c
 
+   namespace
+   {
+   DbgCtl dbg_ctl{"denylist_plugin"};
+   }
+
    static int
    denylist_plugin (TSCont contp, TSEvent event, void *edata)
    {
-      TSHttpTxn txnp = (TSHttpTxn) edata;
+      TSHttpTxn txnp = static_cast<TSHttpTxn>(edata);
       switch (event) {
          case TS_EVENT_HTTP_OS_DNS:
             handle_dns (txnp, contp);
@@ -86,7 +92,7 @@ that might be sent to it:
             handle_response (txnp);
             return 0;
          default:
-            TSDebug ("denylist_plugin", "This event was unexpected: %d", );
+            Dbg (dbg_ctl, "This event was unexpected: %d", int(event) );
             break;
       }
       return 0;
@@ -94,8 +100,8 @@ that might be sent to it:
 
 When you write handler functions, you have to anticipate any events that
 might be sent to the handler by hooks or by other functions. In the
-Denylist plugin, ``TS_EVENT_OS_DNS`` is sent because of the global hook
-established in ``TSPluginInit``, ``TS_EVENT_HTTP_SEND_RESPONSE_HDR`` is
+Denylist plugin, :enumerator:`TS_EVENT_HTTP_OS_DNS` is sent because of the global hook
+established in ``TSPluginInit``, :enumerator:`TS_EVENT_HTTP_SEND_RESPONSE_HDR` is
 sent because the plugin contains a transaction hook
 (see :ref:`developer-plugins-examples-denylist-txn-hook`).
 It is good practice to have a default case in your switch statements.

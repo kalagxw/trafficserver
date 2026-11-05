@@ -1,0 +1,490 @@
+#
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture
+def sample_hrw4u_files(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Create sample hrw4u files for testing."""
+    file1 = tmp_path / "test1.hrw4u"
+    file1.write_text("REMAP { no-op(); }\n")
+
+    file2 = tmp_path / "test2.hrw4u"
+    file2.write_text("READ_RESPONSE { inbound.resp.X-Test = \"foo\"; }\n")
+
+    file3 = tmp_path / "test3.hrw4u"
+    file3.write_text("SEND_REQUEST { outbound.req.X-Custom = \"bar\"; }\n")
+
+    return file1, file2, file3
+
+
+def run_hrw4u(args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
+    """Run hrw4u script with given arguments."""
+    script = Path("scripts/hrw4u").resolve()
+    cmd = [sys.executable, str(script)] + args
+
+    return subprocess.run(cmd, capture_output=True, text=True, input=stdin, cwd=Path.cwd())
+
+
+def run_u4wrh(args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
+    """Run u4wrh script with given arguments."""
+    script = Path("scripts/u4wrh").resolve()
+    cmd = [sys.executable, str(script)] + args
+
+    return subprocess.run(cmd, capture_output=True, text=True, input=stdin, cwd=Path.cwd())
+
+
+def test_cli_single_file_to_stdout(sample_hrw4u_files: tuple[Path, Path, Path]) -> None:
+    """Test compiling a single file to stdout."""
+    file1, _, _ = sample_hrw4u_files
+
+    result = run_hrw4u([str(file1)])
+
+    assert result.returncode == 0
+    assert "no-op" in result.stdout
+    assert "REMAP" in result.stdout or "cond" in result.stdout
+
+
+def test_cli_multiple_files_to_stdout(sample_hrw4u_files: tuple[Path, Path, Path]) -> None:
+    """Test compiling multiple files to stdout with separators."""
+    file1, file2, file3 = sample_hrw4u_files
+
+    result = run_hrw4u([str(file1), str(file2), str(file3)])
+
+    assert result.returncode == 0
+    assert "# ---" in result.stdout
+    assert result.stdout.count("# ---") == 2
+    assert "no-op" in result.stdout
+    assert "X-Test" in result.stdout
+    assert "X-Custom" in result.stdout
+
+
+def test_cli_stdin_to_stdout() -> None:
+    """Test reading from stdin and writing to stdout."""
+    input_content = "REMAP { inbound.req.X-Stdin = \"test\"; }\n"
+
+    result = run_hrw4u([], stdin=input_content)
+
+    assert result.returncode == 0
+    assert "X-Stdin" in result.stdout
+
+
+def test_cli_bulk_input_output_pairs(sample_hrw4u_files: tuple[Path, Path, Path], tmp_path: Path) -> None:
+    """Test bulk compilation with input:output pairs."""
+    file1, file2, _ = sample_hrw4u_files
+    out1 = tmp_path / "out1.conf"
+    out2 = tmp_path / "out2.conf"
+
+    result = run_hrw4u([f"{file1}:{out1}", f"{file2}:{out2}"])
+
+    assert result.returncode == 0
+    assert out1.exists()
+    assert out2.exists()
+    assert "no-op" in out1.read_text()
+    assert "X-Test" in out2.read_text()
+
+
+def test_cli_mixed_format_error(sample_hrw4u_files: tuple[Path, Path, Path], tmp_path: Path) -> None:
+    """Test that mixing formats (with and without colons) produces an error."""
+    file1, file2, _ = sample_hrw4u_files
+    out2 = tmp_path / "out2.conf"
+
+    result = run_hrw4u([str(file1), f"{file2}:{out2}"])
+
+    assert result.returncode != 0
+    assert "Mixed formats not allowed" in result.stderr
+
+
+def test_cli_nonexistent_input_file() -> None:
+    """Test error handling for nonexistent input file."""
+    result = run_hrw4u(["nonexistent_file.hrw4u"])
+
+    assert result.returncode != 0
+    assert "not found" in result.stderr
+
+
+def test_cli_bulk_nonexistent_input_file(tmp_path: Path) -> None:
+    """Test error handling for nonexistent input file in bulk mode."""
+    out = tmp_path / "out.conf"
+
+    result = run_hrw4u([f"nonexistent_file.hrw4u:{out}"])
+
+    assert result.returncode != 0
+    assert "not found" in result.stderr
+
+
+def test_cli_ast_output(sample_hrw4u_files: tuple[Path, Path, Path]) -> None:
+    """Test AST output mode."""
+    file1, _, _ = sample_hrw4u_files
+
+    result = run_hrw4u(["--ast", str(file1)])
+
+    assert result.returncode == 0
+    assert "program" in result.stdout.lower() or "(" in result.stdout
+
+
+def test_cli_help_output() -> None:
+    """Test help output."""
+    result = run_hrw4u(["--help"])
+
+    assert result.returncode == 0
+    assert "usage:" in result.stdout.lower()
+    assert "hrw4u" in result.stdout.lower()
+    assert "bulk" in result.stdout.lower()
+
+
+def test_u4wrh_single_file_to_stdout(tmp_path: Path) -> None:
+    """Test u4wrh script with single file to stdout."""
+    hrw_file = tmp_path / "test.conf"
+    hrw_file.write_text('cond %{HEADER:X-Test} ="foo"\nset-header X-Response "bar"\n')
+
+    script = Path("scripts/u4wrh").resolve()
+    cmd = [sys.executable, str(script), str(hrw_file)]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd())
+
+    assert result.returncode == 0
+    assert "X-Test" in result.stdout
+    assert "X-Response" in result.stdout
+
+
+def test_u4wrh_bulk_mode(tmp_path: Path) -> None:
+    """Test u4wrh bulk compilation mode."""
+    hrw1 = tmp_path / "test1.conf"
+    hrw1.write_text('cond %{HEADER:X-Test} ="foo"\nset-header X-Response "bar"\n')
+
+    hrw2 = tmp_path / "test2.conf"
+    hrw2.write_text('set-status 404\n')
+
+    out1 = tmp_path / "out1.hrw4u"
+    out2 = tmp_path / "out2.hrw4u"
+
+    script = Path("scripts/u4wrh").resolve()
+    cmd = [sys.executable, str(script), f"{hrw1}:{out1}", f"{hrw2}:{out2}"]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd())
+
+    assert result.returncode == 0
+    assert out1.exists()
+    assert out2.exists()
+    assert "X-Test" in out1.read_text()
+    assert "404" in out2.read_text()
+
+
+def test_cli_error_format_json_on_parse_error(tmp_path: Path) -> None:
+    """With --error-format json, stderr must be a single JSON object matching the schema."""
+    bad = tmp_path / "bad.hrw4u"
+    bad.write_text("REMAP { this is not valid syntax ( {\n")
+
+    result = run_hrw4u(["--error-format", "json", str(bad)])
+
+    assert result.returncode != 0 or result.stderr
+    payload = json.loads(result.stderr.strip().splitlines()[-1])
+    assert payload["version"] == 1
+    assert payload["summary"]["error_count"] >= 1
+    err = payload["errors"][0]
+    for field in ("filename", "line", "column", "severity", "message", "source_line", "notes"):
+        assert field in err
+
+
+def test_cli_error_format_json_on_missing_file() -> None:
+    """File-I/O errors must also be wrapped in the JSON envelope."""
+    result = run_hrw4u(["--error-format", "json", "nonexistent_file.hrw4u"])
+
+    assert result.returncode != 0
+    payload = json.loads(result.stderr.strip().splitlines()[-1])
+    assert payload["version"] == 1
+    assert payload["summary"]["error_count"] == 1
+    assert "not found" in payload["errors"][0]["message"]
+
+
+def test_cli_error_format_markdown_on_parse_error(tmp_path: Path) -> None:
+    """Markdown format must include heading, fenced code block, and location."""
+    bad = tmp_path / "bad.hrw4u"
+    bad.write_text("REMAP { this is not valid syntax ( {\n")
+
+    result = run_hrw4u(["--error-format", "markdown", str(bad)])
+
+    assert "## hrw4u:" in result.stderr
+    assert "### Error" in result.stderr
+    assert "```" in result.stderr
+
+
+def test_cli_default_error_format_is_plain(tmp_path: Path) -> None:
+    """Omitting --error-format must leave the legacy plain-text output unchanged."""
+    bad = tmp_path / "bad.hrw4u"
+    bad.write_text("REMAP { this is not valid syntax ( {\n")
+
+    result = run_hrw4u([str(bad)])
+
+    assert ": error:" in result.stderr
+    assert "## hrw4u" not in result.stderr
+    assert not result.stderr.strip().startswith("{")
+
+
+def test_cli_help_lists_error_format_flag() -> None:
+    """--help must advertise the new flag."""
+    result = run_hrw4u(["--help"])
+
+    assert result.returncode == 0
+    assert "--error-format" in result.stdout
+    for choice in ("plain", "json", "markdown"):
+        assert choice in result.stdout
+
+
+#
+# Exit-code contract: a compile error must fail the build.
+#
+
+
+def test_cli_exits_nonzero_on_syntax_error(tmp_path: Path) -> None:
+    """A syntax error must exit non-zero even though ANTLR recovers and yields a tree."""
+    bad = tmp_path / "bad.hrw4u"
+    bad.write_text("REMAP {\n  inbound.req.X-Foo = \n}\n")
+
+    result = run_hrw4u([str(bad)])
+
+    assert result.returncode != 0
+    assert ": error:" in result.stderr
+
+
+def test_cli_exits_nonzero_on_semantic_error(tmp_path: Path) -> None:
+    """A semantic error must exit non-zero; the parse tree exists, so only sema catches it."""
+    bad = tmp_path / "bad.hrw4u"
+    bad.write_text("REMAP {\n    test::add-debug-header(\"foo\");\n}\n")
+
+    result = run_hrw4u([str(bad)])
+
+    assert result.returncode != 0
+    assert "unknown procedure" in result.stderr
+
+
+def test_cli_collects_all_errors_and_still_exits_nonzero(tmp_path: Path) -> None:
+    """Multi-error mode must report every diagnostic AND fail; the two are not exclusive."""
+    bad = tmp_path / "bad.hrw4u"
+    bad.write_text("REMAP {\n  bogus.one = \"a\";\n  bogus.two = \"b\";\n}\n")
+
+    result = run_hrw4u([str(bad)])
+
+    assert result.returncode != 0
+    assert result.stderr.count(": error:") >= 2
+
+
+def test_cli_multi_file_exits_nonzero_if_any_fails(sample_hrw4u_files: tuple[Path, Path, Path], tmp_path: Path) -> None:
+    """Two inputs fail with different symbols, so both diagnostics prove the loop ran on."""
+    good, _, _ = sample_hrw4u_files
+    first = tmp_path / "first.hrw4u"
+    first.write_text("REMAP {\n    test::nope_one(\"x\");\n}\n")
+    second = tmp_path / "second.hrw4u"
+    second.write_text("REMAP {\n    test::nope_two(\"x\");\n}\n")
+
+    result = run_hrw4u([str(first), str(second), str(good)])
+
+    assert result.returncode != 0
+    assert "nope_one" in result.stderr
+    assert "nope_two" in result.stderr, "the run must not stop at the first failing input"
+    assert result.stdout == "", "a partial config is the thing this is meant to prevent"
+
+
+def test_cli_u4wrh_exits_nonzero_on_error(tmp_path: Path) -> None:
+    """u4wrh shares run_main(), so it must honor the same exit-status contract."""
+    bad = tmp_path / "bad.conf"
+    bad.write_text("cond %{READ_REQUEST_HDR_HOOK}\n  set-header X-Foo\n")
+
+    result = run_u4wrh([str(bad)])
+
+    assert result.returncode != 0
+    assert ": error:" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "argv", [["--bogus"], ["--ast", "--hrw"], ["--error-format", "nope"], ["--max-errors", "x"]],
+    ids=["unknown-option", "conflicting-output-modes", "invalid-choice", "invalid-int"])
+def test_cli_usage_error_exits_two(argv: list[str]) -> None:
+    """Usage errors come from argparse and exit 2, not 1; the documented status must hold."""
+    result = run_hrw4u(argv, stdin="")
+
+    assert result.returncode == 2
+    assert "usage:" in result.stderr
+
+
+def test_cli_mixed_file_formats_exits_one(tmp_path: Path) -> None:
+    """Mixed bulk/stdout arguments are rejected by run_main() itself, so they exit 1, not 2."""
+    good = tmp_path / "good.hrw4u"
+    good.write_text("REMAP {\n    no-op();\n}\n")
+
+    result = run_hrw4u([f"{good}:{tmp_path / 'out.conf'}", str(good)])
+
+    assert result.returncode == 1
+    assert "Mixed formats not allowed" in result.stderr
+
+
+#
+# A run that reported an error contributes no configuration.
+#
+
+
+def test_cli_writes_no_config_when_it_reported_an_error(tmp_path: Path) -> None:
+    """Diagnostics and a config are alternatives, not companions."""
+    bad = tmp_path / "bad.hrw4u"
+    bad.write_text("REMAP {\n  bogus.one = \"a\";\n  inbound.req.X-Ok = \"b\";\n}\n")
+
+    result = run_hrw4u([str(bad)])
+
+    assert result.returncode != 0
+    assert result.stdout == "", f"emitted a config it complained about: {result.stdout!r}"
+
+
+def test_cli_bulk_withholds_only_the_failing_pair(tmp_path: Path) -> None:
+    """Each input:output target stands alone, so one bad input must not withhold the rest."""
+    good = tmp_path / "good.hrw4u"
+    good.write_text("REMAP {\n    inbound.req.X-Ok = \"b\";\n}\n")
+    bad = tmp_path / "bad.hrw4u"
+    bad.write_text("REMAP {\n  bogus.one = \"a\";\n}\n")
+    good_out, bad_out = tmp_path / "good.conf", tmp_path / "bad.conf"
+
+    result = run_hrw4u([f"{good}:{good_out}", f"{bad}:{bad_out}"])
+
+    assert result.returncode != 0
+    assert "set-header X-Ok" in good_out.read_text()
+    assert not bad_out.exists()
+
+
+def test_cli_bulk_leaves_a_previous_config_intact_on_error(tmp_path: Path) -> None:
+    """A failed rebuild must leave the previous config, not an empty file ATS accepts."""
+    bad = tmp_path / "bad.hrw4u"
+    bad.write_text("REMAP {\n  bogus.one = \"a\";\n}\n")
+    out = tmp_path / "out.conf"
+    previous = 'cond %{REMAP_PSEUDO_HOOK} [AND]\n    set-header X-Old "1"\n'
+    out.write_text(previous)
+
+    result = run_hrw4u([f"{bad}:{out}"])
+
+    assert result.returncode != 0
+    assert out.read_text() == previous
+
+
+def test_cli_stdin_withholds_a_partial_config(tmp_path: Path) -> None:
+    """`hrw4u < in > out.conf` is the common redirect, so it cannot be the one that leaks."""
+    bad = tmp_path / "bad.hrw4u"
+    bad.write_text("REMAP {\n  bogus.one = \"a\";\n  inbound.req.X-Ok = \"b\";\n}\n")
+
+    result = run_hrw4u([], stdin=bad.read_text())
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+
+
+def test_cli_ast_is_never_withheld(tmp_path: Path) -> None:
+    """One rule for every destination: an AST dump is not a configuration."""
+    syntax_error = tmp_path / "syn.hrw4u"
+    syntax_error.write_text("REMAP {\n  inbound.req.X-Foo = \n}\n")
+    out = tmp_path / "ast.out"
+
+    to_stdout = run_hrw4u(["--ast", str(syntax_error)])
+    to_stdin = run_hrw4u(["--ast"], stdin=syntax_error.read_text())
+    to_file = run_hrw4u(["--ast", f"{syntax_error}:{out}"])
+
+    assert to_stdout.returncode != 0 and "(program" in to_stdout.stdout
+    assert to_stdout.stdout == to_stdin.stdout
+    assert to_file.returncode != 0 and "(program" in out.read_text()
+
+
+def test_cli_ast_without_a_tree_leaves_the_target_alone(tmp_path: Path) -> None:
+    """Exempting --ast from withholding must not mean writing an empty file over a config."""
+    junk = tmp_path / "junk.hrw4u"
+    junk.write_text("REMAP {{{{ broken\n")
+    out = tmp_path / "out.conf"
+    previous = "cond OLD\n"
+    out.write_text(previous)
+
+    result = run_hrw4u(["--ast", "--max-errors", "1", f"{junk}:{out}"])
+
+    assert result.returncode != 0
+    assert out.read_text() == previous
+
+
+def test_cli_ast_without_a_tree_keeps_json_stderr_parseable(tmp_path: Path) -> None:
+    """The no-tree notice is plain text, so it must not land in the NDJSON stream."""
+    junk = tmp_path / "junk.hrw4u"
+    junk.write_text("REMAP {{{{ broken\n")
+
+    result = run_hrw4u(["--ast", "--max-errors", "1", "--error-format", "json", str(junk)])
+
+    assert result.returncode != 0
+    for line in result.stderr.strip().splitlines():
+        json.loads(line)
+
+
+def test_cli_bulk_still_accepts_dev_null(tmp_path: Path) -> None:
+    """`:/dev/null` is the build-script idiom for "just tell me it compiles"."""
+    src = tmp_path / "src.hrw4u"
+    src.write_text("REMAP {\n    inbound.req.X-Ok = \"b\";\n}\n")
+
+    assert run_hrw4u([f"{src}:/dev/null"]).returncode == 0
+
+
+def test_cli_separator_layout_is_unchanged_by_an_empty_input(tmp_path: Path) -> None:
+    """An input compiling to nothing keeps its slot without adding a blank line."""
+    rules = tmp_path / "rules.hrw4u"
+    rules.write_text("REMAP {\n    inbound.req.X-Ok = \"b\";\n}\n")
+    empty = tmp_path / "empty.hrw4u"
+    empty.write_text("REMAP {\n  # only a comment\n}\n")
+
+    result = run_hrw4u(["--no-comments", str(rules), str(empty), str(rules)])
+
+    assert result.returncode == 0
+    assert "# ---\n# ---\n" in result.stdout
+
+
+def test_cli_stop_on_error_writes_nothing_for_the_inputs_before_it(tmp_path: Path) -> None:
+    """Ending early still means no config: a prefix of one is the hole this prevents."""
+    good = tmp_path / "good.hrw4u"
+    good.write_text("REMAP {\n    inbound.req.X-Ok = \"b\";\n}\n")
+    bad = tmp_path / "bad.hrw4u"
+    bad.write_text("REMAP {\n  bogus.one = \"a\";\n}\n")
+
+    result = run_hrw4u(["--stop-on-error", str(good), str(bad)])
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+
+
+def test_cli_bulk_stop_on_error_keeps_the_pairs_before_it(tmp_path: Path) -> None:
+    """Each target stands alone, so ending early keeps what already compiled."""
+    good = tmp_path / "good.hrw4u"
+    good.write_text("REMAP {\n    inbound.req.X-Ok = \"b\";\n}\n")
+    bad = tmp_path / "bad.hrw4u"
+    bad.write_text("REMAP {\n  bogus.one = \"a\";\n}\n")
+    good_out = tmp_path / "good.conf"
+    bad_out = tmp_path / "bad.conf"
+    previous = "cond OLD\n"
+    bad_out.write_text(previous)
+
+    result = run_hrw4u(["--stop-on-error", f"{good}:{good_out}", f"{bad}:{bad_out}"])
+
+    assert result.returncode != 0
+    assert "X-Ok" in good_out.read_text()
+    assert bad_out.read_text() == previous

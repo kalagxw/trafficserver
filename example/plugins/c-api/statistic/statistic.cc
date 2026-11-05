@@ -35,6 +35,11 @@
 
 #define PLUGIN_NAME "statistics"
 
+namespace
+{
+DbgCtl dbg_ctl{PLUGIN_NAME};
+}
+
 void
 TSPluginInit(int /* argc */, const char * /* argv */[])
 {
@@ -44,7 +49,7 @@ TSPluginInit(int /* argc */, const char * /* argv */[])
   info.vendor_name   = "Apache Software Foundation";
   info.support_email = "dev@trafficserver.apache.org";
 
-  int id;
+  int        id;
   const char name[] = "plugin." PLUGIN_NAME ".now";
 
   if (TSStatFindName(name, &id) == TS_ERROR) {
@@ -67,6 +72,6 @@ TSPluginInit(int /* argc */, const char * /* argv */[])
   // Increment the statistic as time passes.
   TSStatIntIncrement(id, 1);
 
-  TSDebug(PLUGIN_NAME, "%s is set to %" PRId64, name, TSStatIntGet(id));
+  Dbg(dbg_ctl, "%s is set to %" PRId64, name, TSStatIntGet(id));
   TSReleaseAssert(TSPluginRegister(&info) == TS_SUCCESS);
 }

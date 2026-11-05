@@ -164,7 +164,7 @@ msgstr ""
 #: ../../../appendices/command-line/traffic_ctl.en.rst:133
 msgid ""
 "If this flag is provided, :option:`traffic_ctl config get` will emit "
-"results in :file:`records.config` format."
+"results in :file:`records.yaml` format."
 msgstr ""
 
 #: ../../../appendices/command-line/traffic_ctl.en.rst:139
@@ -185,13 +185,13 @@ msgstr ""
 #: ../../../appendices/command-line/traffic_ctl.en.rst:151
 msgid ""
 "The timestamp of the last reconfiguration event (in seconds since epoch) is "
-"published in the `proxy.node.config.reconfigure_time` metric."
+"published in the `proxy.process.proxy.reconfigure_time` metric."
 msgstr ""
 
 #: ../../../appendices/command-line/traffic_ctl.en.rst:158
 msgid ""
 "Set the named configuration record to the specified value. Refer to the :"
-"file:`records.config` documentation for a list of the configuration "
+"file:`records.yaml` documentation for a list of the configuration "
 "variables you can specify. Note that this is not a synchronous operation."
 msgstr ""
 
@@ -319,5 +319,5 @@ msgid "See also"
 msgstr "参考"
 
 #: ../../../appendices/command-line/traffic_ctl.en.rst:281
-msgid ":manpage:`records.config(5)`, :manpage:`storage.config(5)`"
-msgstr ":manpage:`records.config(5)`, :manpage:`storage.config(5)`"
+msgid ":manpage:`records.yaml(5)`, :manpage:`storage.config(5)`"
+msgstr ":manpage:`records.yaml(5)`, :manpage:`storage.config(5)`"

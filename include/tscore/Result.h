@@ -2,7 +2,7 @@
  *
  *  A brief file description
  *
- *  @section license License
+ *  @par License
  *
  *  Licensed to the Apache Software Foundation (ASF) under one
  *  or more contributor license agreements.  See the NOTICE file
@@ -23,7 +23,7 @@
 
 #pragma once
 
-#include "TextBuffer.h"
+#include "tscore/TextBuffer.h"
 
 #include <utility>
 
@@ -68,7 +68,7 @@ struct Result {
   static Result
   failure(const char *fmt, ...) TS_PRINTFLIKE(1, 2)
   {
-    Result result;
+    Result  result;
     va_list ap;
 
     va_start(ap, fmt);

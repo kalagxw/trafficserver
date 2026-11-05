@@ -1,6 +1,6 @@
 /** @file
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -22,10 +22,11 @@
 #pragma once
 
 #include <atomic>
-#include "Hash.h"
+#include "tscore/Hash.h"
 #include <cstdint>
 #include <iostream>
 #include <map>
+#include <memory>
 
 /*
   Helper class to be extended to make ring nodes.
@@ -33,12 +34,12 @@
 
 struct ATSConsistentHashNode {
   std::atomic<bool> available{true};
-  char *name{nullptr};
+  char             *name{nullptr};
 };
 
 std::ostream &operator<<(std::ostream &os, ATSConsistentHashNode &thing);
 
-typedef std::map<uint64_t, ATSConsistentHashNode *>::iterator ATSConsistentHashIter;
+using ATSConsistentHashIter = std::map<uint64_t, ATSConsistentHashNode *>::iterator;
 
 /*
   TSConsistentHash requires a TSHash64 object
@@ -48,7 +49,7 @@ typedef std::map<uint64_t, ATSConsistentHashNode *>::iterator ATSConsistentHashI
 
 struct ATSConsistentHash {
   ATSConsistentHash(int r = 1024, ATSHash64 *h = nullptr);
-  void insert(ATSConsistentHashNode *node, float weight = 1.0, ATSHash64 *h = nullptr);
+  void                   insert(ATSConsistentHashNode *node, float weight = 1.0, ATSHash64 *h = nullptr);
   ATSConsistentHashNode *lookup(const char *url = nullptr, ATSConsistentHashIter *i = nullptr, bool *w = nullptr,
                                 ATSHash64 *h = nullptr);
   ATSConsistentHashNode *lookup_available(const char *url = nullptr, ATSConsistentHashIter *i = nullptr, bool *w = nullptr,
@@ -57,7 +58,7 @@ struct ATSConsistentHash {
   ~ATSConsistentHash();
 
 private:
-  int replicas;
-  ATSHash64 *hash;
+  int                                         replicas;
+  std::unique_ptr<ATSHash64>                  hash;
   std::map<uint64_t, ATSConsistentHashNode *> NodeMap;
 };

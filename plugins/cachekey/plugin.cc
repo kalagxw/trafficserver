@@ -27,7 +27,7 @@
 #include "common.h"
 
 /* Configuration only used by the global plugin instance. */
-Configs *globalConfig = nullptr;
+std::unique_ptr<Configs> globalConfig = nullptr;
 
 /**
  * @brief Set the cache key called by both global and remap instances.
@@ -43,6 +43,11 @@ setCacheKey(TSHttpTxn txn, Configs *config, TSRemapRequestInfo *rri = nullptr)
   for (auto type : keyTypes) {
     /* Initial cache key facility from the requested URL. */
     CacheKey cachekey(txn, config->getSeparator(), config->getUriType(), type, rri);
+
+    /* Don't use cachekey if not initialized properly */
+    if (!cachekey.isValid()) {
+      continue;
+    }
 
     /* Append custom prefix or the host:port */
     if (!config->prefixToBeRemoved()) {
@@ -73,11 +78,11 @@ setCacheKey(TSHttpTxn txn, Configs *config, TSRemapRequestInfo *rri = nullptr)
 }
 
 static int
-contSetCachekey(TSCont contp, TSEvent event, void *edata)
+contSetCachekey(TSCont /* contp ATS_UNUSED */, TSEvent /* event ATS_UNUSED */, void *edata)
 {
   TSHttpTxn txn = static_cast<TSHttpTxn>(edata);
 
-  setCacheKey(txn, globalConfig);
+  setCacheKey(txn, globalConfig.get());
 
   TSHttpTxnReenable(txn, TS_EVENT_HTTP_CONTINUE);
   return 0;
@@ -103,15 +108,14 @@ TSPluginInit(int argc, const char *argv[])
     CacheKeyError("global plugin registration failed");
   }
 
-  globalConfig = new Configs();
+  globalConfig = std::make_unique<Configs>();
   if (nullptr != globalConfig && globalConfig->init(argc, argv, /* perRemapConfig */ false)) {
     TSCont cont = TSContCreate(contSetCachekey, nullptr);
     TSHttpHookAdd(TS_HTTP_POST_REMAP_HOOK, cont);
 
     CacheKeyDebug("global plugin initialized");
   } else {
-    globalConfig = nullptr;
-    delete globalConfig;
+    globalConfig.reset();
 
     CacheKeyError("failed to initialize global plugin");
   }
@@ -125,7 +129,7 @@ TSPluginInit(int argc, const char *argv[])
  * @return always TS_SUCCESS.
  */
 TSReturnCode
-TSRemapInit(TSRemapInterface *apiInfo, char *errBuf, int erroBufSize)
+TSRemapInit(TSRemapInterface * /* apiInfo ATS_UNUSED */, char * /* errBuf ATS_UNUSED */, int /* erroBufSize ATS_UNUSED */)
 {
   return TS_SUCCESS;
 }
@@ -142,7 +146,7 @@ TSRemapInit(TSRemapInterface *apiInfo, char *errBuf, int erroBufSize)
  * @return TS_SUCCES if success or TS_ERROR if failure
  */
 TSReturnCode
-TSRemapNewInstance(int argc, char *argv[], void **instance, char *errBuf, int errBufSize)
+TSRemapNewInstance(int argc, char *argv[], void **instance, char * /* errBuf ATS_UNUSED */, int /* errBufSize ATS_UNUSED */)
 {
   Configs *config = new Configs();
   if (nullptr != config && config->init(argc, const_cast<const char **>(argv), /* perRemapConfig */ true)) {

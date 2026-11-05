@@ -18,8 +18,7 @@
 Header Files
 ************
 
-There are four header directories, each containing header files for different purposes. Three of these
-are available to plugins.
+The header files are located in the ``include/`` directory. There are several sub-directories, each containing header files for different purposes. Three of these are available to plugins.
 
 "ts"
    The C Plugin API. These call functions directly embedded in ``traffic_server`` and therefore have
@@ -29,19 +28,38 @@ are available to plugins.
    The C++ Plugin API. These call functions in the ``libtscppapi.so`` library to directly interact with
    the running |TS| instance.
 
-"tscpp/util"
+.. note::
+
+  The C++ Plugin API is deprecated in ATS 10.  It will be removed in ATS 11.
+
+"tsutil"
    C++ utilities. These are standalone headers (although they may depend on other headers in the
    same directory). These provide functionality that is used inside the |TS| core logic but has been
    demonstrated to be useful for plugins as well [#]_. The functions are in the library
-   ``libtscpputil.so``, although many of the utilities are header only. This library is linked in to
-   the ``traffic_server`` and ``traffic_manager`` binaries and so linkage may not be needed for a plugin.
+   ``libtsutil.so``, although many of the utilities are header only. This library is linked in to
+   the ``traffic_server`` binary and so linkage may not be needed for a plugin.
 
    This library is independent of the C++ API and can be used with or without that library.
 
 "tscore"
    |TS| core header files. These can only be used inside |TS| itself because they either depend on internal
-   data structures either directly or operationally. This is linked in to the ``traffic_server`` and
-   ``traffic_manager`` binaries therefore has no explicit linkage when used in the core.
+   data structures either directly or operationally. This is linked in to the ``traffic_server`` binary therefore
+   has no explicit linkage when used in the core.
+
+New Plugin API layout
+=====================
+
+Previously, all plugin interfaces were built into the main |TS| binary. In an effort to enhance modularity and enable compile-time checks, these interfaces have been moved to ``src/api``. They are now isolated into a separate shared library ``tsapi.so``.
+
+In addition, a new static library ``tsutil.a`` has been created, which contains code used by both the core and the plugins (via the plugin APIs), and is linked into the |TS| binary to keep functionalities consistent.
+
+Note that ``tsapi.so`` depends on ``tsutil.a`` and other static libraries in
+the core. ``tsapi.so`` is not statically linked against these dependencies
+during its creation, but relies on them being linked into |TS|. To verify these
+dependencies, a compile-time sanity check links ``tsapi.so`` with the main
+Traffic Server binary (|TS|), ensuring all symbols required by ``tsapi.so`` will
+be available in |TS|. The actual binding of these dependent symbols occurs
+dynamically at runtime when |TS| is launched.
 
 Historical
 ==========
@@ -60,7 +78,7 @@ The contents of "lib/ts" were broken up and moved to different locations. The he
 "include/tscore" for core only headers, while headers to be made available to plugins were moved to
 "include/tscpp/util". The corresponding source files were moved to "src/tscore" and "src/tscpp/util"
 respectively. "libtsutil" was split in to "libtscore" for the core code and "libtscpputil" for shared
-code.
+code.  Now "libtscpputil" has been combined with "tsapicore" headers into the "tsutil" library.
 
 Appendix
 ========

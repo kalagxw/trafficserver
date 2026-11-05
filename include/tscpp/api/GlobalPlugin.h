@@ -21,6 +21,8 @@
  * @brief Contains the interface used in creating Global plugins.
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include "tscpp/api/Plugin.h"
@@ -64,11 +66,11 @@ public:
    *  see HookType and Plugin for the correspond HookTypes and callback methods. If you fail to implement the
    *  callback, a default implementation will be used that will only resume the Transaction.
    *
-   * @param HookType the type of hook you wish to register
+   * @param[in] hook_type the type of hook you wish to register
    * @see HookType
    * @see Plugin
    */
-  void registerHook(Plugin::HookType);
+  void registerHook(Plugin::HookType hook_type);
   ~GlobalPlugin() override;
 
 protected:
@@ -82,7 +84,7 @@ protected:
   GlobalPlugin(bool ignore_internal_transactions = false);
 
 private:
-  GlobalPluginState *state_; /**< Internal state tied to a GlobalPlugin */
+  std::unique_ptr<GlobalPluginState> state_; /**< Internal state tied to a GlobalPlugin */
 };
 
 } // namespace atscppapi

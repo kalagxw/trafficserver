@@ -23,32 +23,18 @@ Debug Tags
 **********
 
 Use the API macro
-``TSDbg(ctlptr, const char *format_str, ...)`` to add
+``Dbg(ctl, const char *format_str, ...)`` to add
 traces in your plugin. In this macro:
 
--  ``ctlptr`` is the Traffic Server parameter that enables Traffic Server
-   to print out ``format_str``.  It is returned by ``TSDbgCtlCreate()``.
+-  ``ctl`` is the Traffic Server parameter that enables Traffic Server
+   to print out ``format_str``.  It is an instance of the class ``DbgCtl``.
 
 -  ``...`` are variables for ``format_str`` in the standard ``printf``
    style.
 
-``void TSDbgCtlCreate (const char *tag)`` returns a (const) pointer to
-``TSDbgCtl``.  The ``TSDbgCtl`` control is enabled when debug output is
-enabled globally by configuaration, and ``tag`` matches a configured
+The ``DbgCtl`` control is enabled when debug output is
+enabled globally by configuration, and ``tag`` matches a configured
 regular expression.
-
-The deprecated API
-``void TSDebug (const char *tag, const char *format_str, ...)`` also
-outputs traces.  In this API:
-
--  ``tag`` is the Traffic Server parameter that enables Traffic Server
-   to print out ``format_str``
-
--  ``...`` are variables for ``format_str`` in the standard ``printf``
-   style.
-
-Use of ``TSDebug()`` causes trace output to have a more negative impact
-on proxy throughput.
 
 Run Traffic Server with the ``-Ttag`` option. For example, if the tag is
 ``my-plugin``, then the debug output goes to ``traffic.out.``\ See
@@ -58,30 +44,19 @@ below:
 
        traffic_server -T"my-plugin"
 
-Sets the following variables in :file:`records.config` (in the Traffic Server
+Sets the following variables in :file:`records.yaml` (in the Traffic Server
 ``config`` directory):
 
-::
+.. code-block:: yaml
 
-       CONFIG proxy.config.diags.debug.enabled INT 1
-       CONFIG proxy.config.diags.debug.tags STRING debug-tag-name
+   records:
+     diags:
+       debug:
+         enabled: 1
+         tags: debug-tag-name
 
-(Performance will be better if ``enabled`` is set to 3 rather than 1, but,
-using 3, output from ``TSDebug()`` will not be enabled, only from ``TSDbg()``.)
+
 In this case, debug output goes to ``traffic.out``.
-
-Example:
-
-.. code-block:: c
-
-       static TSDbgCtl const *my_dbg_ctl; // Non-local variable.
-       ...
-       my_dbg_ctl = TSDbgCtlCreate("my-plugin"); // In TSPluginInit() or TSRemapInit().
-       ...
-       TSDbg(my_dbg_ctl, "Starting my-plugin at %d", the_time);
-       ...
-       TSDbg(my_dbg_ctl, "Later on in my-plugin");
-
 
 The statement ``"Starting my-plugin at <time>"`` appears whenever you
 run Traffic Server with the ``my-plugin`` tag:
@@ -90,15 +65,18 @@ run Traffic Server with the ``my-plugin`` tag:
 
        traffic_server -T"my-plugin"
 
-If your plugin is a C++ plugin, the above example can be written as:
+Example:
 
 .. code-block:: cpp
 
-       static auto my_dbg_ctl = TSDbgCtlCreate("my-plugin"); // Non-local variable.
+       namespace
+       {
+       DbgCtl my_dbg_ctl{"my-plugin"}; // Non-local variable.
+       }
        ...
-       TSDbg(my_dbg_ctl, "Starting my-plugin at %d", the_time);
+       Dbg(my_dbg_ctl, "Starting my-plugin at %d", the_time);
        ...
-       TSDbg(my_dbg_ctl, "Later on in my-plugin");
+       Dbg(my_dbg_ctl, "Later on in my-plugin");
 
 Other Useful Internal Debug Tags
 ================================

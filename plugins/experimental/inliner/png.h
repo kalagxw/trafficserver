@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -33,8 +34,8 @@ namespace ats
 namespace inliner
 {
   struct PNG {
-    typedef std::vector<char> Content;
-    typedef Content::const_iterator Iterator;
+    using Content  = std::vector<char>;
+    using Iterator = Content::const_iterator;
 
     static const uint32_t HEADER_SIZE = 8;
 
@@ -59,7 +60,7 @@ namespace inliner
     class ChunkHeader
     {
       unsigned char length_[4];
-      char type_[4];
+      char          type_[4];
 
     public:
       uint32_t
@@ -85,8 +86,8 @@ namespace inliner
       // chunk length (4) + chunk type (4) + chunk crc (4)
       const int32_t N = 12;
 
-      const char *iterator  = content.data();
-      const char *const end = iterator + content.size();
+      const char       *iterator = content.data();
+      const char *const end      = iterator + content.size();
 
       if (std::distance(iterator, end) > HEADER_SIZE) {
         std::copy(iterator, iterator + HEADER_SIZE, std::back_inserter(output));
@@ -95,8 +96,8 @@ namespace inliner
 
         while (iterator < end) {
           const ChunkHeader *const header = reinterpret_cast<const ChunkHeader *>(iterator);
-          const std::string type          = header->type();
-          const uint32_t length           = header->length();
+          const std::string        type   = header->type();
+          const uint32_t           length = header->length();
 
           // iterator cannot go backwards
           if (iterator >= iterator + (length + N)) {

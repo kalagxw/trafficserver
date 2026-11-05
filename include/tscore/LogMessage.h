@@ -2,7 +2,7 @@
 
   LogMessage declaration.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -23,9 +23,9 @@
 
 #pragma once
 
-#include "DiagsTypes.h"
-#include "SourceLocation.h"
-#include "Throttler.h"
+#include "tscore/DiagsTypes.h"
+#include "tsutil/SourceLocation.h"
+#include "tscore/Throttler.h"
 
 #include <atomic>
 #include <chrono>

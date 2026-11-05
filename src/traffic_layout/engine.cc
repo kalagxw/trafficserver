@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -24,24 +24,28 @@
 // for engine of traffic runroot
 // function introduction in engine.h
 
+#include "records/RecCore.h"
 #include "tscore/runroot.h"
-#include "tscore/I_Layout.h"
+#include "tscore/Layout.h"
 #include "tscore/ink_error.h"
 #include "tscore/ink_defs.h"
-#include "records/I_RecProcess.h"
-#include "RecordsConfig.h"
+#include "records/RecProcess.h"
+#include "records/RecordsConfig.h"
 #include "engine.h"
 #include "file_system.h"
 #include "info.h"
 
 #include <fstream>
 #include <iostream>
+#include <utility>
 #include <ftw.h>
 #include <yaml-cpp/yaml.h>
 #include <grp.h>
 #include <sysexits.h>
 
-static const long MAX_LOGIN        = ink_login_name_max();
+#include "iocore/eventsystem/RecProcess.h"
+
+static const long    MAX_LOGIN     = ink_login_name_max();
 static constexpr int MAX_GROUP_NUM = 32;
 
 // Personally I don't really like the way that nftw needs global variables. Right now there is no other options.
@@ -84,7 +88,7 @@ check_parent_path(const std::string &path)
     if (exists(Layout::relative_to(yaml_path, "runroot.yaml"))) {
       return yaml_path;
     }
-    yaml_path = yaml_path.substr(0, yaml_path.find_last_of("/"));
+    yaml_path = yaml_path.substr(0, yaml_path.find_last_of('/'));
   }
   return {};
 }
@@ -94,7 +98,7 @@ static std::string
 path_handler(const std::string &path, bool run_flag, const std::string &command)
 {
   std::string cur_working_dir = "";
-  char cwd[PATH_MAX];
+  char        cwd[PATH_MAX];
   if (!getcwd(cwd, sizeof(cwd))) {
     ink_warning("unexpected failure from getcwd() - %s", strerror(errno));
   } else {
@@ -138,7 +142,7 @@ path_handler(const std::string &path, bool run_flag, const std::string &command)
   if (!command.empty() && realpath(command.c_str(), RealBinPath) != nullptr) {
     std::string bindir = RealBinPath;
 
-    bindir = bindir.substr(0, bindir.find_last_of("/")); // getting the bin dir not executable path
+    bindir = bindir.substr(0, bindir.find_last_of('/')); // getting the bin dir not executable path
     bindir = check_parent_path(bindir);
     if (!bindir.empty()) {
       return bindir;
@@ -150,7 +154,7 @@ path_handler(const std::string &path, bool run_flag, const std::string &command)
 
 // check if there is any directory inside empty_check_directory to see if it is empty or not
 static int
-check_directory_empty(const char *path, const struct stat *s, int flag)
+check_directory_empty(const char *path, const struct stat * /* s ATS_UNUSED */, int /* flag ATS_UNUSED */)
 {
   return std::string(path) != empty_check_directory ? -1 : 0;
 }
@@ -179,8 +183,8 @@ LayoutEngine::create_runroot()
     status_code = EX_SOFTWARE;
     return;
   }
-  bool force_flag         = arguments.get("force");
-  bool abs_flag           = arguments.get("absolute");
+  bool        force_flag  = arguments.get("force");
+  bool        abs_flag    = arguments.get("absolute");
   std::string layout_file = arguments.get("layout").value();
   if (layout_file.find("runroot.yaml") != std::string::npos) {
     ink_error(
@@ -189,8 +193,8 @@ LayoutEngine::create_runroot()
     return;
   }
   // deal with the copy style
-  CopyStyle copy_style = HARD;
-  std::string style    = arguments.get("copy-style").value();
+  CopyStyle   copy_style = HARD;
+  std::string style      = arguments.get("copy-style").value();
   if (!style.empty()) {
     transform(style.begin(), style.end(), style.begin(), ::tolower);
     if (style == "full") {
@@ -205,8 +209,8 @@ LayoutEngine::create_runroot()
       return;
     }
   }
-  std::string original_root     = Layout::get()->prefix;
-  const std::string &ts_runroot = path;
+  std::string        original_root = Layout::get()->prefix;
+  const std::string &ts_runroot    = path;
   // check for existing runroot to use rather than create new one
   if (!force_flag && exists(Layout::relative_to(ts_runroot, "runroot.yaml"))) {
     std::cout << "Using existing runroot...\n"
@@ -270,11 +274,10 @@ LayoutEngine::create_runroot()
     try {
       YAML::Node yamlfile = YAML::LoadFile(layout_file);
       for (const auto &it : yamlfile) {
-        std::string key   = it.first.as<std::string>();
-        std::string value = it.second.as<std::string>();
-        auto iter         = new_map.find(key);
+        std::string key  = it.first.as<std::string>();
+        auto        iter = new_map.find(key);
         if (iter != new_map.end()) {
-          iter->second = value;
+          iter->second = it.second.as<std::string>();
         } else {
           if (key != "prefix") {
             ink_warning("Unknown item from %s: '%s'", layout_file.c_str(), key.c_str());
@@ -294,7 +297,7 @@ LayoutEngine::create_runroot()
   for (const auto &it : original_map) {
     // path handle
     std::string join_path;
-    if (it.second[0] && it.second[0] == '/') {
+    if (it.second.starts_with('/')) {
       join_path = it.second.substr(1);
     } else {
       join_path = it.second;
@@ -360,7 +363,7 @@ LayoutEngine::remove_runroot()
     return;
   }
 
-  std::string clean_root = path;
+  std::string &clean_root = path;
   append_slash(clean_root);
 
   if (arguments.get("force")) {
@@ -376,7 +379,7 @@ LayoutEngine::remove_runroot()
     map.erase(LAYOUT_EXEC_PREFIX);
     // get current working directory
     std::string cur_working_dir = "";
-    char cwd[PATH_MAX];
+    char        cwd[PATH_MAX];
     if (getcwd(cwd, sizeof(cwd)) == nullptr) {
       ink_warning("unexpected failure from getcwd() - %s", strerror(errno));
     } else {
@@ -384,9 +387,11 @@ LayoutEngine::remove_runroot()
     }
     for (const auto &it : map) {
       std::string dir = it.second;
-      append_slash(dir);
-      // get the directory to remove: prefix/etc/trafficserver -> prefix/etc
-      dir = dir.substr(0, dir.substr(clean_root.size()).find_first_of("/") + clean_root.size());
+      if (dir.size() > clean_root.size() && dir.substr(0, clean_root.size()) == clean_root) {
+        append_slash(dir);
+        // get the directory to remove: prefix/etc/trafficserver -> prefix/etc
+        dir = dir.substr(0, dir.substr(clean_root.size()).find_first_of('/') + clean_root.size());
+      }
       // don't remove cwd
       if (cur_working_dir != dir) {
         remove_directory(dir);
@@ -556,7 +561,7 @@ using gid_type = gid_t;
 static bool
 from_group(const char *user, gid_type group_id, gid_type path_gid)
 {
-  int ngroups = MAX_GROUP_NUM;
+  int      ngroups = MAX_GROUP_NUM;
   gid_type groups[ngroups];
   if (getgrouplist(user, group_id, groups, &ngroups) == -1) {
     ink_warning("Unable to get group list as user '%s'\n", user);
@@ -574,9 +579,9 @@ from_group(const char *user, gid_type group_id, gid_type path_gid)
 static void
 set_permission(PermissionMapType &permission_map, const struct passwd *pwd)
 {
-  gid_t ts_gid  = pwd->pw_gid;
-  uid_t ts_uid  = pwd->pw_uid;
-  bool new_line = false;
+  gid_t ts_gid   = pwd->pw_gid;
+  uid_t ts_uid   = pwd->pw_uid;
+  bool  new_line = false;
 
   // set up permission map for all permissions
   for (auto &it : permission_map) {
@@ -657,13 +662,14 @@ LayoutEngine::verify_runroot()
   // retrieve information
   std::string path = path_handler(arguments.get("path").value(), false, _argv[0]);
   std::string user;
-  char user_buf[MAX_LOGIN + 1];
+  char        user_buf[MAX_LOGIN + 1];
   if (arguments.get("with-user")) {
     user = arguments.get("with-user").value();
   } else {
-    RecProcessInit(RECM_STAND_ALONE, nullptr /* diags */);
+    RecProcessInit(nullptr /* diags */);
     LibRecordsConfigInit();
-    if (RecGetRecordString("proxy.config.admin.user_id", user_buf, sizeof(user_buf)) != 0 || strlen(user_buf) == 0) {
+    if (auto buf_view{RecGetRecordString("proxy.config.admin.user_id", user_buf, sizeof(user_buf))};
+        !buf_view || buf_view.value().empty()) {
       user = user_buf;
     } else {
       user = TS_PKGSYSUSER;

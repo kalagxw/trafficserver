@@ -1,0 +1,15 @@
+``
+> GET ``/ping HTTP/1.1
+> Host: a.test
+> User-Agent: curl/``
+> Accept: */*
+``
+> uuid: redirect_test_1
+``
+< HTTP/1.1 200 OK
+< date: ``
+< Age: ``
+< Transfer-Encoding: chunked
+< ``Connection: keep-alive
+< Server: ATS/``
+``

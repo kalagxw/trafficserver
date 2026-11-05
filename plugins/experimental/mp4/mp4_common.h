@@ -21,11 +21,11 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <memory>
 #include <unistd.h>
 #include <cinttypes>
 
 #include <ts/ts.h>
-#include <ts/experimental.h>
 #include <ts/remap.h>
 #include "mp4_meta.h"
 
@@ -48,8 +48,8 @@ public:
   }
 
 public:
-  TSVIO vio               = nullptr;
-  TSIOBuffer buffer       = nullptr;
+  TSVIO            vio    = nullptr;
+  TSIOBuffer       buffer = nullptr;
   TSIOBufferReader reader = nullptr;
 };
 
@@ -84,14 +84,14 @@ public:
 
 public:
   IOHandle output;
-  Mp4Meta mm;
-  int64_t total;
-  int64_t tail;
-  int64_t pos;
-  int64_t content_length;
-  int64_t meta_length;
+  Mp4Meta  mm;
+  int64_t  total;
+  int64_t  tail;
+  int64_t  pos;
+  int64_t  content_length;
+  int64_t  meta_length;
 
-  TSIOBuffer res_buffer;
+  TSIOBuffer       res_buffer;
   TSIOBufferReader res_reader;
   TSIOBufferReader dup_reader;
 
@@ -104,19 +104,13 @@ class Mp4Context
 public:
   Mp4Context(float s) : start(s), cl(0), mtc(nullptr), transform_added(false){};
 
-  ~Mp4Context()
-  {
-    if (mtc) {
-      delete mtc;
-      mtc = nullptr;
-    }
-  }
+  ~Mp4Context() {}
 
 public:
-  float start;
+  float   start;
   int64_t cl;
 
-  Mp4TransformContext *mtc;
+  std::unique_ptr<Mp4TransformContext> mtc;
 
   bool transform_added;
 };

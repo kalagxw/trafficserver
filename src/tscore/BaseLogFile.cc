@@ -2,7 +2,7 @@
 
   Base class for log files implementation
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -116,7 +116,7 @@ BaseLogFile::roll(long interval_start, long interval_end)
 
   // Read meta info if needed (if file was not opened)
   if (!m_meta_info) {
-    m_meta_info = new BaseMetaInfo(m_name.get());
+    m_meta_info = std::make_unique<BaseMetaInfo>(m_name.get());
   }
 
   // Create the new file name, which consists of a timestamp and rolled
@@ -127,9 +127,9 @@ BaseLogFile::roll(long interval_start, long interval_end)
   // format is something like:
   //
   //    "squid.log.mymachine.19980712.12h00m00s-19980713.12h00m00s.old"
-  char roll_name[LOGFILE_ROLL_MAXPATHLEN];
-  char start_time_ext[64];
-  char end_time_ext[64];
+  char   roll_name[LOGFILE_ROLL_MAXPATHLEN];
+  char   start_time_ext[64];
+  char   end_time_ext[64];
   time_t start, end;
 
   // Start with conservative values for the start and end bounds, then
@@ -160,7 +160,7 @@ BaseLogFile::roll(long interval_start, long interval_end)
     if (interval_start == 0) {
       start = m_start_time;
     } else {
-      start = (m_start_time < interval_start) ? m_start_time : interval_start;
+      start = (m_start_time > 0 && m_start_time < interval_start) ? m_start_time : interval_start;
     }
   }
   log_log_trace("in BaseLogFile::roll(..), start = %ld, m_start_time = %ld, interval_start = %ld\n", start, m_start_time,
@@ -238,7 +238,7 @@ bool
 BaseLogFile::rolled_logfile(char *path)
 {
   const int target_len = static_cast<int>(strlen(LOGFILE_ROLLED_EXTENSION));
-  int len              = static_cast<int>(strlen(path));
+  int       len        = static_cast<int>(strlen(path));
   if (len > target_len) {
     char *str = &path[len - target_len];
     if (!strcmp(str, LOGFILE_ROLLED_EXTENSION)) {
@@ -297,15 +297,15 @@ BaseLogFile::open_file(int perm)
       // This object must be fresh since it has not built its MetaInfo
       // so we create a new MetaInfo object that will read right away
       // (in the constructor) the corresponding metafile
-      m_meta_info = new BaseMetaInfo(m_name.get());
+      m_meta_info = std::make_unique<BaseMetaInfo>(m_name.get());
     }
   } else {
     // The log file does not exist, so we create a new MetaInfo object
     //  which will save itself to disk right away (in the constructor)
     if (m_has_signature) {
-      m_meta_info = new BaseMetaInfo(m_name.get(), static_cast<long>(time(nullptr)), m_signature);
+      m_meta_info = std::make_unique<BaseMetaInfo>(m_name.get(), static_cast<long>(time(nullptr)), m_signature);
     } else {
-      m_meta_info = new BaseMetaInfo(m_name.get(), static_cast<long>(time(nullptr)));
+      m_meta_info = std::make_unique<BaseMetaInfo>(m_name.get(), static_cast<long>(time(nullptr)));
     }
   }
 
@@ -333,7 +333,8 @@ BaseLogFile::open_file(int perm)
   }
 
   // set m_bytes_written to force the rolling based on file size.
-  m_bytes_written = fseek(m_fp, 0, SEEK_CUR);
+  fseek(m_fp, 0, SEEK_END);
+  m_bytes_written = ftell(m_fp);
 
   log_log_trace("BaseLogFile %s is now open (fd=%d)\n", m_name.get(), fileno(m_fp));
   m_is_init = true;
@@ -362,8 +363,7 @@ BaseLogFile::close_file()
     ret       = fclose(m_fp);
     m_fp      = nullptr;
     m_is_init = false;
-    delete m_meta_info;
-    m_meta_info = nullptr;
+    m_meta_info.reset();
   }
   return ret;
 }
@@ -387,14 +387,12 @@ BaseLogFile::display(FILE *fd)
  * Lowest level internal logging facility for BaseLogFile
  *
  * Since BaseLogFiles can potentially be created before the bootstrap
- * instance of Diags is ready, we cannot simply call something like Debug().
+ * instance of Diags is ready, we cannot simply call something like Dbg().
  * However, we still need to log the creation of BaseLogFile, since the
  * information is still useful. This function will print out log messages
- * into traffic.out if we happen to be bootstrapping Diags. Since
- * traffic_manager redirects stdout/stderr into traffic.out, that
- * redirection is inherited by way of exec()/fork() all the way here.
+ * into traffic.out if we happen to be bootstrapping Diags.
  *
- * TODO use Debug() for non bootstrap instances
+ * TODO use Dbg() for non bootstrap instances
  */
 void
 BaseLogFile::log_log(LogLogPriorityLevel priority, const char *format, ...)
@@ -402,7 +400,7 @@ BaseLogFile::log_log(LogLogPriorityLevel priority, const char *format, ...)
   va_list args;
 
   const char *priority_name = nullptr;
-  FILE *output              = stdout;
+  FILE       *output        = stdout;
   switch (priority) {
   case LL_Debug:
     priority_name = "DEBUG";
@@ -428,7 +426,7 @@ BaseLogFile::log_log(LogLogPriorityLevel priority, const char *format, ...)
 
   va_start(args, format);
   struct timeval now;
-  double now_f;
+  double         now_f;
 
   gettimeofday(&now, nullptr);
   now_f = now.tv_sec + now.tv_usec / 1000000.0f;
@@ -454,7 +452,7 @@ BaseLogFile::log_log(LogLogPriorityLevel priority, const char *format, ...)
 void
 BaseMetaInfo::_build_name(const char *filename)
 {
-  int i = -1, l = 0;
+  int  i = -1, l = 0;
   char c;
   while (c = filename[l], c != 0) {
     if (c == '/') {
@@ -482,13 +480,13 @@ void
 BaseMetaInfo::_read_from_file()
 {
   _flags |= DATA_FROM_METAFILE; // mark attempt
-  int fd = elevating_open(_filename, O_RDONLY);
+  int fd  = elevating_open(_filename, O_RDONLY);
   if (fd < 0) {
     log_log_error("Could not open metafile %s for reading: %s\n", _filename, strerror(errno));
   } else {
     _flags |= FILE_OPEN_SUCCESSFUL;
     SimpleTokenizer tok('=', SimpleTokenizer::OVERWRITE_INPUT_STRING);
-    int line_number = 1;
+    int             line_number = 1;
     while (ink_file_fd_readline(fd, BUF_SIZE, _buffer) > 0) {
       tok.setString(_buffer);
       char *t = tok.getNext();
@@ -496,14 +494,14 @@ BaseMetaInfo::_read_from_file()
         if (strcmp(t, "creation_time") == 0) {
           t = tok.getNext();
           if (t) {
-            _creation_time = static_cast<time_t>(ink_atoi64(t));
-            _flags |= VALID_CREATION_TIME;
+            _creation_time  = static_cast<time_t>(ink_atoi64(t));
+            _flags         |= VALID_CREATION_TIME;
           }
         } else if (strcmp(t, "object_signature") == 0) {
           t = tok.getNext();
           if (t) {
-            _log_object_signature = ink_atoi64(t);
-            _flags |= VALID_SIGNATURE;
+            _log_object_signature  = ink_atoi64(t);
+            _flags                |= VALID_SIGNATURE;
             log_log_trace("BaseMetaInfo::_read_from_file\n"
                           "\tfilename = %s\n"
                           "\tsignature string = %s\n"
@@ -577,8 +575,8 @@ int
 BaseLogFile::timestamp_to_str(long timestamp, char *buf, int size)
 {
   static const char *format_str = "%Y%m%d.%Hh%Mm%Ss";
-  struct tm res;
-  struct tm *tms;
+  struct tm          res;
+  struct tm         *tms;
   tms = ink_localtime_r((const time_t *)&timestamp, &res);
   return strftime(buf, size, format_str, tms);
 }

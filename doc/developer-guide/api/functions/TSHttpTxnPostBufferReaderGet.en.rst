@@ -16,7 +16,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSHttpTxnPostBufferReaderGet
 ****************************
@@ -34,11 +34,11 @@ Description
 ===========
 
 Retrieve the client request body for the transaction referenced by :arg:`txnp`.
-The body is read from via the returned :c:type:`TSIOBufferReader`. The returned
-:c:type:`TSIOBufferReader` is owned by the caller and the caller must free it
-via :c:func:`TSIOBufferReaderFree`. This function should be used in the handler
-for :data:`TS_HTTP_REQUEST_BUFFER_READ_COMPLETE_HOOK`. The following example
-handler makes use of :c:func:`TSHttpTxnPostBufferReaderGet`.
+The body is read from via the returned :cpp:type:`TSIOBufferReader`. The returned
+:cpp:type:`TSIOBufferReader` is owned by the caller and the caller must free it
+via :func:`TSIOBufferReaderFree`. This function should be used in the handler
+for :enumerator:`TS_HTTP_REQUEST_BUFFER_READ_COMPLETE_HOOK`. The following example
+handler makes use of :func:`TSHttpTxnPostBufferReaderGet`.
 
 .. code-block:: c
 
@@ -55,7 +55,7 @@ handler makes use of :c:func:`TSHttpTxnPostBufferReaderGet`.
 
        int64_t consumed      = 0;
        TSIOBufferBlock block = TSIOBufferReaderStart(post_buffer_reader);
-       while (block != NULL) {
+       while (block != nullptr) {
          int64_t data_len        = 0;
          const char *block_bytes = TSIOBufferBlockReadStart(block, post_buffer_reader, &data_len);
          memcpy(body_bytes + consumed, block_bytes, data_len);
@@ -74,5 +74,5 @@ handler makes use of :c:func:`TSHttpTxnPostBufferReaderGet`.
      return 0;
    }
 
-:ts:git:`example/plugins/c-api/request_buffer/request_buffer.c` is a simple
+:ts:git:`example/plugins/c-api/request_buffer/request_buffer.cc` is a simple
 yet complete plugin that accesses HTTP request bodies.

@@ -21,6 +21,8 @@
  * @brief Provides constructs to perform async operations.
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include <memory>
@@ -125,7 +127,7 @@ public:
   bool
   dispatch() override
   {
-    bool ret = false;
+    bool                   ret = false;
     std::lock_guard<Mutex> scopedLock(*dispatch_mutex_);
     if (event_receiver_) {
       event_receiver_->handleAsyncComplete(static_cast<AsyncProviderType &>(*provider_));
@@ -166,7 +168,7 @@ public:
 
 public:
   AsyncEventReceiverType *event_receiver_;
-  std::shared_ptr<Mutex> dispatch_mutex_;
+  std::shared_ptr<Mutex>  dispatch_mutex_;
 
 private:
   AsyncProviderType *provider_;

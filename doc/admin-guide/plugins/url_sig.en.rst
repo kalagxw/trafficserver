@@ -36,26 +36,9 @@ if there were no query string at all.
 Installation
 ============
 
-To make this plugin available, you must either enable experimental plugins
-when building |TS|::
-
-    ./configure --enable-experimental-plugins
-
-Or use :program:`tsxs` to compile the plugin against your current |TS| build.
-To do this, you must ensure that:
-
-#. Development packages for |TS| are installed.
-
-#. The :program:`tsxs` binary is in your path.
-
-#. The version of this plugin you are building, and the version of |TS| against
-   which you are building it are compatible.
-
-Once those conditions are satisfied, enter the source directory for the plugin
-and perform the following::
-
-    make -f Makefile.tsxs
-    make -f Makefile.tsxs install
+To make this plugin available, you must enable experimental plugins when
+building |TS| by passing the ``-DBUILD_EXPERIMENTAL_PLUGINS=ON`` to the ``cmake`` command
+when building.
 
 Configuration
 =============
@@ -278,6 +261,14 @@ in the configuration file::
         pcre regex for urls that aren't signed.
         default: no regex
 
+        .. seealso::
+           The exclusion regex is matched against the full request URL
+           (sliced before any ``?`` or ``#``). Operator-written patterns
+           can match more inputs than intended when unanchored. For
+           per-site subject definitions, common pitfalls, and
+           recommended pattern shapes, see
+           :ref:`admin-regex-best-practices`.
+
     url_type
         which url to match against
         pristine or remap
@@ -301,10 +292,15 @@ Edge Cache Debugging
 
 To include debugging output for this plugin in your |TS| logs, adjust the values
 for :ts:cv:`proxy.config.diags.debug.enabled` and
-:ts:cv:`proxy.config.diags.debug.tags` in your :file:`records.config` as so::
+:ts:cv:`proxy.config.diags.debug.tags` in your :file:`records.yaml` as so:
 
-    CONFIG proxy.config.diags.debug.enabled INT 1
-    CONFIG proxy.config.diags.debug.tags STRING url_sig
+.. code-block:: yaml
+
+   records:
+     diags:
+       debug:
+         enabled: 1
+         tags: url_sig
 
 Once updated, issue a :option:`traffic_ctl config reload` to make the settings
 active.
@@ -312,9 +308,8 @@ active.
 Example
 =======
 
-#. Enable experimental plugins when building |TS|::
-
-    ./configure --enable-experimental-plugins
+#. Enable experimental plugins when building |TS| by by passing
+   the ``-DBUILD_EXPERIMENTAL_PLUGINS=ON`` to the ``cmake`` command.
 
 #. Generate a secrets configuration for |TS| (replacing the output location
    with something appropriate to your |TS| installation)::

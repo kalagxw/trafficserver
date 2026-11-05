@@ -26,15 +26,15 @@
 #include "tscore/ink_assert.h"
 #include "tscore/ink_defs.h"
 #include "tscore/CryptoHash.h"
-#include "catch.hpp"
+#include <catch2/catch_test_macros.hpp>
 
-TEST_CASE("CrypoHash", "[libts][CrypoHash]")
+TEST_CASE("CryptoHash", "[libts][CryptoHash]")
 {
-  CryptoHash hash;
-  ats::CryptoContext ctx;
-  std::string_view test   = "asdfsfsdfljhasdfkjasdkfuy239874kasjdf";
-  std::string_view sha256 = "2602CBA2CC0331EB7C455E9F36030B32CE9BB432A90759075F5A702772BE123B";
-  std::string_view md5    = "480AEF8C24AA94B80DC6214ECEC8CD1A";
+  CryptoHash        hash;
+  ts::CryptoContext ctx;
+  std::string_view  test   = "asdfsfsdfljhasdfkjasdkfuy239874kasjdf";
+  std::string_view  sha256 = "2602CBA2CC0331EB7C455E9F36030B32CE9BB432A90759075F5A702772BE123B";
+  std::string_view  md5    = "480AEF8C24AA94B80DC6214ECEC8CD1A";
 
   // Hash the test data
   ctx.update(test.data(), test.size());

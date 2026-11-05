@@ -2,7 +2,7 @@
 
   Reference-counting shared pointer, like std::shared_ptr.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -23,7 +23,8 @@
 
 #pragma once
 
-#include "tscore/ink_atomic.h"
+#include <atomic>
+#include <cstddef>
 
 ////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////
@@ -39,38 +40,30 @@ struct ForceVFPTToTop {
 //
 // class RefCountObj
 // prototypical class for reference counting
+// not necessarily allocated with new
 //
 ////////////////////////////////////////////////////////////////////////
 class RefCountObj : public ForceVFPTToTop
 {
 public:
   RefCountObj() {}
-  RefCountObj(const RefCountObj &s)
-  {
-    (void)s;
-    return;
-  }
-
+  RefCountObj(const RefCountObj &) = delete;
   ~RefCountObj() override {}
-  RefCountObj &
-  operator=(const RefCountObj &s)
-  {
-    (void)s;
-    return (*this);
-  }
+
+  RefCountObj &operator=(const RefCountObj &) = delete;
 
   // Increment the reference count, returning the new count.
   int
   refcount_inc()
   {
-    return ink_atomic_increment((int *)&m_refcount, 1) + 1;
+    return ++m_refcount;
   }
 
   // Decrement the reference count, returning the new count.
   int
   refcount_dec()
   {
-    return ink_atomic_increment((int *)&m_refcount, -1) - 1;
+    return --m_refcount;
   }
 
   int
@@ -79,14 +72,26 @@ public:
     return m_refcount;
   }
 
-  virtual void
-  free()
+  virtual void free() = 0;
+
+private:
+  std::atomic<int> m_refcount = 0;
+};
+
+////////////////////////////////////////////////////////////////////////
+//
+// class RefCountObjInHeap
+// reference counted object allocated with new
+//
+////////////////////////////////////////////////////////////////////////
+class RefCountObjInHeap : public RefCountObj
+{
+public:
+  void
+  free() override
   {
     delete this;
   }
-
-private:
-  int m_refcount = 0;
 };
 
 ////////////////////////////////////////////////////////////////////////
@@ -102,7 +107,7 @@ public:
   Ptr(Ptr<T> &&);
   ~Ptr();
 
-  void clear();
+  void    clear();
   Ptr<T> &operator=(const Ptr<T> &);
   Ptr<T> &operator=(Ptr<T> &&);
   Ptr<T> &operator=(T *);
@@ -119,27 +124,31 @@ public:
   }
 
   // Making this explicit avoids unwanted conversions.  See https://en.wikibooks.org/wiki/More_C%2B%2B_Idioms/Safe_bool .
-  explicit operator bool() const { return m_ptr != nullptr; }
+  explicit
+  operator bool() const
+  {
+    return m_ptr != nullptr;
+  }
 
-  int
+  bool
   operator==(const T *p)
   {
     return (m_ptr == p);
   }
 
-  int
-  operator==(const Ptr<T> &p)
+  bool
+  operator==(const Ptr<T> &p) const
   {
     return (m_ptr == p.m_ptr);
   }
 
-  int
+  bool
   operator!=(const T *p)
   {
     return (m_ptr != p);
   }
 
-  int
+  bool
   operator!=(const Ptr<T> &p)
   {
     return (m_ptr != p.m_ptr);
@@ -249,8 +258,9 @@ inline void
 Ptr<T>::clear()
 {
   if (m_ptr) {
-    if (!m_ptr->refcount_dec())
+    if (!m_ptr->refcount_dec()) {
       m_ptr->free();
+    }
     m_ptr = nullptr;
   }
 }

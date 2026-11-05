@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -40,7 +40,7 @@
 EventNotify::EventNotify()
 {
 #if defined(HAVE_EVENTFD) && TS_USE_EPOLL == 1
-  int ret;
+  int                ret;
   struct epoll_event ev;
 
   m_event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -80,8 +80,8 @@ int
 EventNotify::wait()
 {
 #if defined(HAVE_EVENTFD) && TS_USE_EPOLL == 1
-  ssize_t nr, nr_fd;
-  uint64_t value = 0;
+  ssize_t            nr, nr_fd;
+  uint64_t           value = 0;
   struct epoll_event ev;
 
   do {
@@ -108,8 +108,8 @@ int
 EventNotify::timedwait(int timeout) // milliseconds
 {
 #if defined(HAVE_EVENTFD) && TS_USE_EPOLL == 1
-  ssize_t nr, nr_fd = 0;
-  uint64_t value = 0;
+  ssize_t            nr, nr_fd = 0;
+  uint64_t           value = 0;
   struct epoll_event ev;
 
   //
@@ -140,7 +140,7 @@ EventNotify::timedwait(int timeout) // milliseconds
 #else
   ink_timestruc abstime;
 
-  abstime = ink_hrtime_to_timespec(ink_get_hrtime_internal() + HRTIME_SECONDS(timeout));
+  abstime = ink_hrtime_to_timespec(ink_get_hrtime() + HRTIME_SECONDS(timeout));
   return ink_cond_timedwait(&m_cond, &m_mutex, &abstime);
 #endif
 }

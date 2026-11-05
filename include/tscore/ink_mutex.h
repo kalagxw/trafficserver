@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -37,7 +37,7 @@
 
 #include <pthread.h>
 #include <cstdlib>
-typedef pthread_mutex_t ink_mutex;
+using ink_mutex = pthread_mutex_t;
 
 void ink_mutex_init(ink_mutex *m);
 void ink_mutex_destroy(ink_mutex *m);
@@ -47,7 +47,7 @@ ink_mutex_acquire(ink_mutex *m)
 {
   int error = pthread_mutex_lock(m);
   if (unlikely(error != 0)) {
-    ink_abort("pthread_mutex_lock(%p) failed: %s (%d)", m, strerror(error), error);
+    ink_abort("pthread_mutex_lock(%p) failed: %s (%d)", static_cast<void *>(m), strerror(error), error);
   }
 }
 
@@ -56,7 +56,7 @@ ink_mutex_release(ink_mutex *m)
 {
   int error = pthread_mutex_unlock(m);
   if (unlikely(error != 0)) {
-    ink_abort("pthread_mutex_unlock(%p) failed: %s (%d)", m, strerror(error), error);
+    ink_abort("pthread_mutex_unlock(%p) failed: %s (%d)", static_cast<void *>(m), strerror(error), error);
   }
 }
 

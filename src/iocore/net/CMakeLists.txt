@@ -1,0 +1,241 @@
+#######################
+#
+#  Licensed to the Apache Software Foundation (ASF) under one or more contributor license
+#  agreements.  See the NOTICE file distributed with this work for additional information regarding
+#  copyright ownership.  The ASF licenses this file to you under the Apache License, Version 2.0
+#  (the "License"); you may not use this file except in compliance with the License.  You may obtain
+#  a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software distributed under the License
+#  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+#  or implied. See the License for the specific language governing permissions and limitations under
+#  the License.
+#
+#######################
+
+add_library(
+  inknet STATIC
+  ALPNSupport.cc
+  AsyncSignalEventIO.cc
+  BIO_fastopen.cc
+  BoringSSLUtils.cc
+  Connection.cc
+  ConnectionTracker.cc
+  EventIO.cc
+  YamlSNIConfig.cc
+  Net.cc
+  NetEvent.cc
+  NetHandler.cc
+  NetVCOptions.cc
+  NetAcceptEventIO.cc
+  NetVConnection.cc
+  PollCont.cc
+  ProxyProtocol.cc
+  ReadWriteEventIO.cc
+  Server.cc
+  Socks.cc
+  SSLAPIHooks.cc
+  SSLCertLookup.cc
+  SSLClientCoordinator.cc
+  SSLClientUtils.cc
+  SSLConfig.cc
+  SSLSecret.cc
+  SSLDiags.cc
+  SSLNetAccept.cc
+  SSLNetProcessor.cc
+  SSLNetVConnection.cc
+  SSLNextProtocolAccept.cc
+  SSLNextProtocolSet.cc
+  SSLRPKUtils.cc
+  SSLSNIConfig.cc
+  SSLStats.cc
+  SSLSessionCache.cc
+  SSLSessionTicket.cc
+  SSLUtils.cc
+  SSLKeyUtils.cc
+  OCSPStapling.cc
+  TLSBasicSupport.cc
+  TLSEventSupport.cc
+  TLSCertSwitchSupport.cc
+  TLSEarlyDataSupport.cc
+  TLSKeyLogger.cc
+  TLSSessionResumptionSupport.cc
+  TLSSNISupport.cc
+  TLSTunnelSupport.cc
+  TLSCertCompression.cc
+  UDPEventIO.cc
+  UnixConnection.cc
+  UnixNet.cc
+  UnixNetAccept.cc
+  UnixNetProcessor.cc
+  UnixNetVConnection.cc
+  UnixUDPConnection.cc
+  UnixUDPNet.cc
+  SSLDynlock.cc
+  SNIActionPerformer.cc
+)
+add_library(ts::inknet ALIAS inknet)
+
+if(TS_USE_QUIC OR TS_USE_QMUX)
+  add_subdirectory(quic)
+
+  target_sources(inknet PRIVATE QUICSupport.cc)
+  target_link_libraries(inknet PUBLIC ts::quic)
+endif()
+
+if(TS_USE_QUIC)
+  target_sources(inknet PRIVATE QUICClosedConCollector.cc QUICMultiCertConfigLoader.cc QUICNextProtocolAccept.cc)
+
+  if(TS_HAS_OPENSSL_QUIC)
+    target_sources(inknet PRIVATE OpenSSLQUICNetProcessor.cc OpenSSLQUICNetVConnection.cc OpenSSLQUICPacketHandler.cc)
+  elseif(TS_HAS_QUICHE)
+    target_sources(inknet PRIVATE QUICNet.cc QUICNetProcessor.cc QUICNetVConnection.cc QUICPacketHandler.cc)
+    target_link_libraries(inknet PUBLIC quiche::quiche)
+  endif()
+endif()
+
+if(TS_USE_QMUX)
+  add_subdirectory(qmux)
+  target_link_libraries(inknet PUBLIC quiche::quiche ts::qmux)
+endif()
+
+if(BUILD_REGRESSION_TESTING OR BUILD_TESTING)
+  target_sources(inknet PRIVATE NetVCTest.cc)
+endif()
+
+target_compile_options(inknet PUBLIC -Wno-deprecated-declarations)
+
+target_link_libraries(
+  inknet
+  PUBLIC ts::inkevent
+         ts::proxy
+         ts::records
+         ts::tscore
+         OpenSSL::Crypto
+         OpenSSL::SSL
+         ts::tsapibackend
+  PRIVATE ts::config ts::tsutil yaml-cpp::yaml-cpp
+)
+
+# Is this necessary?
+if(TS_USE_LINUX_IO_URING)
+  target_link_libraries(inknet PUBLIC ts::inkuring)
+endif()
+
+# Link cert compression libraries after OpenSSL so that OpenSSL include
+# directories appear first in the search order, preventing broad system
+# include paths (e.g. from Homebrew's zstd) from shadowing them.
+if(HAVE_SSL_CTX_ADD_CERT_COMPRESSION_ALG)
+  target_sources(inknet PRIVATE TLSCertCompression_zlib.cc)
+  if(HAVE_BROTLI_ENCODE_H)
+    target_sources(inknet PRIVATE TLSCertCompression_brotli.cc)
+    target_link_libraries(inknet PRIVATE brotli::brotlienc brotli::brotlidec)
+  endif()
+  if(HAVE_ZSTD_H)
+    target_sources(inknet PRIVATE TLSCertCompression_zstd.cc)
+    target_link_libraries(inknet PRIVATE zstd::zstd)
+  endif()
+endif()
+
+if(BUILD_TESTING)
+  # libinknet_stub.cc is need because GNU ld is sensitive to the order of static libraries on the command line, and we have a cyclic dependency between inknet and proxy
+  add_executable(
+    test_net
+    libinknet_stub.cc
+    NetVCTest.cc
+    unit_tests/test_ConnectionTracker.cc
+    unit_tests/test_EventIOMigration.cc
+    unit_tests/test_NetHandler.cc
+    unit_tests/test_ProxyProtocol.cc
+    unit_tests/test_SSLCertLookup.cc
+    unit_tests/test_SSLNetVConnectionAsyncEp.cc
+    unit_tests/test_SSLRPKUtils.cc
+    unit_tests/test_SSLSecret.cc
+    unit_tests/test_SSLSNIConfig.cc
+    unit_tests/test_UnixNetVConnectionTimeouts.cc
+    unit_tests/test_YamlSNIConfig.cc
+    unit_tests/test_OCSPStapling.cc
+    unit_tests/unit_test_main.cc
+    unit_tests/benchmark_TLSCertCompression.cc
+    unit_tests/benchmark_InactivityCop.cc
+  )
+  if(SSLLIB_IS_AT_LEAST_OPENSSL3)
+    target_sources(test_net PRIVATE unit_tests/test_SSLDHParams.cc)
+  endif()
+  if(TS_USE_QUIC OR TS_USE_QMUX)
+    target_sources(test_net PRIVATE unit_tests/test_QUICConnectionId.cc)
+  endif()
+  if(TS_USE_QUIC)
+    target_sources(test_net PRIVATE unit_tests/test_QUICTokenKeyConfig.cc)
+  endif()
+  if(TS_USE_QUIC OR TS_USE_QMUX)
+    target_sources(test_net PRIVATE unit_tests/test_QUICStream.cc)
+  endif()
+  # Use link groups to solve circular dependency
+  set(LINK_GROUP_LIBS
+      ts::logging
+      ts::inknet
+      ts::inkhostdb
+      ts::proxy
+      ts::tsapibackend
+      ts::inkdns
+      ts::http2
+      ts::inkcache
+      ts::rpcpublichandlers
+      ts::overridable_txn_vars
+      ts::http
+      ts::http_remap
+  )
+  if(TS_USE_QUIC OR TS_USE_QMUX)
+    list(APPEND LINK_GROUP_LIBS quic http3)
+    if(TS_HAS_QUICHE)
+      list(APPEND LINK_GROUP_LIBS quiche::quiche)
+    endif()
+  endif()
+  if(TS_USE_QMUX)
+    list(APPEND LINK_GROUP_LIBS qmux)
+  endif()
+  if(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RESCAN_SUPPORTED)
+    string(JOIN "," LINK_GROUP_LIBS_CSV ${LINK_GROUP_LIBS})
+    target_link_libraries(
+      test_net PRIVATE Catch2::Catch2WithMain ts::tscore "$<LINK_GROUP:RESCAN,${LINK_GROUP_LIBS_CSV}>" ts::tsutil
+                       ts::inkevent libswoc::libswoc
+    )
+  elseif(APPLE)
+    # These linkers already do the equivalent of RESCAN, so there's no support in cmake for it
+    # This case is mainly for macOS
+    # The reason that the list is different here, is because a careful ordering is necessary to prevent duplicate symbols, which are not allowed on macOS
+    target_link_libraries(
+      test_net PRIVATE Catch2::Catch2WithMain ts::tscore ts::proxy ts::inknet ts::inkevent libswoc::libswoc
+    )
+  else()
+    # CMake <3.24 does not support LINK_GROUP. Use -Wl,--start-group and -Wl,--end-group manually.
+    target_link_libraries(
+      test_net
+      PRIVATE Catch2::Catch2WithMain
+              ts::tscore
+              -Wl,--start-group
+              ${LINK_GROUP_LIBS}
+              -Wl,--end-group
+              ts::tsutil
+              ts::inkevent
+              libswoc::libswoc
+    )
+  endif()
+  if(NOT APPLE)
+    target_link_options(test_net PRIVATE -Wl,--allow-multiple-definition)
+  endif()
+  set(LIBINKNET_UNIT_TEST_DIR "${CMAKE_SOURCE_DIR}/src/iocore/net/unit_tests")
+  target_compile_definitions(test_net PRIVATE LIBINKNET_UNIT_TEST_DIR=${LIBINKNET_UNIT_TEST_DIR})
+  if(APPLE)
+    add_catch2_test(NAME test_net COMMAND test_net)
+  else()
+    # Disable ODR violation caused by double definition inside a stub file libinknet_stub.cc
+    # see remap_test_dlopen_leak_suppression.txt for more info.
+    add_catch2_test(NAME test_net COMMAND test_net ENVIRONMENT "ASAN_OPTIONS=detect_odr_violation=0")
+  endif()
+endif()
+
+clang_tidy_check(inknet)

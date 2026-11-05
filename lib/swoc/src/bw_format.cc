@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-License-Identifier: Apache-2.0
 // Copyright Apache Software Foundation 2019
+
 /** @file
 
     Formatted output for BufferWriter.
@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <ctime>
+#include <cmath>
 #include <sys/param.h>
 #include <unistd.h>
 
@@ -23,14 +24,18 @@
 using namespace std::literals;
 using namespace swoc::literals;
 
-swoc::bwf::ExternalNames swoc::bwf::Global_Names;
+
 using swoc::svto_radix;
 
 namespace swoc { inline namespace SWOC_VERSION_NS {
-namespace bwf {
-const Spec Spec::DEFAULT;
 
-const Spec::Property Spec::_prop;
+namespace bwf {
+ExternalNames& Global_Names() {
+  static swoc::bwf::ExternalNames Global_Names;
+  return Global_Names;
+}
+
+const Spec Spec::DEFAULT;
 
 #pragma GCC diagnostic ignored "-Wchar-subscripts"
 
@@ -92,12 +97,12 @@ Spec::parse(TextView fmt) {
         if (!isxdigit(d0) || !isxdigit(d1)) {
           throw std::invalid_argument("URI encoding with non-hex characters");
         }
-        _fill = isdigit(d0) ? d0 - '0' : tolower(d0) - 'a' + 10;
+        _fill  = isdigit(d0) ? d0 - '0' : tolower(d0) - 'a' + 10;
         _fill += (isdigit(d1) ? d1 - '0' : tolower(d1) - 'a' + 10) << 4;
-        sz += 4;
+        sz    += 4;
       } else if (sz.size() > 1 && Align::NONE != (_align = align_of(sz[1]))) {
-        _fill = *sz;
-        sz += 2;
+        _fill  = *sz;
+        sz    += 2;
       } else if (Align::NONE != (_align = align_of(*sz))) {
         ++sz;
       }
@@ -188,7 +193,7 @@ Spec::parse(TextView fmt) {
 /// @return @c true if a specifier was parsed, @c false if not.
 bool
 Format::TextViewExtractor::parse(TextView &fmt, std::string_view &literal, std::string_view &specifier) {
-  TextView::size_type off;
+  TextView::size_type off = 0;
 
   // Check for brace delimiters.
   off = fmt.find_if([](char c) { return '{' == c || '}' == c; });
@@ -309,7 +314,8 @@ namespace {
 char UPPER_DIGITS[]                                 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 char LOWER_DIGITS[]                                 = "0123456789abcdefghijklmnopqrstuvwxyz";
 static const std::array<uint64_t, 11> POWERS_OF_TEN = {
-  {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000, 10000000000}};
+  {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000, 10000000000}
+};
 } // namespace
 
 /// Templated radix based conversions. Only a small number of radix are
@@ -323,8 +329,8 @@ To_Radix(uintmax_t n, char *buff, size_t width, char *digits) {
   char *out = buff + width;
   if (n) {
     while (n) {
-      *--out = digits[n % RADIX];
-      n /= RADIX;
+      *--out  = digits[n % RADIX];
+      n      /= RADIX;
     }
   } else {
     *--out = '0';
@@ -522,15 +528,15 @@ Format_Float(BufferWriter &w, Spec const &spec, double f, bool negative_p) {
     return w;
   }
 
-  uint64_t whole_part = static_cast<uint64_t>(f);
+  auto whole_part = static_cast<uint64_t>(f);
   if (whole_part == f || spec._prec == 0) { // integral
     return Format_Integer(w, spec, whole_part, negative_p);
   }
 
   static constexpr char dec = '.';
-  double frac;
-  size_t l = 0;
-  size_t r = 0;
+  double frac               = NAN;
+  size_t l                  = 0;
+  size_t r                  = 0;
   char whole[std::numeric_limits<double>::digits10 + 1];
   char fraction[std::numeric_limits<double>::digits10 + 1];
   char neg               = 0;
@@ -547,7 +553,7 @@ Format_Float(BufferWriter &w, Spec const &spec, double f, bool negative_p) {
 
   // Shift the floating point based on the precision. Used to convert
   //  trailing fraction into an integer value.
-  uint64_t shift;
+  uint64_t shift = 0;
   if (precision < POWERS_OF_TEN.size()) {
     shift = POWERS_OF_TEN[precision];
   } else { // not precomputed.
@@ -557,7 +563,7 @@ Format_Float(BufferWriter &w, Spec const &spec, double f, bool negative_p) {
     }
   }
 
-  uint64_t frac_part = static_cast<uint64_t>(frac * shift + 0.5 /* rounding */);
+  auto frac_part = static_cast<uint64_t>(frac * shift + 0.5 /* rounding */);
 
   l = bwf::To_Radix<10>(whole_part, whole, sizeof(whole), bwf::LOWER_DIGITS);
   r = bwf::To_Radix<10>(frac_part, fraction, sizeof(fraction), bwf::LOWER_DIGITS);
@@ -625,7 +631,18 @@ Format::Format(TextView fmt) {
   }
 }
 
-NameBinding::~NameBinding() {}
+bool
+Format::is_literal() const {
+  for (auto const &spec : _items) {
+    if (Spec::LITERAL_TYPE != spec._type) {
+      return false;
+    }
+  }
+  return true;
+}
+
+NameBinding::~NameBinding() = default;
+
 } // namespace bwf
 
 BufferWriter &
@@ -647,6 +664,32 @@ bwformat(BufferWriter &w, bwf::Spec const &spec, std::string_view sv) {
   }
   return w;
 }
+
+// Generic pointer formatting
+BufferWriter &
+bwformat(BufferWriter &w, bwf::Spec const &spec, const void *ptr) {
+  using namespace swoc::literals;
+  bwf::Spec ptr_spec{spec};
+  ptr_spec._radix_lead_p = true;
+
+  if (ptr == nullptr) {
+    if (spec._type == 's' || spec._type == 'S') {
+      ptr_spec._type = bwf::Spec::DEFAULT_TYPE;
+      ptr_spec._ext  = ""_sv; // clear any extension.
+      return bwformat(w, spec, spec._type == 's' ? "null"_sv : "NULL"_sv);
+    } else if (spec._type == bwf::Spec::DEFAULT_TYPE) {
+      return w; // print nothing if there is no format character override.
+    }
+  }
+
+  if (ptr_spec._type == bwf::Spec::DEFAULT_TYPE || ptr_spec._type == 'p') {
+    ptr_spec._type = 'x'; // if default or 'p;, switch to lower hex.
+  } else if (ptr_spec._type == 'P') {
+    ptr_spec._type = 'X'; // P means upper hex, overriding other specializations.
+  }
+  return bwf::Format_Integer(w, ptr_spec, reinterpret_cast<intptr_t>(ptr), false);
+}
+// doc end
 
 BufferWriter &
 bwformat(BufferWriter &w, bwf::Spec const &spec, bwf::HexDump const &hex) {
@@ -670,15 +713,16 @@ bwformat(BufferWriter &w, bwf::Spec const &spec, bwf::HexDump const &hex) {
 }
 
 BufferWriter &
-bwformat(BufferWriter &w, bwf::Spec const &spec, MemSpan<void> const &span) {
+bwformat(BufferWriter &w, bwf::Spec const &spec, MemSpan<void const> const &span) {
   if ('x' == spec._type || 'X' == spec._type) {
-    const char *digits = 'X' == spec._type ? bwf::UPPER_DIGITS : bwf::LOWER_DIGITS;
+    const char *digits = ('X' == spec._type) ? bwf::UPPER_DIGITS : bwf::LOWER_DIGITS;
     size_t block       = spec._prec > 0 ? spec._prec : span.size();
-    TextView view{span.view()};
+    TextView view{span.rebind<char const>()};
     bool space_p = false;
     while (view) {
-      if (space_p)
+      if (space_p) {
         w.write(' ');
+      }
       space_p = true;
       if (spec._radix_lead_p) {
         w.write('0').write(digits[33]);
@@ -699,148 +743,79 @@ FixedBufferWriter::operator>>(std::ostream &s) const {
 }
 
 namespace {
-// Hand rolled, might not be totally compliant everywhere, but probably close
-// enough. The long string will be locally accurate. Clang requires the double
-// braces. Why, Turing only knows.
-static const std::array<std::string_view, 134> ERRNO_SHORT_NAME = {{
-  "SUCCESS",
-  "EPERM",
-  "ENOENT",
-  "ESRCH",
-  "EINTR",
-  "EIO",
-  "ENXIO",
-  "E2BIG ",
-  "ENOEXEC",
-  "EBADF",
-  "ECHILD",
-  "EAGAIN",
-  "ENOMEM",
-  "EACCES",
-  "EFAULT",
-  "ENOTBLK",
-  "EBUSY",
-  "EEXIST",
-  "EXDEV",
-  "ENODEV",
-  "ENOTDIR",
-  "EISDIR",
-  "EINVAL",
-  "ENFILE",
-  "EMFILE",
-  "ENOTTY",
-  "ETXTBSY",
-  "EFBIG",
-  "ENOSPC",
-  "ESPIPE",
-  "EROFS",
-  "EMLINK",
-  "EPIPE",
-  "EDOM",
-  "ERANGE",
-  "EDEADLK",
-  "ENAMETOOLONG",
-  "ENOLCK",
-  "ENOSYS",
-  "ENOTEMPTY",
-  "ELOOP",
-  "EWOULDBLOCK",
-  "ENOMSG",
-  "EIDRM",
-  "ECHRNG",
-  "EL2NSYNC",
-  "EL3HLT",
-  "EL3RST",
-  "ELNRNG",
-  "EUNATCH",
-  "ENOCSI",
-  "EL2HTL",
-  "EBADE",
-  "EBADR",
-  "EXFULL",
-  "ENOANO",
-  "EBADRQC",
-  "EBADSLT",
-  "EDEADLOCK",
-  "EBFONT",
-  "ENOSTR",
-  "ENODATA",
-  "ETIME",
-  "ENOSR",
-  "ENONET",
-  "ENOPKG",
-  "EREMOTE",
-  "ENOLINK",
-  "EADV",
-  "ESRMNT",
-  "ECOMM",
-  "EPROTO",
-  "EMULTIHOP",
-  "EDOTDOT",
-  "EBADMSG",
-  "EOVERFLOW",
-  "ENOTUNIQ",
-  "EBADFD",
-  "EREMCHG",
-  "ELIBACC",
-  "ELIBBAD",
-  "ELIBSCN",
-  "ELIBMAX",
-  "ELIBEXEC",
-  "EILSEQ",
-  "ERESTART",
-  "ESTRPIPE",
-  "EUSERS",
-  "ENOTSOCK",
-  "EDESTADDRREQ",
-  "EMSGSIZE",
-  "EPROTOTYPE",
-  "ENOPROTOOPT",
-  "EPROTONOSUPPORT",
-  "ESOCKTNOSUPPORT",
-  "EOPNOTSUPP",
-  "EPFNOSUPPORT",
-  "EAFNOSUPPORT",
-  "EADDRINUSE",
-  "EADDRNOTAVAIL",
-  "ENETDOWN",
-  "ENETUNREACH",
-  "ENETRESET",
-  "ECONNABORTED",
-  "ECONNRESET",
-  "ENOBUFS",
-  "EISCONN",
-  "ENOTCONN",
-  "ESHUTDOWN",
-  "ETOOMANYREFS",
-  "ETIMEDOUT",
-  "ECONNREFUSED",
-  "EHOSTDOWN",
-  "EHOSTUNREACH",
-  "EALREADY",
-  "EINPROGRESS",
-  "ESTALE",
-  "EUCLEAN",
-  "ENOTNAM",
-  "ENAVAIL",
-  "EISNAM",
-  "EREMOTEIO",
-  "EDQUOT",
-  "ENOMEDIUM",
-  "EMEDIUMTYPE",
-  "ECANCELED",
-  "ENOKEY",
-  "EKEYEXPIRED",
-  "EKEYREVOKED",
-  "EKEYREJECTED",
-  "EOWNERDEAD",
-  "ENOTRECOVERABLE",
-  "ERFKILL",
-  "EHWPOISON",
+// errno value -> symbolic name, indexed directly by the errno number (O(1)).
+// The numbering differs between Linux and the BSD-derived platforms, and even
+// macOS and FreeBSD disagree on a few of their own high-numbered codes, so each
+// platform carries a table generated from its real <errno.h>. Gaps in the
+// numbering are empty and fall through to "Unknown"; a platform with no table
+// is a compile error. The long form (the 'l' spec, below) still uses strerror().
+// clang-format off
+#if defined(__linux__)
+static constexpr std::array<std::string_view, 134> ERRNO_NAMES = {{
+  /*   0 */ "SUCCESS", "EPERM", "ENOENT", "ESRCH", "EINTR", "EIO", "ENXIO", "E2BIG",
+  /*   8 */ "ENOEXEC", "EBADF", "ECHILD", "EAGAIN", "ENOMEM", "EACCES", "EFAULT", "ENOTBLK",
+  /*  16 */ "EBUSY", "EEXIST", "EXDEV", "ENODEV", "ENOTDIR", "EISDIR", "EINVAL", "ENFILE",
+  /*  24 */ "EMFILE", "ENOTTY", "ETXTBSY", "EFBIG", "ENOSPC", "ESPIPE", "EROFS", "EMLINK",
+  /*  32 */ "EPIPE", "EDOM", "ERANGE", "EDEADLK", "ENAMETOOLONG", "ENOLCK", "ENOSYS", "ENOTEMPTY",
+  /*  40 */ "ELOOP", "", "ENOMSG", "EIDRM", "ECHRNG", "EL2NSYNC", "EL3HLT", "EL3RST",
+  /*  48 */ "ELNRNG", "EUNATCH", "ENOCSI", "EL2HLT", "EBADE", "EBADR", "EXFULL", "ENOANO",
+  /*  56 */ "EBADRQC", "EBADSLT", "", "EBFONT", "ENOSTR", "ENODATA", "ETIME", "ENOSR",
+  /*  64 */ "ENONET", "ENOPKG", "EREMOTE", "ENOLINK", "EADV", "ESRMNT", "ECOMM", "EPROTO",
+  /*  72 */ "EMULTIHOP", "EDOTDOT", "EBADMSG", "EOVERFLOW", "ENOTUNIQ", "EBADFD", "EREMCHG", "ELIBACC",
+  /*  80 */ "ELIBBAD", "ELIBSCN", "ELIBMAX", "ELIBEXEC", "EILSEQ", "ERESTART", "ESTRPIPE", "EUSERS",
+  /*  88 */ "ENOTSOCK", "EDESTADDRREQ", "EMSGSIZE", "EPROTOTYPE", "ENOPROTOOPT", "EPROTONOSUPPORT", "ESOCKTNOSUPPORT", "EOPNOTSUPP",
+  /*  96 */ "EPFNOSUPPORT", "EAFNOSUPPORT", "EADDRINUSE", "EADDRNOTAVAIL", "ENETDOWN", "ENETUNREACH", "ENETRESET", "ECONNABORTED",
+  /* 104 */ "ECONNRESET", "ENOBUFS", "EISCONN", "ENOTCONN", "ESHUTDOWN", "ETOOMANYREFS", "ETIMEDOUT", "ECONNREFUSED",
+  /* 112 */ "EHOSTDOWN", "EHOSTUNREACH", "EALREADY", "EINPROGRESS", "ESTALE", "EUCLEAN", "ENOTNAM", "ENAVAIL",
+  /* 120 */ "EISNAM", "EREMOTEIO", "EDQUOT", "ENOMEDIUM", "EMEDIUMTYPE", "ECANCELED", "ENOKEY", "EKEYEXPIRED",
+  /* 128 */ "EKEYREVOKED", "EKEYREJECTED", "EOWNERDEAD", "ENOTRECOVERABLE", "ERFKILL", "EHWPOISON",
 }};
-static constexpr DiscreteRange<unsigned> ERRNO_RANGE{0, ERRNO_SHORT_NAME.size() - 1};
-// This provides convenient safe access to the errno short name array.
-auto errno_short_name = [](unsigned n) { return ERRNO_RANGE.contains(n) ? ERRNO_SHORT_NAME[n] : "Unknown"sv; };
+#elif defined(__APPLE__)
+static constexpr std::array<std::string_view, 108> ERRNO_NAMES = {{
+  /*   0 */ "SUCCESS", "EPERM", "ENOENT", "ESRCH", "EINTR", "EIO", "ENXIO", "E2BIG",
+  /*   8 */ "ENOEXEC", "EBADF", "ECHILD", "EDEADLK", "ENOMEM", "EACCES", "EFAULT", "ENOTBLK",
+  /*  16 */ "EBUSY", "EEXIST", "EXDEV", "ENODEV", "ENOTDIR", "EISDIR", "EINVAL", "ENFILE",
+  /*  24 */ "EMFILE", "ENOTTY", "ETXTBSY", "EFBIG", "ENOSPC", "ESPIPE", "EROFS", "EMLINK",
+  /*  32 */ "EPIPE", "EDOM", "ERANGE", "EAGAIN", "EINPROGRESS", "EALREADY", "ENOTSOCK", "EDESTADDRREQ",
+  /*  40 */ "EMSGSIZE", "EPROTOTYPE", "ENOPROTOOPT", "EPROTONOSUPPORT", "ESOCKTNOSUPPORT", "ENOTSUP", "EPFNOSUPPORT", "EAFNOSUPPORT",
+  /*  48 */ "EADDRINUSE", "EADDRNOTAVAIL", "ENETDOWN", "ENETUNREACH", "ENETRESET", "ECONNABORTED", "ECONNRESET", "ENOBUFS",
+  /*  56 */ "EISCONN", "ENOTCONN", "ESHUTDOWN", "ETOOMANYREFS", "ETIMEDOUT", "ECONNREFUSED", "ELOOP", "ENAMETOOLONG",
+  /*  64 */ "EHOSTDOWN", "EHOSTUNREACH", "ENOTEMPTY", "EPROCLIM", "EUSERS", "EDQUOT", "ESTALE", "EREMOTE",
+  /*  72 */ "EBADRPC", "ERPCMISMATCH", "EPROGUNAVAIL", "EPROGMISMATCH", "EPROCUNAVAIL", "ENOLCK", "ENOSYS", "EFTYPE",
+  /*  80 */ "EAUTH", "ENEEDAUTH", "EPWROFF", "EDEVERR", "EOVERFLOW", "EBADEXEC", "EBADARCH", "ESHLIBVERS",
+  /*  88 */ "EBADMACHO", "ECANCELED", "EIDRM", "ENOMSG", "EILSEQ", "ENOATTR", "EBADMSG", "EMULTIHOP",
+  /*  96 */ "ENODATA", "ENOLINK", "ENOSR", "ENOSTR", "EPROTO", "ETIME", "EOPNOTSUPP", "ENOPOLICY",
+  /* 104 */ "ENOTRECOVERABLE", "EOWNERDEAD", "EQFULL", "ENOTCAPABLE",
+}};
+#elif defined(__FreeBSD__)
+static constexpr std::array<std::string_view, 98> ERRNO_NAMES = {{
+  /*   0 */ "SUCCESS", "EPERM", "ENOENT", "ESRCH", "EINTR", "EIO", "ENXIO", "E2BIG",
+  /*   8 */ "ENOEXEC", "EBADF", "ECHILD", "EDEADLK", "ENOMEM", "EACCES", "EFAULT", "ENOTBLK",
+  /*  16 */ "EBUSY", "EEXIST", "EXDEV", "ENODEV", "ENOTDIR", "EISDIR", "EINVAL", "ENFILE",
+  /*  24 */ "EMFILE", "ENOTTY", "ETXTBSY", "EFBIG", "ENOSPC", "ESPIPE", "EROFS", "EMLINK",
+  /*  32 */ "EPIPE", "EDOM", "ERANGE", "EAGAIN", "EINPROGRESS", "EALREADY", "ENOTSOCK", "EDESTADDRREQ",
+  /*  40 */ "EMSGSIZE", "EPROTOTYPE", "ENOPROTOOPT", "EPROTONOSUPPORT", "ESOCKTNOSUPPORT", "EOPNOTSUPP", "EPFNOSUPPORT", "EAFNOSUPPORT",
+  /*  48 */ "EADDRINUSE", "EADDRNOTAVAIL", "ENETDOWN", "ENETUNREACH", "ENETRESET", "ECONNABORTED", "ECONNRESET", "ENOBUFS",
+  /*  56 */ "EISCONN", "ENOTCONN", "ESHUTDOWN", "ETOOMANYREFS", "ETIMEDOUT", "ECONNREFUSED", "ELOOP", "ENAMETOOLONG",
+  /*  64 */ "EHOSTDOWN", "EHOSTUNREACH", "ENOTEMPTY", "EPROCLIM", "EUSERS", "EDQUOT", "ESTALE", "EREMOTE",
+  /*  72 */ "EBADRPC", "ERPCMISMATCH", "EPROGUNAVAIL", "EPROGMISMATCH", "EPROCUNAVAIL", "ENOLCK", "ENOSYS", "EFTYPE",
+  /*  80 */ "EAUTH", "ENEEDAUTH", "EIDRM", "ENOMSG", "EOVERFLOW", "ECANCELED", "EILSEQ", "ENOATTR",
+  /*  88 */ "EDOOFUS", "EBADMSG", "EMULTIHOP", "ENOLINK", "EPROTO", "ENOTCAPABLE", "ECAPMODE", "ENOTRECOVERABLE",
+  /*  96 */ "EOWNERDEAD", "EINTEGRITY",
+}};
+#else
+#error "errno name table not defined for this platform"
+#endif
+// clang-format on
+
+std::string_view
+errno_short_name(int e)
+{
+  if (e >= 0 && e < static_cast<int>(ERRNO_NAMES.size()) && !ERRNO_NAMES[e].empty()) {
+    return ERRNO_NAMES[e];
+  }
+  return "Unknown"sv;
+}
 } // namespace
 
 BufferWriter &
@@ -860,7 +835,7 @@ bwformat(BufferWriter &w, bwf::Spec const &spec, bwf::Errno const &e) {
       if (short_p) {
         w.write(": ");
       }
-      w.write(strerror(e._e));
+      w.write(TextView(strerror(e._e), TextView::npos));
     }
     if (spec._type != 's' && spec._type != 'S') {
       w.write(' ');
@@ -877,7 +852,7 @@ bwformat(BufferWriter &w, bwf::Spec const &spec, bwf::Date const &date) {
   if (spec.has_numeric_type()) {
     bwformat(w, spec, date._epoch);
   } else {
-    struct tm t;
+    struct tm t {};
     auto r = w.remaining();
     size_t n{0};
     // Verify @a fmt is null terminated, even outside the bounds of the view.
@@ -910,75 +885,50 @@ bwformat(BufferWriter &w, bwf::Spec const &spec, bwf::Date const &date) {
 
 BufferWriter &
 bwformat(BufferWriter &w, bwf::Spec const &spec, bwf::Pattern const &pattern) {
-  auto limit        = std::min<size_t>(spec._max, pattern._text.size() * pattern._n);
-  decltype(limit) n = 0;
-  while (n < limit) {
-    w.write(pattern._text);
-    n += pattern._text.size();
+  if (!pattern._text.empty()) { // If there's no text, no point in looping.
+    auto limit        = std::min<size_t>(spec._max, pattern._text.size() * pattern._n);
+    decltype(limit) n = 0;
+    while (n < limit) {
+      w.write(pattern._text);
+      n += pattern._text.size();
+    }
   }
   return w;
 }
 
-// --- IP address support ---
-
-#if 0
 BufferWriter &
-bwformat(BufferWriter &w, bwf::Spec const &spec, IpAddr const &addr)
-{
-  bwf::Spec local_spec{spec}; // Format for address elements and port.
-  bool addr_p{true};
-  bool family_p{false};
+bwformat(BufferWriter &w, bwf::Spec const &spec, std::error_code const &ec) {
+  static const auto G_CAT = &std::generic_category();
+  static const auto S_CAT = &std::system_category();
 
-  if (spec._ext.size()) {
-    if (spec._ext.front() == '=') {
-      local_spec._ext.remove_prefix(1);
-    } else if (spec._ext.size() > 1 && spec._ext[1] == '=') {
-      local_spec._ext.remove_prefix(2);
-    }
-  }
-  if (local_spec._ext.size()) {
-    addr_p = false;
-    for (char c : local_spec._ext) {
-      switch (c) {
-        case 'a':
-        case 'A':
-          addr_p = true;
-          break;
-        case 'f':
-        case 'F':
-          family_p = true;
-          break;
-      }
-    }
-  }
-
-  if (addr_p) {
-    if (addr.isIp4()) {
-      bwformat(w, spec, addr._addr._ip4);
-    } else if (addr.isIp6()) {
-      bwformat(w, spec, addr._addr._ip6);
+  // This provides convenient safe access to the errno short name array.
+  static const swoc::bwf::Format number_fmt{"[{}]"_sv}; // numeric value format.
+  if (spec.has_numeric_type()) {                        // if numeric type, print just the numeric part.
+    bwformat(w, spec, ec.value());
+  } else {
+    auto short_name = (&ec.category() == G_CAT || &ec.category() == S_CAT) ? errno_short_name(ec.value()) : "Unknown"sv;
+    if (short_name != "Unknown"sv) {
+      bwformat(w, spec, short_name);
     } else {
-      w.print("*Not IP address [{}]*", addr.family());
+      w.write(ec.message());
     }
-  }
-
-  if (family_p) {
-    local_spec._min = 0;
-    if (addr_p) {
-      w.write(' ');
-    }
-    if (spec.has_numeric_type()) {
-      bwformat(w, local_spec, static_cast<uintmax_t>(addr.family()));
-    } else {
-      bwformat(w, local_spec, addr.family());
+    if (spec._type != 's' && spec._type != 'S') {
+      w.write(' ').write('[').format(spec, ec.value()).write(']');
     }
   }
   return w;
 }
-#endif
 
-namespace {
-} // namespace
+BufferWriter &
+bwformat(BufferWriter &w, bwf::Spec const &spec, bwf::UnHex const &obj) {
+  auto span{obj._span};
+  size_t limit = spec._max;
+  while (span.size() >= 2 && limit--) {
+    auto b = svto_radix<16>(span.clip_prefix(2).rebind<char const>());
+    w.write(b);
+  }
+  return w;
+}
 
 }} // namespace swoc::SWOC_VERSION_NS
 
@@ -986,30 +936,6 @@ namespace std {
 ostream &
 operator<<(ostream &s, swoc::FixedBufferWriter &w) {
   return s << w.view();
-}
-
-swoc::BufferWriter &
-bwformat(swoc::BufferWriter &w, swoc::bwf::Spec const &spec, error_code const &ec) {
-  static const auto GENERIC_CATEGORY = &std::generic_category();
-  static const auto SYSTEM_CATEGORY  = &std::system_category();
-
-  // This provides convenient safe access to the errno short name array.
-  static const swoc::bwf::Format number_fmt{"[{}]"_sv}; // numeric value format.
-  if (spec.has_numeric_type()) {
-    // if numeric type, print just the numeric part.
-    bwformat(w, spec, ec.value());
-  } else {
-    if ((&ec.category() == GENERIC_CATEGORY || &ec.category() == SYSTEM_CATEGORY) && swoc::ERRNO_RANGE.contains(ec.value())) {
-      bwformat(w, spec, swoc::ERRNO_SHORT_NAME[ec.value()]);
-    } else {
-      w.write(ec.message());
-    }
-    if (spec._type != 's' && spec._type != 'S') {
-      w.write(' ');
-      w.print(number_fmt, ec.value());
-    }
-  }
-  return w;
 }
 
 } // namespace std

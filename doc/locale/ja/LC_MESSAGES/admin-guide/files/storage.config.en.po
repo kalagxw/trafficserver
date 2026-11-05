@@ -126,7 +126,7 @@ msgid ""
 "following examples for more information."
 msgstr ""
 "ローディスクやローパーティションを使う場合、Traffic Server プロセス に使用さ"
-"れる:ts:cv:`Traffic Server ユーザ <proxy.config.admin.user_id>` が、ローディ"
+"れる :ts:cv:`Traffic Server ユーザ <proxy.config.admin.user_id>` が、ローディ"
 "スクデバイスやローパーティションの読み書きの権限を持っているか確認するべきで"
 "す。ベストプラクティスの一つは、 デバイスファイルに 'g+rw' 権限が付与される"
 "こととTraffic Server ユーザ がデバイスファイルの自身のグループに属しているこ"
@@ -135,10 +135,10 @@ msgstr ""
 
 #: ../../../admin-guide/files/storage.config.en.rst:71
 msgid ""
-"As with standard ``records.config`` integers, human readable prefixes are "
+"As with standard ``records.yaml`` integers, human readable prefixes are "
 "also supported. They include"
 msgstr ""
-"標準的な ``records.config`` の数値と同様、ヒューマンリーダブルなプレフィック"
+"標準的な ``records.yaml`` の数値と同様、ヒューマンリーダブルなプレフィック"
 "スもサポートされています。これらには以下のものを含みます。"
 
 #: ../../../admin-guide/files/storage.config.en.rst:74
@@ -220,14 +220,6 @@ msgid ""
 msgstr ""
 "ファイルシステム上のキャッシュディスクストレージを使用する際、指定されたディ"
 "レクトリを一つのみ持てます。これは将来のバージョンで対応される予定です。 "
-
-#: ../../../admin-guide/files/storage.config.en.rst:122
-msgid "Solaris Example"
-msgstr "Solaris の例"
-
-#: ../../../admin-guide/files/storage.config.en.rst:124
-msgid "The following example is for the Solaris operating system::"
-msgstr "以下の例は、Solaris オペレーティングシステム用のものです。::"
 
 #: ../../../admin-guide/files/storage.config.en.rst:129
 msgid "Size is optional. If not specified, the entire partition is used."

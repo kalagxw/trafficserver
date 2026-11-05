@@ -64,6 +64,8 @@
  * OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include "swoc/bwf_ip.h"
+
 #include "tscore/ink_platform.h"
 #include "tscore/ink_defs.h"
 
@@ -74,9 +76,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <arpa/nameser.h>
-#ifdef HAVE_ARPA_NAMESER_COMPAT_H
 #include <arpa/nameser_compat.h>
-#endif
 #include <cstdio>
 #include <cctype>
 #include <resolv.h>
@@ -94,7 +94,8 @@
 #endif
 
 HostResPreferenceOrder const HOST_RES_DEFAULT_PREFERENCE_ORDER = {
-  {HOST_RES_PREFER_IPV4, HOST_RES_PREFER_IPV6, HOST_RES_PREFER_NONE}};
+  {HOST_RES_PREFER_IPV4, HOST_RES_PREFER_IPV6, HOST_RES_PREFER_NONE}
+};
 
 HostResPreferenceOrder host_res_default_preference_order;
 
@@ -114,8 +115,8 @@ ink_res_nclose(ink_res_state statp)
 {
   if (statp->_vcsock >= 0) {
     (void)close(statp->_vcsock);
-    statp->_vcsock = -1;
-    statp->_flags &= ~(INK_RES_F_VC | INK_RES_F_CONN);
+    statp->_vcsock  = -1;
+    statp->_flags  &= ~(INK_RES_F_VC | INK_RES_F_CONN);
   }
 }
 
@@ -147,26 +148,11 @@ ink_res_setservers(ink_res_state statp, IpEndpoint const *set, int cnt)
   statp->nscount = nserv;
 }
 
-int
-ink_res_getservers(ink_res_state statp, sockaddr *set, int cnt)
-{
-  int zret              = 0; // return count.
-  IpEndpoint const *src = statp->nsaddr_list;
-
-  for (int i = 0; i < statp->nscount && i < cnt; ++i, ++src) {
-    if (ats_ip_copy(set, &src->sa)) {
-      ++set;
-      ++zret;
-    }
-  }
-  return zret;
-}
-
 static void
 ink_res_setoptions(ink_res_state statp, const char *options, const char *source ATS_UNUSED)
 {
   const char *cp = options;
-  int i;
+  int         i;
 
 #ifdef DEBUG
   if (statp->options & INK_RES_DEBUG) {
@@ -203,22 +189,6 @@ ink_res_setoptions(ink_res_state statp, const char *options, const char *source 
         printf(";;\ttimeout=%d\n", statp->retrans);
       }
 #endif
-#ifdef SOLARIS2
-    } else if (!strncmp(cp, "retrans:", sizeof("retrans:") - 1)) {
-      /*
-       * For backward compatibility, 'retrans' is
-       * supported as an alias for 'timeout', though
-       * without an imposed maximum.
-       */
-      statp->retrans = atoi(cp + sizeof("retrans:") - 1);
-    } else if (!strncmp(cp, "retry:", sizeof("retry:") - 1)) {
-      /*
-       * For backward compatibility, 'retry' is
-       * supported as an alias for 'attempts', though
-       * without an imposed maximum.
-       */
-      statp->retry = atoi(cp + sizeof("retry:") - 1);
-#endif /* SOLARIS2 */
     } else if (!strncmp(cp, "attempts:", sizeof("attempts:") - 1)) {
       i = atoi(cp + sizeof("attempts:") - 1);
       if (i <= INK_RES_MAXRETRY) {
@@ -299,23 +269,23 @@ ink_res_randomid()
  * @internal This function has to be reachable by res_data.c but not publicly.
  */
 int
-ink_res_init(ink_res_state statp,         ///< State object to update.
-             IpEndpoint const *pHostList, ///< Additional servers.
-             size_t pHostListSize,        ///< # of entries in @a pHostList.
-             int dnsSearch,               /// Option of search_default_domains.
-             const char *pDefDomain,      ///< Default domain (may be nullptr).
-             const char *pSearchList,     ///< Unknown
-             const char *pResolvConf      ///< Path to configuration file.
+ink_res_init(ink_res_state     statp,         ///< State object to update.
+             IpEndpoint const *pHostList,     ///< Additional servers.
+             size_t            pHostListSize, ///< # of entries in @a pHostList.
+             int               dnsSearch,     ///< Option of search_default_domains.
+             const char       *pDefDomain,    ///< Default domain (may be nullptr).
+             const char       *pSearchList,   ///< Unknown
+             const char       *pResolvConf    ///< Path to configuration file.
 )
 {
-  FILE *fp;
-  char *cp, **pp;
-  int n;
-  char buf[BUFSIZ];
-  size_t nserv   = 0;
-  int haveenv    = 0;
-  int havesearch = 0;
-  int dots;
+  FILE  *fp;
+  char  *cp, **pp;
+  int    n;
+  char   buf[BUFSIZ];
+  size_t nserv      = 0;
+  int    haveenv    = 0;
+  int    havesearch = 0;
+  int    dots;
   size_t maxns = INK_MAXNS;
 
   // INK_RES_SET_H_ERRNO(statp, 0);
@@ -331,25 +301,6 @@ ink_res_init(ink_res_state statp,         ///< State object to update.
   statp->pfcode  = 0;
   statp->_vcsock = -1;
   statp->_flags  = 0;
-
-#ifdef SOLARIS2
-  /*
-   * The old libresolv derived the defaultdomain from NIS/NIS+.
-   * We want to keep this behaviour
-   */
-  {
-    char buf[sizeof(statp->defdname)], *cp;
-    int ret;
-
-    if ((ret = sysinfo(SI_SRPC_DOMAIN, buf, sizeof(buf))) > 0 && (unsigned int)ret <= sizeof(buf)) {
-      if (buf[0] == '+')
-        buf[0] = '.';
-      cp = strchr(buf, '.');
-      cp = (cp == nullptr) ? buf : (cp + 1);
-      ink_strlcpy(statp->defdname, cp, sizeof(statp->defdname));
-    }
-  }
-#endif /* SOLARIS2 */
 
   /* Allow user to override the local domain definition */
   if ((cp = getenv("LOCALDOMAIN")) != nullptr) {
@@ -596,10 +547,10 @@ parse_host_res_preference(const char *value, HostResPreferenceOrder &order)
 {
   Tokenizer tokens(";/|");
   // preference from the config string.
-  int np = 0;                        // index in to @a m_host_res_preference
+  int  np = 0;                       // index in to @a m_host_res_preference
   bool found[N_HOST_RES_PREFERENCE]; // redundancy check array
-  int n;                             // # of tokens
-  int i;                             // index
+  int  n;                            // # of tokens
+  int  i;                            // index
 
   n = tokens.Initialize(value);
 
@@ -648,7 +599,7 @@ parse_host_res_preference(const char *value, HostResPreferenceOrder &order)
 int
 ts_host_res_order_to_string(HostResPreferenceOrder const &order, char *out, int size)
 {
-  int zret   = 0;
+  int  zret  = 0;
   bool first = true;
   for (auto i : order) {
     /* Note we use a semi-colon here because this must be compatible

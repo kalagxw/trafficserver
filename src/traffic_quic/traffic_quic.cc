@@ -23,25 +23,34 @@
 
 #include "tscore/ink_string.h"
 #include "tscore/ink_args.h"
-#include "tscore/I_Layout.h"
-#include "tscore/I_Version.h"
+#include "tscore/Layout.h"
+#include "tscore/Version.h"
 
-#include "RecordsConfig.h"
-#include "URL.h"
-#include "MIME.h"
-#include "HTTP.h"
-#include "HuffmanCodec.h"
-#include "Http3Config.h"
+#include "records/RecordsConfig.h"
+#include "proxy/hdrs/URL.h"
+#include "proxy/hdrs/MIME.h"
+#include "proxy/hdrs/HTTP.h"
+#include "proxy/hdrs/HuffmanCodec.h"
+#include "proxy/http3/Http3Config.h"
 
 #include "diags.h"
 #include "quic_client.h"
 
-#include "P_SSLUtils.h"
-#include "P_SSLConfig.h"
+#include "../iocore/net/P_SSLUtils.h"
+#include "../iocore/net/P_SSLConfig.h"
+
+#include "iocore/eventsystem/RecProcess.h"
+
+namespace
+{
 
 #define THREADS 1
 
 constexpr size_t stacksize = 1048576;
+
+DbgCtl dbg_ctl_quic_client{"quic_client"};
+
+} // end anonymous namespace
 
 // TODO: Support QUIC version, cipher suite ...etc
 // TODO: Support qdrive tests
@@ -54,22 +63,21 @@ main(int argc, const char **argv)
   Layout::create();
 
   // Set up the application version info
-  AppVersionInfo appVersionInfo;
-  appVersionInfo.setup(PACKAGE_NAME, "traffic_quic", PACKAGE_VERSION, __DATE__, __TIME__, BUILD_MACHINE, BUILD_PERSON, "");
+  auto &version = AppVersionInfo::setup_version("traffic_quic");
 
   QUICClientConfig config;
 
   const ArgumentDescription argument_descriptions[] = {
-    {"addr", 'a', "Address", "S1023", config.addr, nullptr, nullptr},
-    {"output", 'o', "Write to FILE instead of stdout", "S1023", config.output, nullptr, nullptr},
-    {"port", 'p', "Port", "S15", config.port, nullptr, nullptr},
-    {"path", 'P', "Path", "S1017", config.path, nullptr, nullptr},
-    {"server", 's', "Server name", "S127", config.server_name, nullptr, nullptr},
-    {"debug", 'T', "Vertical-bar-separated Debug Tags", "S1023", config.debug_tags, nullptr, nullptr},
-    {"close", 'c', "Enable connection close exercise", "F", &config.close, nullptr, nullptr},
-    {"reset", 'r', "Enable stateless reset exercise", "F", &config.reset, nullptr, nullptr},
-    {"http0_9", '-', "Enable HTTP/0.9", "T", &config.http0_9, nullptr, nullptr},
-    {"http3", '-', "Enable HTTP/3", "F", &config.http3, nullptr, nullptr},
+    {"addr",    'a', "Address",                           "S1023", config.addr,        nullptr, nullptr},
+    {"output",  'o', "Write to FILE instead of stdout",   "S1023", config.output,      nullptr, nullptr},
+    {"port",    'p', "Port",                              "S15",   config.port,        nullptr, nullptr},
+    {"path",    'P', "Path",                              "S1017", config.path,        nullptr, nullptr},
+    {"server",  's', "Server name",                       "S127",  config.server_name, nullptr, nullptr},
+    {"debug",   'T', "Vertical-bar-separated Debug Tags", "S1023", config.debug_tags,  nullptr, nullptr},
+    {"close",   'c', "Enable connection close exercise",  "F",     &config.close,      nullptr, nullptr},
+    {"reset",   'r', "Enable stateless reset exercise",   "F",     &config.reset,      nullptr, nullptr},
+    {"http0_9", '-', "Enable HTTP/0.9",                   "T",     &config.http0_9,    nullptr, nullptr},
+    {"http3",   '-', "Enable HTTP/3",                     "F",     &config.http3,      nullptr, nullptr},
 
     HELP_ARGUMENT_DESCRIPTION(),
     VERSION_ARGUMENT_DESCRIPTION(),
@@ -77,21 +85,20 @@ main(int argc, const char **argv)
   };
 
   // Process command line arguments and dump into variables
-  process_args(&appVersionInfo, argument_descriptions, countof(argument_descriptions), argv);
+  process_args(&version, argument_descriptions, countof(argument_descriptions), argv);
 
   if (config.http3) {
     config.http0_9 = false;
   }
 
   init_diags(config.debug_tags, nullptr);
-  RecProcessInit(RECM_STAND_ALONE);
+  RecProcessInit();
   LibRecordsConfigInit();
 
-  Debug("quic_client", "Load configs from %s", RecConfigReadConfigDir().c_str());
+  Dbg(dbg_ctl_quic_client, "Load configs from %s", RecConfigReadConfigDir().c_str());
 
   Thread *main_thread = new EThread;
   main_thread->set_specific();
-  net_config_poll_timeout = 10;
   ink_net_init(ts::ModuleVersion(1, 0, ts::ModuleVersion::PRIVATE));
 
   SSLInitializeLibrary();
@@ -109,9 +116,8 @@ main(int argc, const char **argv)
   url_init();
   mime_init();
   http_init();
-  hpack_huffman_init();
 
-  Http3Config::startup();
+  ts::Http3Config::startup();
 
   QUICClient client(&config);
   eventProcessor.schedule_in(&client, 1, ET_NET);
@@ -129,8 +135,8 @@ initialize_thread_for_http_sessions(EThread *, int)
   ink_assert(false);
 }
 
-#include "P_UnixNet.h"
-#include "P_DNSConnection.h"
+#include "../iocore/net/P_UnixNet.h"
+#include "../iocore/dns/P_DNSConnection.h"
 int
 DNSConnection::close()
 {
@@ -144,14 +150,7 @@ DNSConnection::trigger()
   ink_assert(false);
 }
 
-#include "StatPages.h"
-void
-StatPagesManager::register_http(char const *, Action *(*)(Continuation *, HTTPHdr *))
-{
-  //  ink_assert(false);
-}
-
-#include "ParentSelection.h"
+#include "proxy/ParentSelection.h"
 void
 SocksServerConfig::startup()
 {
@@ -172,7 +171,7 @@ ParentConfigParams::nextParent(HttpRequestData *, ParentResult *, unsigned int, 
   ink_assert(false);
 }
 
-#include "InkAPIInternal.h"
+#include "api/InkAPIInternal.h"
 
 APIHook *
 APIHook::next() const
@@ -195,6 +194,13 @@ APIHooks::append(INKContInternal *)
 
 int
 APIHook::invoke(int, void *) const
+{
+  ink_assert(false);
+  return 0;
+}
+
+int
+APIHook::blocking_invoke(int, void *) const
 {
   ink_assert(false);
   return 0;
@@ -225,7 +231,7 @@ ConfigUpdateCbTable::invoke(const char * /* name ATS_UNUSED */)
   ink_release_assert(false);
 }
 
-#include "ControlMatcher.h"
+#include "proxy/ControlMatcher.h"
 char *
 HttpRequestData::get_string()
 {
@@ -254,11 +260,10 @@ HttpRequestData::get_client_ip()
   return nullptr;
 }
 
-SslAPIHooks *ssl_hooks             = nullptr;
+SslAPIHooks       *ssl_hooks       = nullptr;
 LifecycleAPIHooks *lifecycle_hooks = nullptr;
-StatPagesManager statPagesManager;
 
-#include "HttpDebugNames.h"
+#include "proxy/http/HttpDebugNames.h"
 const char *
 HttpDebugNames::get_api_hook_name(TSHttpHookID t)
 {
@@ -270,7 +275,7 @@ HttpDebugNames::get_event_name(int)
   return "dummy";
 }
 
-#include "HttpSM.h"
+#include "proxy/http/HttpSM.h"
 HttpSM::HttpSM() : Continuation(nullptr), vc_table(this) {}
 
 void
@@ -310,19 +315,19 @@ HttpSM::init(bool from_early_data)
 }
 
 ClassAllocator<HttpSM> httpSMAllocator("httpSMAllocator");
-HttpAPIHooks *http_global_hooks;
+HttpAPIHooks          *http_global_hooks;
 
 HttpVCTable::HttpVCTable(HttpSM *) {}
 
 PostDataBuffers::~PostDataBuffers() {}
 
-#include "HttpTunnel.h"
+#include "proxy/http/HttpTunnel.h"
 HttpTunnel::HttpTunnel() : Continuation(nullptr) {}
 HttpTunnelConsumer::HttpTunnelConsumer() {}
 HttpTunnelProducer::HttpTunnelProducer() {}
 ChunkedHandler::ChunkedHandler() {}
 
-#include "HttpCacheSM.h"
+#include "proxy/http/HttpCacheSM.h"
 HttpCacheSM::HttpCacheSM() {}
 
 HttpCacheAction::HttpCacheAction() : sm(nullptr) {}
@@ -331,10 +336,52 @@ HttpCacheAction::cancel(Continuation *c)
 {
 }
 
-#include "PreWarmManager.h"
+#include "proxy/http/PreWarmManager.h"
 void
 PreWarmManager::reconfigure()
 {
 }
 
 PreWarmManager prewarmManager;
+
+#include "proxy/FetchSM.h"
+ClassAllocator<FetchSM, false> FetchSMAllocator("unusedFetchSMAllocator");
+bool
+FetchSM::is_initialized()
+{
+  return true;
+}
+void
+FetchSM::ext_launch()
+{
+}
+void
+FetchSM::ext_destroy()
+{
+}
+ssize_t
+FetchSM::ext_read_data(char *, unsigned long)
+{
+  return 0;
+}
+void
+FetchSM::ext_add_header(char const *, int, char const *, int)
+{
+}
+void
+FetchSM::ext_write_data(void const *, unsigned long)
+{
+}
+void *
+FetchSM::ext_get_user_data()
+{
+  return nullptr;
+}
+void
+FetchSM::ext_set_user_data(void *)
+{
+}
+void
+FetchSM::ext_init(Continuation *, char const *, char const *, char const *, sockaddr const *, int)
+{
+}

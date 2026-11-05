@@ -23,7 +23,7 @@ strategies.yaml
 
 .. include:: ../../common.defs
 
-The :file:`strategies.yaml` file identifies the next hop proxies used in an
+The :file:`strategies.yaml` file identifies the next hop proxies used in a
 cache hierarchy and the algorithms used to select the next hop proxy. Use
 this file to perform the following configuration:
 
@@ -34,7 +34,7 @@ Traffic Server uses the :file:`strategies.yaml` file only when one or more
 remap lines in remap.config specifies the use of a strategy with the @strategy tag.
 remap.config Example::
 
-  map http://www.foo.com http://www.bar.com @strategy='mid-tier-north'
+  map http://www.foo.com http://www.bar.com @strategy=mid-tier-north
 
 After you modify the :file:`strategies.yaml` file, run the :option:`traffic_ctl config reload`
 command to apply your changes.
@@ -59,10 +59,16 @@ The **hosts** definitions is a **YAML** list of hosts.  This list is **optional*
 In the example below, **hosts** is a **YAML** list of hosts.  Each host entry  uses a **YAML** anchor,
 **&p1** and **&p2** that may be used elsewhere in the **YAML** document to refer to hosts **p1** and **p2**.
 
-- **host**: the host value is a hostname string
+- **host**: the host value is a Fully Qualified Domain Name string
 - **protocol**: a list of schemes, ports, and health check urls for the host. The **scheme** is optional; strategies with no scheme will match hosts with no scheme. Note the scheme is only used to match the strategy, the actual scheme used in the upstream request will be the scheme of the remap target, regardless of the strategy or host scheme.
 - **healthcheck**: health check information with the **url** used to check
   the hosts health by some external health check agent.
+- **hash_string**: a string to use for this host's entry in the strategy. By default, the ``host`` is used (notably without a port).
+   - This is currently only used by ``consistent_hash`` policy strategies, but may be used by other policies in the future.
+   - There's generally no benefit to giving any host any particular hash string, but this may be useful, for example:
+      - If multiple host objects share the same ``host`` FQDN, possibly on different ports
+      - If a parent server's FQDN changes, to prevent changing a host's position on the hash ring, and thus breaking the cache and sending different requests to different parents
+      - To force a change in the order of the hash ring for debugging purposes
 
 Example::
 
@@ -77,7 +83,8 @@ Example::
           port: 443
           health_check_url: https://192.168.1.1:443
     - &p2
-      host: p2.foo.com
+      host: p2.new.foo.com
+      hash_string: p2.original.foo.com
       protocol:
         - scheme: http
           port: 80
@@ -175,8 +182,80 @@ Each **strategy** in the list may using the following parameters:
    #. **path**: (**default**) Creates a hash over the path portion of the request URL.
    #. **path+query**: Same as **path** but adds the **query string** in the request URL.
    #. **path+fragment**: Same as **path** but adds the fragment portion of the URL.
-   #. **cache_key**: Uses the hash key from the **cachekey** plugin.  defaults to **path** if the **cachekey** plugin is not configured on the **remap**.
+   #. **cache_key**: Deprecated, use the URL designation instead.
    #. **url**: Creates a hash from the entire request url.
+
+  To get the same behaviour as the old **cache_key** directive, you would use the following YAML:
+
+  .. code-block:: yaml
+
+     hash_url: parent
+     hash_key: url
+
+- **hash_url**: The specific URL to use for the **hash_key**. If the specified URL type does
+  not have a value (e.g. not set by an API), we default back to the reqeust URL. Use one of:
+
+   #. **request**: (**default**) Use the client request URL.
+   #. **cache**: Use the cache key URL as set via the APIs :cpp:func:`TSHttpTxnCacheLookupUrlSet()`
+      or :cpp:func:`TSCacheUrlSet()`. This would likely be set using a plugin such as **cachekey**.
+   #. **parent**: Use the parent URL as set via the API :cpp:func:`TSHttpTxnParentSelectionUrlSet`.
+      This again is likely set via an existing plugin such as the **cachekey** plugin.
+
+- **hash_algorithm**: The hash algorithm used by the **consistent_hash** policy. This parameter allows
+  per-strategy selection of the hash algorithm. If not specified, defaults to **siphash24** (or the value
+  set in :ts:cv:`proxy.config.http.parent_proxy.consistent_hash_algorithm`). Use one of:
+
+   #. **siphash24**: (**default**) SipHash-2-4. Cryptographically strong, DoS-resistant hash function.
+   #. **siphash13**: SipHash-1-3. ~50% faster than SipHash-2-4, still DoS-resistant.
+
+  Example:
+
+  .. code-block:: yaml
+
+     policy: consistent_hash
+     hash_algorithm: siphash13
+
+- **hash_seed0**: The first 64 bits of the hash seed (key) for the **consistent_hash** policy.
+
+  - For SipHash algorithms, this forms the first half of the 128-bit cryptographic key (k0)
+  - For future 64-bit hash algorithms, this is the full seed value
+
+  Value must be specified as a decimal integer. Default is **0**.
+
+  Example:
+
+  .. code-block:: yaml
+
+     policy: consistent_hash
+     hash_seed0: 12345678901234567
+
+- **hash_seed1**: The second 64 bits of the hash seed (key) for the **consistent_hash** policy.
+
+  - For SipHash algorithms, this forms the second half of the 128-bit cryptographic key (k1)
+  - For future 64-bit hash algorithms, this value is ignored
+
+  Value must be specified as a decimal integer. Default is **0**.
+
+  Example:
+
+  .. code-block:: yaml
+
+     policy: consistent_hash
+     hash_seed0: 12345678901234567
+     hash_seed1: 9876543210987654321
+
+- **hash_replicas**: The number of virtual nodes (replicas) per host on the consistent hash ring for
+  the **consistent_hash** policy.
+
+  Increasing the replica count improves the distribution of requests across hosts but uses more memory.
+  Must be greater than 0. Default is **1024**.
+
+  Example:
+
+  .. code-block:: yaml
+
+     policy: consistent_hash
+     hash_replicas: 2048
 
 - **go_direct**: A boolean value indicating whether a transaction may bypass proxies and go direct to the origin. Defaults to **true**
 - **parent_is_proxy**: A boolean value which indicates if the groups of hosts are proxy caches or origins.  **true** (default) means all the hosts used in the remap are |TS| caches.  **false** means the hosts are origins that the next hop strategies may use for load balancing and/or failover.
@@ -207,6 +286,8 @@ Each **strategy** in the list may using the following parameters:
     (**self** should only be necessary when the local hostname can only be translated to an IP address
     with a DNS lookup.)
 
+- **host_override**: A boolean value that will set the host header to the selected parent rather than the original host, including the SNI name for any attempted upstream TLS connection. **true** sets host header to selected parent. **false** (default) leaves the host header untouched.
+
 Example:
 ::
 
@@ -231,7 +312,9 @@ Example:
           - passive
     - strategy: 'strategy-2'
       policy: rr_strict
-      hash_key: cache_key
+      host_override: true
+      hash_url: cache
+      hash_key: path+query
       go_direct: true
       groups:
         - *g1

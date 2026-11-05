@@ -35,18 +35,22 @@
 #include "ts/remap.h"
 
 struct remap_line {
-  int argc;
+  int    argc;
   char **argv; // store the originals
 
-  int nvc;     // the number of name value pairs, should be argc - 2.
+  int    nvc;  // the number of name value pairs, should be argc - 2.
   char **name; // at load we will parse out the name and values.
   char **val;
 };
 
 #define PLUGIN_NAME "headeradd_remap"
-#define EXTERN extern "C"
 
-EXTERN void
+namespace
+{
+DbgCtl dbg_ctl{PLUGIN_NAME};
+}
+
+void
 ParseArgIntoNv(const char *arg, char **n, char **v)
 {
   const char *colon_pos = strchr(arg, ':');
@@ -54,7 +58,7 @@ ParseArgIntoNv(const char *arg, char **n, char **v)
   if (colon_pos == nullptr) {
     *n = nullptr;
     *v = nullptr;
-    TSDebug(PLUGIN_NAME, "No name value pair since it was malformed");
+    Dbg(dbg_ctl, "No name value pair since it was malformed");
     return;
   }
 
@@ -75,7 +79,7 @@ ParseArgIntoNv(const char *arg, char **n, char **v)
   memcpy(*v, colon_pos + 1, val_len);
   (*v)[val_len] = '\0';
 
-  TSDebug(PLUGIN_NAME, "\t name_len=%zu, val_len=%zu, %s=%s", name_len, val_len, *n, *v);
+  Dbg(dbg_ctl, "\t name_len=%zu, val_len=%zu, %s=%s", name_len, val_len, *n, *v);
 }
 
 TSReturnCode
@@ -89,7 +93,7 @@ TSRemapNewInstance(int argc, char *argv[], void **ih, char *, int)
 {
   remap_line *rl = nullptr;
 
-  TSDebug(PLUGIN_NAME, "TSRemapNewInstance()");
+  Dbg(dbg_ctl, "TSRemapNewInstance()");
 
   if (!argv || !ih) {
     TSError("[%s] Unable to load plugin because missing argv or ih", PLUGIN_NAME);
@@ -107,7 +111,7 @@ TSRemapNewInstance(int argc, char *argv[], void **ih, char *, int)
     rl->val  = static_cast<char **>(TSmalloc(sizeof(char *) * rl->nvc));
   }
 
-  TSDebug(PLUGIN_NAME, "NewInstance:");
+  Dbg(dbg_ctl, "NewInstance:");
   for (int i = 2; i < argc; i++) {
     ParseArgIntoNv(argv[i], &rl->name[i - 2], &rl->val[i - 2]);
   }
@@ -120,7 +124,7 @@ TSRemapNewInstance(int argc, char *argv[], void **ih, char *, int)
 void
 TSRemapDeleteInstance(void *ih)
 {
-  TSDebug(PLUGIN_NAME, "deleting instance %p", ih);
+  Dbg(dbg_ctl, "deleting instance %p", ih);
 
   if (ih) {
     remap_line *rl = static_cast<remap_line *>(ih);
@@ -145,17 +149,17 @@ TSRemapDoRemap(void *ih, TSHttpTxn txn, TSRemapRequestInfo *rri)
     return TSREMAP_NO_REMAP;
   }
 
-  TSDebug(PLUGIN_NAME, "TSRemapDoRemap:");
+  Dbg(dbg_ctl, "TSRemapDoRemap:");
 
   TSMBuffer req_bufp;
-  TSMLoc req_loc;
+  TSMLoc    req_loc;
   if (TSHttpTxnClientReqGet(txn, &req_bufp, &req_loc) != TS_SUCCESS) {
     TSError("[%s] Error while retrieving client request header", PLUGIN_NAME);
     return TSREMAP_NO_REMAP;
   }
 
   for (int i = 0; i < rl->nvc; ++i) {
-    TSDebug(PLUGIN_NAME, R"(Attaching header "%s" with value "%s".)", rl->name[i], rl->val[i]);
+    Dbg(dbg_ctl, R"(Attaching header "%s" with value "%s".)", rl->name[i], rl->val[i]);
 
     TSMLoc field_loc;
     if (TSMimeHdrFieldCreate(req_bufp, req_loc, &field_loc) == TS_SUCCESS) {

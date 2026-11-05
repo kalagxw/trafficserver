@@ -71,13 +71,13 @@
 #include <sys/param.h>
 #include <netinet/in.h>
 #include <arpa/nameser.h>
-#ifdef HAVE_ARPA_NAMESER_COMPAT_H
 #include <arpa/nameser_compat.h>
-#endif
 #include <netdb.h>
 #include <resolv.h>
 #include <cstdio>
 #include <cstring>
+
+#include "swoc/bwf_ip.h"
 
 #include "tscore/ink_error.h"
 #include "tscore/ink_resolver.h"
@@ -89,18 +89,20 @@
  * Returns the size of the result or -1.
  */
 int
-ink_res_mkquery(ink_res_state statp, int op,               /*!< opcode of query  */
-                const char *dname,                         /*!< domain name  */
-                int _class, int type,                      /*!< _class and type of query  */
+ink_res_mkquery(ink_res_state statp,                       /*!< Resolver state. */
+                int           op,                          /*!< opcode of query  */
+                const char   *dname,                       /*!< domain name  */
+                int           _class,                      /*!< DNS class. */
+                int           type,                        /*!< _class and type of query  */
                 const u_char *data,                        /*!< resource record data  */
-                int datalen,                               /*!< length of data  */
+                int           datalen,                     /*!< length of data  */
                 const u_char * /* newrr_in  ATS_UNUSED */, /*!< new rr for modify or append  */
                 u_char *buf,                               /*!< buffer to put query  */
-                int buflen)                                /*!< size of buffer  */
+                int     buflen)                                /*!< size of buffer  */
 {
   HEADER *hp;
   u_char *cp, *ep;
-  int n;
+  int     n;
   u_char *dnptrs[20], **dpp, **lastdnptr;
 
   /*
@@ -203,7 +205,7 @@ static const char digits[] = "0123456789";
 static int
 labellen(const u_char *lp)
 {
-  int bitlen;
+  int    bitlen;
   u_char l = *lp;
 
   if ((l & NS_CMPRSFLGS) == NS_CMPRSFLGS) {
@@ -223,17 +225,19 @@ labellen(const u_char *lp)
   return (l);
 }
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 static int
 decode_bitstring(const unsigned char **cpp, char *dn, const char *eom)
 {
-  const unsigned char *cp = *cpp;
-  char *beg               = dn, tc;
-  int b, blen, plen, i;
+  const unsigned char *cp  = *cpp;
+  char                *beg = dn, tc;
+  int                  b, blen, plen, i;
 
   if ((blen = (*cp & 0xff)) == 0) {
     blen = 256;
   }
-  plen = (blen + 3) / 4;
+  plen  = (blen + 3) / 4;
   plen += sizeof("\\[x/]") + (blen > 99 ? 3 : (blen > 9) ? 2 : 1);
   if (dn + plen >= eom) {
     return (-1);
@@ -276,6 +280,7 @@ decode_bitstring(const unsigned char **cpp, char *dn, const char *eom)
   *cpp = cp;
   return (dn - beg);
 }
+#pragma GCC diagnostic pop
 
 /*%
  *	Thinking in noninternationalized USASCII (per the DNS spec),
@@ -317,10 +322,10 @@ int
 ink_ns_name_ntop(const u_char *src, char *dst, size_t dstsiz)
 {
   const u_char *cp;
-  char *dn, *eom;
-  u_char c;
-  unsigned n;
-  int l;
+  char         *dn, *eom;
+  u_char        c;
+  unsigned      n;
+  int           l;
 
   cp  = src;
   dn  = dst;
@@ -414,7 +419,7 @@ ink_ns_name_ntop(const u_char *src, char *dst, size_t dstsiz)
  *\li	The root is returned as "."
  *\li	All other domains are returned in non absolute form
  */
-#if defined(linux)
+#if defined(__linux__)
 int
 ns_name_ntop(const u_char *src, char *dst, size_t dstsiz) __THROW
 #else
@@ -423,10 +428,10 @@ ns_name_ntop(const u_char *src, char *dst, size_t dstsiz)
 #endif
 {
   const u_char *cp;
-  char *dn, *eom;
-  u_char c;
-  unsigned n;
-  int l;
+  char         *dn, *eom;
+  u_char        c;
+  unsigned      n;
+  int           l;
 
   cp  = src;
   dn  = dst;
@@ -513,7 +518,7 @@ ns_name_ntop(const u_char *src, char *dst, size_t dstsiz)
 HostResStyle
 ats_host_res_from(int family, HostResPreferenceOrder const &order)
 {
-  bool v4 = false, v6 = false;
+  bool              v4 = false, v6 = false;
   HostResPreference client = AF_INET6 == family ? HOST_RES_PREFER_IPV6 : HOST_RES_PREFER_IPV4;
 
   for (auto p : order) {
@@ -545,12 +550,12 @@ ats_host_res_from(int family, HostResPreferenceOrder const &order)
 }
 
 void
-ats_force_order_by_family(sockaddr const *addr, HostResPreferenceOrder order)
+ats_force_order_by_family(sa_family_t family, HostResPreferenceOrder order)
 {
   HostResPreferenceOrder::size_type pos{0};
-  if (ats_is_ip6(addr)) {
+  if (AF_INET6 == family) {
     order[pos++] = HOST_RES_PREFER_IPV6;
-  } else if (ats_is_ip4(addr)) {
+  } else if (AF_INET == family) {
     order[pos++] = HOST_RES_PREFER_IPV4;
   }
   for (; pos < order.size(); pos++) {

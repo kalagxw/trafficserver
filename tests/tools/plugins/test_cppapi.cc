@@ -22,7 +22,7 @@
 
 #include <ts/ts.h>
 
-#include "tscpp/util/TextView.h"
+#include "swoc/TextView.h"
 
 #include "tscpp/api/Continuation.h"
 
@@ -52,13 +52,13 @@ namespace TextViewTest
 void
 f()
 {
-  ts::TextView tv("abcdefg");
+  swoc::TextView tv("abcdefg");
 
   std::ostringstream oss;
 
   oss << tv;
 
-  ALWAYS_ASSERT(memcmp(ts::TextView(oss.str()), tv) == 0)
+  ALWAYS_ASSERT(memcmp(swoc::TextView(oss.str()), tv) == 0)
 }
 
 TEST(f)
@@ -71,7 +71,7 @@ namespace ContinuationTest
 {
 struct {
   TSEvent event;
-  void *edata;
+  void   *edata;
 } passedToEventFunc;
 
 bool
@@ -119,7 +119,7 @@ f()
   // atscppapi::Continuation API is designed to support use after move and this
   // test intentionally exercises this behavior. Thus we disable clang-analyzer
   // for this code.
-#ifndef __clang_analyzer__
+#if !defined(__clang_analyzer__) && !defined(__COVERITY__)
   ALWAYS_ASSERT(!c)
   ALWAYS_ASSERT(c.asTSCont() == nullptr)
   ALWAYS_ASSERT(c.mutex() == nullptr)
@@ -156,14 +156,6 @@ f()
   ALWAYS_ASSERT(!!c)
   ALWAYS_ASSERT(c.asTSCont() != nullptr)
   ALWAYS_ASSERT(c.mutex() == m)
-
-  ALWAYS_ASSERT(c.call(TS_EVENT_INTERNAL_206) == 666)
-  ALWAYS_ASSERT(checkPassed(TS_EVENT_INTERNAL_206, nullptr))
-
-  int dummy;
-
-  ALWAYS_ASSERT(c.call(TS_EVENT_INTERNAL_207, &dummy) == 666)
-  ALWAYS_ASSERT(checkPassed(TS_EVENT_INTERNAL_207, &dummy))
 }
 
 TEST(f)

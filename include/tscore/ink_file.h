@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -31,22 +31,25 @@
 
 #pragma once
 
-#include "tscore/ink_config.h"
+#include "tscore/ink_platform.h"
 
 #include <cstdio>
+#include <cstdint>
 #include <sys/types.h>
 #include <dirent.h>
+#include <stdint.h>
 
-#if HAVE_SYS_STATFS_H
+#if __has_include(<sys/statfs.h>)
 #include <sys/statfs.h>
 #endif
 
-#if HAVE_SYS_STATVFS_H
+#if __has_include(<sys/statvfs.h>)
 #include <sys/statvfs.h>
 #endif
 
 // Darwin keeps statfs(2) in <sys/mount.h> ...
-#if HAVE_SYS_MOUNT_H
+// Its problematic if linux/mount.h is already included so check for that
+#if __has_include(<sys/mount.h>) && ! defined(_LINUX_MOUNT_H)
 #include <sys/mount.h>
 #endif
 
@@ -78,10 +81,14 @@
 //
 #define INK_FILEPATH_TRUENAME 0x20
 
-int ink_fputln(FILE *stream, const char *s);
-int ink_file_fd_readline(int fd, int bufsize, char *buf);
-int ink_file_fd_writestring(int fd, const char *buf);
-int ink_filepath_merge(char *buf, int bufsz, const char *rootpath, const char *addpath, int flags = INK_FILEPATH_TRUENAME);
+inline constexpr mode_t DEFAULT_OPEN_MODE{0644};
+
+int safe_open(char const *path, int oflag = O_RDWR | O_NDELAY | O_CREAT, mode_t mode = DEFAULT_OPEN_MODE);
+
+std::int64_t ink_fputln(FILE *stream, const char *s);
+int          ink_file_fd_readline(int fd, int bufsize, char *buf);
+int          ink_file_fd_writestring(int fd, const char *buf);
+int          ink_filepath_merge(char *buf, int bufsz, const char *rootpath, const char *addpath, int flags = INK_FILEPATH_TRUENAME);
 /**
  Add addpath to the rootpath prepending slash if rootpath
  is not nullptr and doesn't end with the slash already and put the

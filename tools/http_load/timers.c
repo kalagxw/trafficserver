@@ -34,8 +34,8 @@
 
 #define HASH_SIZE 67
 static Timer *timers[HASH_SIZE];
-static Timer *free_timers   = (Timer *)0;
-static long mstimeout_cache = -1;
+static Timer *free_timers     = (Timer *)0;
+static long   mstimeout_cache = -1;
 
 ClientData JunkClientData;
 
@@ -53,7 +53,7 @@ hash(Timer *t)
 static void
 l_add(Timer *t)
 {
-  int h = t->hash;
+  int    h = t->hash;
   Timer *t2;
   Timer *t2prev;
 
@@ -146,10 +146,10 @@ tmr_create(struct timeval *nowP, TimerProc *timer_proc, ClientData client_data, 
     t->time = *nowP;
   else
     (void)gettimeofday(&t->time, (struct timezone *)0);
-  t->time.tv_sec += msecs / 1000L;
+  t->time.tv_sec  += msecs / 1000L;
   t->time.tv_usec += (msecs % 1000L) * 1000L;
   if (t->time.tv_usec >= 1000000L) {
-    t->time.tv_sec += t->time.tv_usec / 1000000L;
+    t->time.tv_sec  += t->time.tv_usec / 1000000L;
     t->time.tv_usec %= 1000000L;
   }
   t->hash = hash(t);
@@ -162,7 +162,7 @@ tmr_create(struct timeval *nowP, TimerProc *timer_proc, ClientData client_data, 
 struct timeval *
 tmr_timeout(struct timeval *nowP)
 {
-  long msecs;
+  long                  msecs;
   static struct timeval timeout;
 
   msecs = tmr_mstimeout(nowP);
@@ -179,9 +179,9 @@ tmr_mstimeout(struct timeval *nowP)
   if (mstimeout_cache > -1) {
     return mstimeout_cache;
   } else {
-    int h;
-    int gotone;
-    long msecs, m;
+    int    h;
+    int    gotone;
+    long   msecs, m;
     Timer *t;
 
     gotone = 0;
@@ -213,7 +213,7 @@ tmr_mstimeout(struct timeval *nowP)
 void
 tmr_run(struct timeval *nowP)
 {
-  int h;
+  int    h;
   Timer *t;
   Timer *next;
 
@@ -232,10 +232,10 @@ tmr_run(struct timeval *nowP)
       (t->timer_proc)(t->client_data, nowP);
       if (t->periodic) {
         /* Reschedule. */
-        t->time.tv_sec += t->msecs / 1000L;
+        t->time.tv_sec  += t->msecs / 1000L;
         t->time.tv_usec += (t->msecs % 1000L) * 1000L;
         if (t->time.tv_usec >= 1000000L) {
-          t->time.tv_sec += t->time.tv_usec / 1000000L;
+          t->time.tv_sec  += t->time.tv_usec / 1000000L;
           t->time.tv_usec %= 1000000L;
         }
         l_resort(t);
@@ -247,12 +247,12 @@ tmr_run(struct timeval *nowP)
 void
 tmr_reset(struct timeval *nowP, Timer *t)
 {
-  mstimeout_cache = -1;
-  t->time         = *nowP;
-  t->time.tv_sec += t->msecs / 1000L;
+  mstimeout_cache  = -1;
+  t->time          = *nowP;
+  t->time.tv_sec  += t->msecs / 1000L;
   t->time.tv_usec += (t->msecs % 1000L) * 1000L;
   if (t->time.tv_usec >= 1000000L) {
-    t->time.tv_sec += t->time.tv_usec / 1000000L;
+    t->time.tv_sec  += t->time.tv_usec / 1000000L;
     t->time.tv_usec %= 1000000L;
   }
   l_resort(t);

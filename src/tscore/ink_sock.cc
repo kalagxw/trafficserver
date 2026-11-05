@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -27,6 +27,9 @@
 
 
 ***************************************************************************/
+
+#include "swoc/bwf_ip.h"
+
 #include "tscore/ink_sock.h"
 #include "tscore/ink_platform.h"
 #include "tscore/ink_assert.h"
@@ -44,7 +47,7 @@
 inline void
 check_valid_sockaddr(sockaddr *sa, char *file, int line)
 {
-  sockaddr_in *si     = (sockaddr_in *)sa;
+  sockaddr_in   *si   = (sockaddr_in *)sa;
   unsigned short port = ntohs(si->sin_port);
   unsigned short addr = ntohl(si->sin_addr.s_addr);
 
@@ -59,21 +62,21 @@ check_valid_sockaddr(sockaddr *sa, char *file, int line)
 #endif
 
 int
-safe_setsockopt(int s, int level, int optname, const void *optval, int optlevel)
+safe_setsockopt(int s, int level, int optname, const void *optval, int optlen)
 {
   int r;
   do {
-    r = setsockopt(s, level, optname, optval, optlevel);
+    r = setsockopt(s, level, optname, optval, optlen);
   } while (r < 0 && (errno == EAGAIN || errno == EINTR));
   return r;
 }
 
 int
-safe_getsockopt(int s, int level, int optname, void *optval, int *optlevel)
+safe_getsockopt(int s, int level, int optname, void *optval, int *optlen)
 {
   int r;
   do {
-    r = getsockopt(s, level, optname, optval, reinterpret_cast<socklen_t *>(optlevel));
+    r = getsockopt(s, level, optname, optval, reinterpret_cast<socklen_t *>(optlen));
   } while (r < 0 && (errno == EAGAIN || errno == EINTR));
   return r;
 }
@@ -96,7 +99,7 @@ safe_set_fl(int fd, int arg)
     return flags;
   }
   flags |= arg;
-  flags = safe_fcntl(fd, F_SETFL, flags);
+  flags  = safe_fcntl(fd, F_SETFL, flags);
   return flags;
 }
 
@@ -108,14 +111,14 @@ safe_clr_fl(int fd, int arg)
     return flags;
   }
   flags &= ~arg;
-  flags = safe_fcntl(fd, F_SETFL, flags);
+  flags  = safe_fcntl(fd, F_SETFL, flags);
   return flags;
 }
 
-int
+std::int64_t
 safe_write(int fd, const char *buffer, int len)
 {
-  int num_written = 0;
+  std::int64_t num_written = 0;
   while (num_written < len) {
     int const ret = write(fd, buffer + num_written, len - num_written);
     if (ret == -1) {
@@ -240,7 +243,7 @@ char
 fd_read_char(int fd)
 {
   char c;
-  int r;
+  int  r;
   do {
     r = read(fd, &c, 1);
     if (r > 0) {
@@ -256,7 +259,7 @@ int
 fd_read_line(int fd, char *s, int len)
 {
   char c;
-  int numread = 0, r;
+  int  numread = 0, r;
   do {
     do {
       r = read(fd, &c, 1);
@@ -302,9 +305,9 @@ read_socket(int s, char *buffer, int length)
 int
 bind_unix_domain_socket(const char *path, mode_t mode)
 {
-  int sockfd;
+  int                sockfd;
   struct sockaddr_un sockaddr;
-  socklen_t socklen;
+  socklen_t          socklen;
 
   (void)unlink(path);
 
@@ -328,7 +331,7 @@ bind_unix_domain_socket(const char *path, mode_t mode)
   socklen = strlen(sockaddr.sun_path) + sizeof(sockaddr.sun_family);
 #endif
 
-  if (safe_setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, SOCKOPT_ON, sizeof(int)) < 0) {
+  if (setsockopt_on(sockfd, SOL_SOCKET, SO_REUSEADDR) < 0) {
     goto fail;
   }
 

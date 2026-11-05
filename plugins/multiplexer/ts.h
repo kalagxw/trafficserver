@@ -31,14 +31,20 @@
 #include <string>
 #include <ts/ts.h>
 
+namespace multiplexer_ns
+{
+extern DbgCtl dbg_ctl;
+}
+using namespace multiplexer_ns;
+
 namespace ats
 {
 namespace io
 {
   struct IO {
-    TSIOBuffer buffer;
+    TSIOBuffer       buffer;
     TSIOBufferReader reader;
-    TSVIO vio = nullptr;
+    TSVIO            vio = nullptr;
 
     ~IO()
     {
@@ -54,9 +60,9 @@ namespace io
 
     IO() : buffer(TSIOBufferCreate()), reader(TSIOBufferReaderAlloc(buffer)) {}
     IO(const TSIOBuffer &b) : buffer(b), reader(TSIOBufferReaderAlloc(buffer)) { assert(buffer != nullptr); }
-    static IO *read(TSVConn, TSCont, const int64_t);
+    static std::unique_ptr<IO> read(TSVConn, TSCont, const int64_t);
 
-    static IO *
+    static std::unique_ptr<IO>
     read(TSVConn v, TSCont c)
     {
       return IO::read(v, c, std::numeric_limits<int64_t>::max());

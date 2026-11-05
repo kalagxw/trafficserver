@@ -2,7 +2,7 @@
 
   Generic wrapper for cryptographic hashes.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -37,19 +37,19 @@ CryptoContext::HashType CryptoContext::Setting = CryptoContext::SHA256;
 CryptoContext::HashType CryptoContext::Setting = CryptoContext::MD5;
 #endif
 
-ats::CryptoHash const ats::CRYPTO_HASH_ZERO; // default constructed is correct.
-
 CryptoContext::CryptoContext()
 {
   switch (Setting) {
   case UNSPECIFIED:
 #if TS_ENABLE_FIPS == 0
   case MD5:
-    _base = new MD5Context;
+    static_assert(OBJ_SIZE >= sizeof(MD5Context));
+    new (_base) MD5Context;
     break;
 #else
   case SHA256:
-    _base = new SHA256Context;
+    static_assert(OBJ_SIZE >= sizeof(SHA256Context));
+    new (_base) SHA256Context;
     break;
 #endif
   default:
@@ -73,22 +73,22 @@ CryptoContext::CryptoContext()
 static char *
 ink_code_to_hex_str(char *dest, uint8_t const *hash)
 {
-  int i;
+  int   i;
   char *d;
 
   static char hex_digits[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
 
   d = dest;
   for (i = 0; i < CRYPTO_HASH_SIZE; i += 4) {
-    *(d + 0) = hex_digits[hash[i + 0] >> 4];
-    *(d + 1) = hex_digits[hash[i + 0] & 15];
-    *(d + 2) = hex_digits[hash[i + 1] >> 4];
-    *(d + 3) = hex_digits[hash[i + 1] & 15];
-    *(d + 4) = hex_digits[hash[i + 2] >> 4];
-    *(d + 5) = hex_digits[hash[i + 2] & 15];
-    *(d + 6) = hex_digits[hash[i + 3] >> 4];
-    *(d + 7) = hex_digits[hash[i + 3] & 15];
-    d += 8;
+    *(d + 0)  = hex_digits[hash[i + 0] >> 4];
+    *(d + 1)  = hex_digits[hash[i + 0] & 15];
+    *(d + 2)  = hex_digits[hash[i + 1] >> 4];
+    *(d + 3)  = hex_digits[hash[i + 1] & 15];
+    *(d + 4)  = hex_digits[hash[i + 2] >> 4];
+    *(d + 5)  = hex_digits[hash[i + 2] & 15];
+    *(d + 6)  = hex_digits[hash[i + 3] >> 4];
+    *(d + 7)  = hex_digits[hash[i + 3] & 15];
+    d        += 8;
   }
   *d = '\0';
   return (dest);
@@ -100,15 +100,15 @@ CryptoHash::toHexStr(char buffer[(CRYPTO_HASH_SIZE * 2) + 1]) const
   return ink_code_to_hex_str(buffer, u8);
 }
 
-namespace ats
+namespace ts
 {
-ts::BufferWriter &
-bwformat(ts::BufferWriter &w, ts::BWFSpec const &spec, ats::CryptoHash const &hash)
+swoc::BufferWriter &
+bwformat(swoc::BufferWriter &w, swoc::bwf::Spec const &spec, ts::CryptoHash const &hash)
 {
-  ts::BWFSpec local_spec{spec};
+  swoc::bwf::Spec local_spec{spec};
   if ('X' != local_spec._type) {
     local_spec._type = 'x';
   }
   return bwformat(w, local_spec, std::string_view(reinterpret_cast<const char *>(hash.u8), CRYPTO_HASH_SIZE));
 }
-} // namespace ats
+} // namespace ts

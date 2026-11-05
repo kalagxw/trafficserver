@@ -20,6 +20,8 @@
  * @file AsyncTimer.h
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include <string>
@@ -84,7 +86,7 @@ public:
   void cancel() override;
 
 private:
-  AsyncTimerState *state_;
+  AsyncTimerState *state_{nullptr};
 };
 
 } // namespace atscppapi

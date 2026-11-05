@@ -134,15 +134,15 @@ ChunkDecoder::decode(const TSIOBufferReader &r)
     }
   }
 
-  int64_t size;
+  int64_t         size;
   TSIOBufferBlock block = TSIOBufferReaderStart(r);
 
   if (isSizeState()) {
     while (block != nullptr && size_ == 0) {
       const char *p = TSIOBufferBlockReadStart(block, r, &size);
       assert(p != nullptr);
-      const int i = parseSize(p, size);
-      size -= i;
+      const int i  = parseSize(p, size);
+      size        -= i;
       TSIOBufferReaderConsume(r, i);
       if (state_ == State::kEnd) {
         assert(size_ == 0);
@@ -162,12 +162,12 @@ ChunkDecoder::decode(const TSIOBufferReader &r)
     if (p != nullptr) {
       if (size > size_) {
         length += size_;
-        size_  = 0;
-        state_ = State::kSizeR;
+        size_   = 0;
+        state_  = State::kSizeR;
         break;
       } else {
         length += size;
-        size_ -= size;
+        size_  -= size;
       }
     }
     block = TSIOBufferBlockNext(block);

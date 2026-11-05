@@ -21,6 +21,8 @@
  * @brief Wrapper class for TS API type TSCont.
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include <ts/ts.h>
@@ -76,7 +78,7 @@ public:
   }
 
   // No copying.
-  Continuation(const Continuation &) = delete;
+  Continuation(const Continuation &)            = delete;
   Continuation &operator=(const Continuation &) = delete;
 
   // Moving allowed.
@@ -100,7 +102,11 @@ public:
     return *this;
   }
 
-  explicit operator bool() const { return _cont != nullptr; }
+  explicit
+  operator bool() const
+  {
+    return _cont != nullptr;
+  }
 
   int
   call(TSEvent event, void *edata = nullptr)

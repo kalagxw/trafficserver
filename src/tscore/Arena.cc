@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -94,9 +94,9 @@ block_alloc(ArenaBlock *block, size_t size, size_t alignment)
 void *
 Arena::alloc(size_t size, size_t alignment)
 {
-  ArenaBlock *b;
+  ArenaBlock  *b;
   unsigned int block_size;
-  void *mem;
+  void        *mem;
 
   ink_assert((alignment & (alignment - 1)) == 0);
 

@@ -35,18 +35,19 @@
 #endif
 
 using namespace atscppapi;
+
 using std::string;
 
 /**
  * @private
  */
 struct InterceptPlugin::State {
-  TSCont cont_;
+  TSCont  cont_;
   TSVConn net_vc_ = nullptr;
 
   struct IoHandle {
-    TSVIO vio_               = nullptr;
-    TSIOBuffer buffer_       = nullptr;
+    TSVIO            vio_    = nullptr;
+    TSIOBuffer       buffer_ = nullptr;
     TSIOBufferReader reader_ = nullptr;
     IoHandle()               = default;
     ;
@@ -67,23 +68,23 @@ struct InterceptPlugin::State {
   /** the API doesn't recognize end of input; so we have to explicitly
    * figure out when to continue reading and when to stop */
   TSHttpParser http_parser_;
-  int expected_body_size_  = 0;
-  int num_body_bytes_read_ = 0;
-  bool hdr_parsed_         = false;
+  int          expected_body_size_  = 0;
+  int          num_body_bytes_read_ = 0;
+  bool         hdr_parsed_          = false;
 
-  TSMBuffer hdr_buf_     = nullptr;
-  TSMLoc hdr_loc_        = nullptr;
-  int num_bytes_written_ = 0;
+  TSMBuffer              hdr_buf_           = nullptr;
+  TSMLoc                 hdr_loc_           = nullptr;
+  int                    num_bytes_written_ = 0;
   std::shared_ptr<Mutex> plugin_mutex_;
-  InterceptPlugin *plugin_ = nullptr;
-  Headers request_headers_;
+  InterceptPlugin       *plugin_ = nullptr;
+  Headers                request_headers_;
 
   /** these two fields to be used by the continuation callback only */
   TSEvent saved_event_ = TS_EVENT_NONE;
-  void *saved_edata_   = nullptr;
+  void   *saved_edata_ = nullptr;
 
   TSAction timeout_action_ = nullptr;
-  bool plugin_io_done_     = false;
+  bool     plugin_io_done_ = false;
 
   State(TSCont cont, InterceptPlugin *plugin) : cont_(cont), plugin_(plugin)
   {
@@ -105,7 +106,7 @@ struct InterceptPlugin::State {
 
 namespace
 {
-int handleEvents(TSCont cont, TSEvent event, void *edata);
+int  handleEvents(TSCont cont, TSEvent event, void *edata);
 void destroyCont(InterceptPlugin::State *state);
 } // namespace
 
@@ -204,9 +205,9 @@ InterceptPlugin::doRead()
 
   int consumed = 0; // consumed is used to update the input buffers
   if (avail > 0) {
-    int64_t num_body_bytes_in_block;
-    int64_t data_len; // size of all data (header + body) in a block
-    const char *data, *startptr;
+    int64_t         num_body_bytes_in_block;
+    int64_t         data_len; // size of all data (header + body) in a block
+    const char     *data, *startptr;
     TSIOBufferBlock block = TSIOBufferReaderStart(state_->input_.reader_);
     while (block != nullptr) {
       startptr = data         = TSIOBufferBlockReadStart(block, state_->input_.reader_, &data_len);
@@ -218,8 +219,8 @@ InterceptPlugin::doRead()
           string content_length_str = state_->request_headers_.value("Content-Length");
           if (!content_length_str.empty()) {
             const char *start_ptr = content_length_str.data();
-            char *end_ptr;
-            int content_length = strtol(start_ptr, &end_ptr, 10 /* base */);
+            char       *end_ptr;
+            int         content_length = strtol(start_ptr, &end_ptr, 10 /* base */);
             if ((errno != ERANGE) && (end_ptr != start_ptr) && (*end_ptr == '\0')) {
               LOG_DEBUG("Got content length: %d", content_length);
               state_->expected_body_size_ = content_length;
@@ -246,7 +247,7 @@ InterceptPlugin::doRead()
         consume(string(data, num_body_bytes_in_block), InterceptPlugin::REQUEST_BODY);
       }
       consumed += data_len;
-      block = TSIOBufferBlockNext(block);
+      block     = TSIOBufferBlockNext(block);
     }
   }
   LOG_DEBUG("Consumed %d bytes from input vio", consumed);
@@ -287,7 +288,7 @@ InterceptPlugin::handleEvent(int abstract_event, void *edata)
     state_->input_.buffer_ = TSIOBufferCreate();
     state_->input_.reader_ = TSIOBufferReaderAlloc(state_->input_.buffer_);
     state_->input_.vio_    = TSVConnRead(state_->net_vc_, state_->cont_, state_->input_.buffer_,
-                                      INT64_MAX /* number of bytes to read - high value initially */);
+                                         INT64_MAX /* number of bytes to read - high value initially */);
 
     state_->hdr_buf_ = TSMBufferCreate();
     state_->hdr_loc_ = TSHttpHdrCreate(state_->hdr_buf_);
@@ -308,7 +309,7 @@ InterceptPlugin::handleEvent(int abstract_event, void *edata)
     LOG_ERROR("Error while reading request!");
     // fallthrough
 
-  case TS_EVENT_VCONN_READ_COMPLETE: // fall throughs intentional
+  case TS_EVENT_VCONN_READ_COMPLETE:
   case TS_EVENT_VCONN_WRITE_COMPLETE:
   case TS_EVENT_VCONN_EOS:
   case TS_EVENT_ERROR:             // erroring out, nothing more to do
@@ -329,10 +330,21 @@ InterceptPlugin::handleEvent(int abstract_event, void *edata)
 
 namespace
 {
+/** RAII try-lock helper used by the @c InterceptPlugin continuation.
+ *
+ *  The guard takes shared ownership of the mutex for its entire scope.  The
+ *  locked region below may destroy the @c InterceptPlugin::State that owns
+ *  the only other @c std::shared_ptr to the mutex.
+ */
 class TryLockGuard
 {
 public:
-  TryLockGuard(Mutex &m) : _m(m), _isLocked(m.try_lock()) {}
+  TryLockGuard(std::shared_ptr<Mutex> m) : _m(std::move(m)), _isLocked(_m && _m->try_lock()) {}
+
+  TryLockGuard(const TryLockGuard &)            = delete;
+  TryLockGuard &operator=(const TryLockGuard &) = delete;
+  TryLockGuard(TryLockGuard &&)                 = delete;
+  TryLockGuard &operator=(TryLockGuard &&)      = delete;
 
   bool
   isLocked() const
@@ -343,13 +355,13 @@ public:
   ~TryLockGuard()
   {
     if (_isLocked) {
-      _m.unlock();
+      _m->unlock();
     }
   }
 
 private:
-  std::recursive_mutex &_m;
-  const bool _isLocked;
+  std::shared_ptr<Mutex> _m;        ///< Shared ownership of the protected mutex.
+  const bool             _isLocked; ///< Whether @c _m->try_lock() succeeded.
 };
 
 int
@@ -357,14 +369,14 @@ handleEvents(TSCont cont, TSEvent pristine_event, void *pristine_edata)
 {
   // Separating pristine and mutable data helps debugging
   TSEvent event = pristine_event;
-  void *edata   = pristine_edata;
+  void   *edata = pristine_edata;
 
   InterceptPlugin::State *state = static_cast<InterceptPlugin::State *>(TSContDataGet(cont));
   if (!state) { // plugin is done, return.
     return 0;
   }
 
-  TryLockGuard scopedTryLock(*(state->plugin_mutex_));
+  TryLockGuard scopedTryLock(state->plugin_mutex_);
   if (!scopedTryLock.isLocked()) {
     LOG_ERROR("Couldn't get plugin lock. Will retry");
     if (event != TS_EVENT_TIMEOUT) { // save only "non-retry" info

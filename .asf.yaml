@@ -11,6 +11,11 @@ github:
     - cdn
     - cache
     - apache
+    - http2
+    - http3
+    - quic
+    - forwardproxy
+    - reverseproxy
     - hacktoberfest
   features:
     # Enable wiki for documentation
@@ -19,28 +24,45 @@ github:
     issues: true
     # Enable projects for project management boards
     projects: true
+  pull_requests:
+    allow_auto_merge: true
   enabled_merge_buttons:
     # Enable squash button:
     squash: true
     # Disable rebase button:
     rebase: false
-    # Disable merge button:
+    # Disable merge commit button:
     merge: false
+  collaborators:
+    - mtorluemke
+    - c-taylor
+    - etapia
+    - lzx404243
+    - phongn
+    - jasmine-nahrain
+  copilot_code_review:
+    enabled: true
+    review_on_push: true
   protected_branches:
     master:
       required_status_checks:
         # strict means "Require branches to be up to date before merging"
         strict: false
         contexts:
-          - AuTest
+          - URTest 1of3
+          - URTest 2of3
+          - URTest 3of3
           - Rocky
+          - CentOS
           - Clang-Analyzer
-          - Clang-Format
+          - Clang-Tidy
+          - Format
           - Debian
           - Docs
           - Fedora
           - RAT
           - Ubuntu
+          - OSX
       required_pull_request_reviews:
         dismiss_stale_reviews: true
         required_approving_review_count: 1

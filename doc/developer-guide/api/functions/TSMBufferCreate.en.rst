@@ -14,7 +14,7 @@
    See the License for the specific language governing permissions and
    limitations under the License.
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 ===============
 TSMBufferCreate
@@ -30,8 +30,8 @@ Synopsis
     #include <ts/ts.h>
 
 .. function:: TSMBuffer TSMBufferCreate(void)
-.. function:: TSReturnCode TSMBufferDestroy(TSMBuffer bufp)
-.. function:: TSReturnCode TSHandleMLocRelease(TSMBuffer bufp, TSMLoc parent, TSMLoc mloc)
+.. function:: TSReturnCode TSMBufferDestroy(TSMBuffer bufp) noexcept
+.. function:: TSReturnCode TSHandleMLocRelease(TSMBuffer bufp, TSMLoc parent, TSMLoc mloc) noexcept
 
 Description
 ===========
@@ -54,13 +54,13 @@ buffer allocated it.
 :func:`TSHandleMLocRelease` Releases the :type:`TSMLoc` mloc created
 from the :type:`TSMLoc` parent. If a :type:`TSMLoc` is obtained from
 a transaction, it does not have a parent :type:`TSMLoc`. Use the
-the constant :data:`TS_NULL_MLOC` as its parent.
+the constant :var:`TS_NULL_MLOC` as its parent.
 
 Return values
 =============
 
 :func:`TSMBufferDestroy` and :func:`TSHandleMLocRelease` return
-:data:`TS_SUCCESS` on success, or :data:`TS_ERROR` on failure.
+:enumerator:`TS_SUCCESS` on success, or :enumerator:`TS_ERROR` on failure.
 :func:`TSMBufferCreate` returns the new :type:`TSMBuffer`.
 
 Examples

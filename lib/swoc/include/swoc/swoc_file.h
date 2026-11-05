@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <unistd.h>
 #include <sys/stat.h>
 
 #include <string>
@@ -19,12 +20,81 @@
 
 namespace swoc { inline namespace SWOC_VERSION_NS {
 namespace file {
+
+using file_time_type = std::chrono::system_clock::time_point;
+
+enum class file_type : signed char {
+  none      = 0,
+  not_found = -1,
+  regular   = 1,
+  directory = 2,
+  symlink   = 3,
+  block     = 4,
+  character = 5,
+  fifo      = 6,
+  socket    = 7,
+  unknown   = 8
+};
+
+/// Invalid file descriptor.
+static constexpr int NO_FD = -1;
+
+/// Scoped container for a file descriptor.
+struct unique_fd {
+  using self_type = unique_fd; ///< Self reference type.
+
+  /** Construct with file descriptor.
+   *
+   * @param fd File descriptor.
+   *
+   * The instance takes owernship of the file descriptor.
+   */
+  explicit unique_fd(int fd) : _fd(fd) {}
+
+  /// Non-copyable.
+  unique_fd(self_type const &) = delete;
+
+  /** Move construction.
+   *
+   * @param that Source instance.
+   *
+   * Ownership is from from @Wa that to @a this.
+   */
+  unique_fd(self_type &&that) : _fd(that._fd) { that._fd = NO_FD; }
+
+  /// Close the file dscriptor.
+  ~unique_fd() {
+    if (_fd != NO_FD) {
+      ::close(_fd);
+      _fd = NO_FD;
+    };
+  }
+
+  /** Release ownership of the file descriptor.
+   *
+   * @return The file descriptor.
+   */
+  int
+  release() {
+    auto zret = _fd;
+    _fd       = NO_FD;
+    return zret;
+  }
+
+  /// Implicitly convert to file descriptor.
+  operator int() const { return _fd; }
+
+protected:
+  int _fd = NO_FD;
+};
+
 /** Utility class for file system paths.
  */
 class path {
-  using self_type = path;
+  using self_type = path; ///< Self reference type.
 
 public:
+  /// Default path separator.
   static constexpr char SEPARATOR = '/';
 
   /// Default construct empty path.
@@ -41,7 +111,9 @@ public:
 
   /// Construct from a string view.
   path(std::string_view src);
-  //  template < typename ... Args > explicit path(std::string_view base, Args... rest);
+
+  /// Construct with a copy of @a p.
+  path(std::string const &p);
 
   /// Move from an existing string
   path(std::string &&that);
@@ -55,6 +127,15 @@ public:
   /// Assign @a p as the path.
   self_type &operator=(std::string_view p);
 
+  /// Assign @a s as the path.
+  self_type &operator=(std::string const &s);
+
+  /// Move @a s to be the path.
+  self_type &operator=(std::string &&s);
+
+  /// Copy @a s as the path.
+  self_type &operator=(char const *s);
+
   /** Append or replace path with @a that.
    *
    * If @a that is absolute, it replaces @a this. Otherwise @a that is appended with exactly one
@@ -65,6 +146,14 @@ public:
    */
   self_type &operator/=(const self_type &that);
 
+  /** Append or replace path with @a that.
+   *
+   * If @a that is absolute, it replaces @a this. Otherwise @a that is appended with exactly one
+   * separator.
+   *
+   * @param that Filesystem path.
+   * @return @a this
+   */
   self_type &operator/=(std::string_view that);
 
   /// Check if the path is empty.
@@ -76,13 +165,31 @@ public:
   /// Check if the path is not absolute.
   bool is_relative() const;
 
+  /// Path of the parent.
   self_type parent_path() const;
+
+  /// @return Path excluding the root path, if nay.
+  self_type relative_path() const;
+
+  /** Filename part of the path.
+   *
+   * @param p Path.
+   * @return
+   */
+  self_type filename() const;
 
   /// Access the path explicitly.
   char const *c_str() const;
 
   /// The path as a string.
   std::string const &string() const;
+
+  /** Reserve space in the path.
+   *
+   * @param n Number of bytes to reserve.
+   * @return @a this.
+   */
+  self_type &reserve(size_t n);
 
   /// A view of the path.
   swoc::TextView view() const;
@@ -95,19 +202,30 @@ protected:
 class file_status {
   using self_type = file_status;
 
+public:
+  /// @return File type as an enumeration.
+  file_type type() const;
+
+  /// @return raw file mode data.
+  mode_t mode() const;
+
 protected:
   struct ::stat _stat; ///< File information.
+  file_type _type = file_type::none;
+
+  void init();
 
   friend self_type status(const path &file, std::error_code &ec) noexcept;
   friend int file_type(const self_type &);
-  friend off_t file_size(const self_type &);
-  friend bool is_regular_file(const file_status &);
-  friend bool is_dir(const file_status &);
-  friend bool is_char_device(const file_status &);
-  friend bool is_block_device(const file_status &);
-  friend std::chrono::system_clock::time_point modify_time(file_status const &fs);
-  friend std::chrono::system_clock::time_point access_time(file_status const &fs);
-  friend std::chrono::system_clock::time_point status_time(file_status const &fs);
+  friend uintmax_t file_size(const self_type &);
+  friend bool is_regular_file(const self_type &);
+  friend bool is_dir(const self_type &);
+  friend bool is_char_device(const self_type &);
+  friend bool is_block_device(const self_type &);
+  friend bool exists(const self_type &);
+  friend file_time_type last_write_time(file_status const &fs);
+  friend file_time_type access_time(file_status const &fs);
+  friend file_time_type status_time(file_status const &fs);
 };
 
 /** Get the status of the file at @a p.
@@ -122,7 +240,7 @@ file_status status(const path &file, std::error_code &ec) noexcept;
 // These are separate because they are not part of std::filesystem::path.
 
 /// Return the file type value.
-int file_type(const file_status &fs);
+[[deprecated("Use file_status::type")]] int file_type(const file_status &fs);
 
 /// Check if the path is to a regular file.
 bool is_regular_file(const file_status &fs);
@@ -137,10 +255,16 @@ bool is_char_device(const file_status &fs);
 bool is_block_device(const file_status &fs);
 
 /// Size of the file or block device.
-off_t file_size(const file_status &fs);
+uintmax_t file_size(const file_status &fs);
 
 /// Check if file is readable.
 bool is_readable(const path &s);
+
+/// Check if path exists.
+bool exists(const path &p);
+
+/// Check if path exists.
+bool exists(const file_status &fs);
 
 /** Convert to absolute path.
  *
@@ -154,9 +278,80 @@ bool is_readable(const path &s);
  */
 path absolute(path const &src, std::error_code &ec);
 
-std::chrono::system_clock::time_point modify_time(file_status const &fs);
-std::chrono::system_clock::time_point access_time(file_status const &fs);
-std::chrono::system_clock::time_point status_time(file_status const &fs);
+/// Directory location suitable for temporary files
+path temp_directory_path();
+
+/// Current working directory.
+path current_path();
+
+/// @return Canonicalized absolute pathname
+path canonical(const path &p, std::error_code &ec);
+
+/** Create directory.
+ *
+ * @param p Path to directory.
+ * @param ec Error code return.
+ * @param mode Permissions for created directory.
+ * @return @c true if @a p was created, @c false otherwise.
+ *
+ * @note Not fully implemented.
+ */
+bool create_directory(const path &p, std::error_code &ec, mode_t mode = 0775) noexcept;
+
+/** Create directories.
+ *
+ * @param p Path to directory.
+ * @param ec Error code return.
+ * @param mode Permissions for created directories.
+ * @return @c true if @a p was created, @c false otherwise.
+ *
+ * @note Not fully implemented.
+ */
+bool create_directories(const path &p, std::error_code &ec, mode_t mode = 0775) noexcept;
+
+/** Copy files.
+ *
+ * @param from Source file
+ * @param to Destination file.
+ * @param ec Error code return.
+ * @return @c true if @a from was copied, @c false on error.
+ *
+ * @note Not fully implemented.
+ */
+bool copy(const path &from, const path &to, std::error_code &ec);
+
+/** Remove a file or empty directory.
+ *
+ * @param path Target.
+ * @param ec Error return.
+ * @return @c true if the operation succeeded, @c false if @a ec has an error code.
+ */
+bool remove(const path &path, std::error_code &ec);
+
+/** Remove a file or a directory and all nested files.
+ *
+ * @param path Target.
+ * @param ec Error return.
+ * @return Number of items removed.
+ */
+uintmax_t remove_all(const path &path, std::error_code &ec);
+
+/// @return The modified time for @a fs.
+[[deprecated("See last_write_time")]] file_time_type modify_time(file_status const &fs);
+/// @return The modified time for @a fs.
+file_time_type last_write_time(file_status const &fs);
+
+/** Modification time.
+ *
+ * @param p Path to target.
+ * @return Time of last modification, or @c file_time_type::min() on error.
+ */
+file_time_type last_write_time(path const &p, std::error_code &ec);
+
+/// @return The access time for @a fs.
+file_time_type access_time(file_status const &fs);
+/// @return The status change time for @a fs.
+file_time_type status_time(file_status const &fs);
 
 /** Load the file at @a p into a @c std::string.
  *
@@ -172,11 +367,31 @@ inline path::path(char const *src) : _path(src) {}
 
 inline path::path(std::string_view base) : _path(base) {}
 
+inline path::path(std::string const &p) : _path(p) {}
+
 inline path::path(std::string &&that) : _path(std::move(that)) {}
 
 inline path &
 path::operator=(std::string_view p) {
   _path.assign(p);
+  return *this;
+}
+
+inline path &
+path::operator=(std::string const &s) {
+  _path.assign(s);
+  return *this;
+}
+
+inline path &
+path::operator=(std::string &&s) {
+  _path.assign(std::move(s));
+  return *this;
+}
+
+inline path &
+path::operator=(char const *s) {
+  _path.assign(s);
   return *this;
 }
 
@@ -215,40 +430,106 @@ path::operator/=(const self_type &that) {
   return *this /= std::string_view(that._path);
 }
 
+/** Compare two paths.
+ *
+ * @return @c true if @a lhs is identical to @a rhs.
+ */
 inline bool
 operator==(path const &lhs, path const &rhs) {
   return lhs.view() == rhs.view();
 }
 
+/** Compare two paths.
+ *
+ * @return @c true if @a lhs is not identical to @a rhs.
+ */
 inline bool
 operator!=(path const &lhs, path const &rhs) {
   return lhs.view() != rhs.view();
 }
 
 /** Combine two strings as file paths.
-
-     @return A @c path with the combined path.
-*/
+ *
+ * @return A @c path with the combined path.
+ */
 inline path
 operator/(const path &lhs, const path &rhs) {
   return path(lhs) /= rhs;
 }
 
+/** Combine two strings as file paths.
+ *
+ * @return A @c path with the combined path.
+ */
 inline path
 operator/(path &&lhs, const path &rhs) {
   return path(std::move(lhs)) /= rhs;
 }
 
+/** Combine two strings as file paths.
+ *
+ * @return A @c path with the combined path.
+ */
 inline path
 operator/(const path &lhs, std::string_view rhs) {
   return path(lhs) /= rhs;
 }
 
+inline auto
+path::reserve(size_t n) -> self_type & {
+  _path.reserve(n);
+  return *this;
+}
+
+/** Combine two strings as file paths.
+ *
+ * @return A @c path with the combined path.
+ */
 inline path
 operator/(path &&lhs, std::string_view rhs) {
   return path(std::move(lhs)) /= rhs;
 }
 
+// Can remove "enum" after the function @c file_type is removed.
+inline enum file_type
+file_status::type() const {
+  return _type;
+}
+
+inline mode_t
+file_status::mode() const {
+  return _stat.st_mode;
+}
+
+inline bool
+is_char_device(const file_status &fs) {
+  return fs._type == file_type::character;
+}
+
+inline bool
+is_block_device(const file_status &fs) {
+  return fs._type == file_type::block;
+}
+
+inline bool
+is_regular_file(const file_status &fs) {
+  return fs._type == file_type::regular;
+}
+
+inline bool
+is_dir(const file_status &fs) {
+  return fs._type == file_type::directory;
+}
+
+inline bool
+exists(const file_status &fs) {
+  return fs._type != file_type::none && fs._type != file_type::not_found;
+}
+
+inline file_time_type
+modify_time(file_status const &fs) {
+  return last_write_time(fs);
+}
 } // namespace file
 
 class BufferWriter;

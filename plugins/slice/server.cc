@@ -1,0 +1,919 @@
+/** @file
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+
+#include "server.h"
+
+#include "Config.h"
+#include "ContentRange.h"
+#include "HttpHeader.h"
+#include "response.h"
+#include "transfer.h"
+#include "ts/apidefs.h"
+#include "util.h"
+
+#include <algorithm>
+#include <cinttypes>
+
+namespace
+{
+ContentRange
+content_range_for_key(HttpHeader const &header, char const *const key, int const keylen)
+{
+  ContentRange bcr;
+
+  /* Pull content length off the response header
+    and manipulate it into a client response header
+   */
+  char rangestr[1024];
+  int  rangelen = sizeof(rangestr);
+
+  if (!header.valueForKey(key, keylen, rangestr, &rangelen)) {
+    DEBUG_LOG("invalid response header, no %.*s", keylen, key);
+  } else {
+    // ensure null termination
+    rangestr[rangelen] = '\0';
+    if (!bcr.fromStringClosed(rangestr)) {
+      DEBUG_LOG("invalid response header, malformed %.*s, %s", keylen, key, rangestr);
+    }
+  }
+
+  return bcr;
+}
+
+ContentRange
+contentRangeFrom(HttpHeader const &header)
+{
+  return content_range_for_key(header, TS_MIME_FIELD_CONTENT_RANGE, TS_MIME_LEN_CONTENT_RANGE);
+}
+
+int64_t
+contentLengthFrom(HttpHeader const &header)
+{
+  int64_t bytes = 0;
+
+  char constr[1024];
+  int  conlen = sizeof(constr);
+
+  // look for expected Content-Length field
+  bool const hasContentLength(header.valueForKey(TS_MIME_FIELD_CONTENT_LENGTH, TS_MIME_LEN_CONTENT_LENGTH, constr, &conlen));
+
+  if (!hasContentLength) {
+    DEBUG_LOG("invalid response header, no Content-Length");
+    bytes = INT64_MAX;
+  } else {
+    // ensure null termination
+    constr[conlen] = '\0';
+    char *endptr   = nullptr;
+    bytes          = std::max(static_cast<int64_t>(0), static_cast<int64_t>(strtoll(constr, &endptr, 10)));
+  }
+
+  return bytes;
+}
+
+// Also reference server header
+enum HeaderState {
+  Good,
+  Fail,
+  Passthru,
+};
+
+static void
+update_object_size(std::string_view const url, int64_t size, Config &config)
+{
+  if (url.empty()) {
+    ERROR_LOG("Could not get URL from transaction.");
+    return;
+  }
+
+  if (size <= 0) {
+    DEBUG_LOG("Ignoring invalid content length for %.*s: %" PRId64, static_cast<int>(url.size()), url.data(), size);
+    return;
+  }
+
+  if (static_cast<uint64_t>(size) >= config.m_min_size_to_slice) {
+    config.sizeCacheAdd(url, static_cast<uint64_t>(size));
+    TSStatIntIncrement(config.stat_TP, 1);
+  } else {
+    config.sizeCacheRemove(url);
+    TSStatIntIncrement(config.stat_FP, 1);
+  }
+}
+
+// This sets up the reference data with the content length and any
+// strong/weak identifiers for comparing against subsequent slices.
+HeaderState
+handleFirstServerHeader(Data *const data, TSCont const contp)
+{
+  HttpHeader header(data->m_resp_hdrmgr.m_buffer, data->m_resp_hdrmgr.m_lochdr);
+
+  if (dbg_ctl.on()) {
+    DEBUG_LOG("First header\n%s", header.toString().c_str());
+  }
+
+  data->m_dnstream.setupVioWrite(contp, INT64_MAX);
+
+  TSVIO const      output_vio = data->m_dnstream.m_write.m_vio;
+  TSIOBuffer const output_buf = data->m_dnstream.m_write.m_iobuf;
+
+  // only process a 206, everything else gets a (possibly incomplete)
+  // pass through
+  if (TS_HTTP_STATUS_PARTIAL_CONTENT != header.status()) {
+    DEBUG_LOG("Initial response other than 206: %d", header.status());
+
+    // Should run TSVIONSetBytes(output_io, hlen + bodybytes);
+    int64_t const hlen = TSHttpHdrLengthGet(header.m_buffer, header.m_lochdr);
+    int64_t const clen = contentLengthFrom(header);
+    if (TS_HTTP_STATUS_OK == header.status() && data->onlyHeader()) {
+      DEBUG_LOG("HEAD request stripped Range header: expects 200");
+      data->m_bytestosend   = hlen;
+      data->m_blockexpected = 0;
+      TSVIONBytesSet(output_vio, hlen);
+      TSHttpHdrPrint(header.m_buffer, header.m_lochdr, output_buf);
+      data->m_bytessent = hlen;
+      TSVIOReenable(output_vio);
+      return HeaderState::Good;
+    }
+    DEBUG_LOG("Passthru bytes: header: %" PRId64 " body: %" PRId64, hlen, clen);
+    if (clen != INT64_MAX) {
+      update_object_size(data->m_effective_url, clen, *data->m_config);
+      TSVIONBytesSet(output_vio, hlen + clen);
+    } else {
+      TSVIONBytesSet(output_vio, clen);
+    }
+    TSHttpHdrPrint(header.m_buffer, header.m_lochdr, output_buf);
+    return HeaderState::Passthru;
+  }
+
+  ContentRange const blockcr = contentRangeFrom(header);
+
+  // 206 with bad content range -- should NEVER happen.
+  if (!blockcr.isValid()) {
+    std::string const msg502 = string502(header.version());
+    TSVIONBytesSet(output_vio, msg502.size());
+    TSIOBufferWrite(output_buf, msg502.data(), msg502.size());
+    TSVIOReenable(output_vio);
+    return HeaderState::Fail;
+  }
+
+  update_object_size(data->m_effective_url, blockcr.m_length, *data->m_config);
+
+  // set the resource content length from block response
+  data->m_contentlen = blockcr.m_length;
+
+  // special case last N bytes
+  if (data->m_req_range.isEndBytes()) {
+    data->m_req_range.m_end += data->m_contentlen;
+    data->m_req_range.m_beg += data->m_contentlen;
+    data->m_req_range.m_beg  = std::max(static_cast<int64_t>(0), data->m_req_range.m_beg);
+  } else {
+    // fix up request range end now that we have the content length
+    data->m_req_range.m_end = std::min(data->m_contentlen, data->m_req_range.m_end);
+  }
+
+  int64_t const bodybytes = data->m_req_range.size();
+
+  // range begins past end of data but inside last block, send 416
+  bool const send416 = (bodybytes <= 0 || TS_HTTP_STATUS_REQUESTED_RANGE_NOT_SATISFIABLE == data->m_statustype);
+  if (send416) {
+    std::string const &bodystr = bodyString416();
+    form416HeaderAndBody(header, data->m_contentlen, bodystr);
+
+    int const     hlen = TSHttpHdrLengthGet(header.m_buffer, header.m_lochdr);
+    int64_t const blen = bodystr.size();
+
+    TSVIONBytesSet(output_vio, int64_t(hlen) + blen);
+    TSHttpHdrPrint(header.m_buffer, header.m_lochdr, output_buf);
+    TSIOBufferWrite(output_buf, bodystr.data(), bodystr.size());
+    TSVIOReenable(output_vio);
+    data->m_upstream.m_read.close();
+    return HeaderState::Fail;
+  }
+
+  // save weak cache header identifiers (rfc7232 section 2)
+  data->m_etaglen = sizeof(data->m_etag);
+  header.valueForKey(TS_MIME_FIELD_ETAG, TS_MIME_LEN_ETAG, data->m_etag, &data->m_etaglen);
+  data->m_lastmodifiedlen = sizeof(data->m_lastmodified);
+  header.valueForKey(TS_MIME_FIELD_LAST_MODIFIED, TS_MIME_LEN_LAST_MODIFIED, data->m_lastmodified, &data->m_lastmodifiedlen);
+
+  // Now we can set up the expected client response
+  if (TS_HTTP_STATUS_PARTIAL_CONTENT == data->m_statustype) {
+    ContentRange respcr;
+    respcr.m_beg    = data->m_req_range.m_beg;
+    respcr.m_end    = data->m_req_range.m_end;
+    respcr.m_length = data->m_contentlen;
+
+    char       rangestr[1024];
+    int        rangelen = sizeof(rangestr);
+    bool const crstat   = respcr.toStringClosed(rangestr, &rangelen);
+
+    // corner case, return 500 ??
+    if (!crstat) {
+      data->m_upstream.close();
+      data->m_dnstream.close();
+
+      ERROR_LOG("Bad/invalid response content range");
+      return HeaderState::Fail;
+    }
+
+    header.setKeyVal(TS_MIME_FIELD_CONTENT_RANGE, TS_MIME_LEN_CONTENT_RANGE, rangestr, rangelen);
+  } else if (TS_HTTP_STATUS_OK == data->m_statustype) {
+    header.setStatus(TS_HTTP_STATUS_OK);
+    static char const *const reason = TSHttpHdrReasonLookup(TS_HTTP_STATUS_OK);
+    header.setReason(reason, strlen(reason));
+    header.removeKey(TS_MIME_FIELD_CONTENT_RANGE, TS_MIME_LEN_CONTENT_RANGE);
+  }
+
+  char      bufstr[1024];
+  int const buflen = snprintf(bufstr, sizeof(bufstr), "%" PRId64, bodybytes);
+  header.setKeyVal(TS_MIME_FIELD_CONTENT_LENGTH, TS_MIME_LEN_CONTENT_LENGTH, bufstr, buflen);
+
+  // add the response header length to the total bytes to send
+  int const hbytes = TSHttpHdrLengthGet(header.m_buffer, header.m_lochdr);
+
+  // HEAD request only sends header
+  if (data->onlyHeader()) {
+    data->m_bytestosend   = hbytes;
+    data->m_blockexpected = 0;
+  } else {
+    // GET request sends header + object
+    data->m_bytestosend   = hbytes + bodybytes;
+    data->m_blockexpected = blockcr.rangeSize();
+  }
+  TSVIONBytesSet(output_vio, data->m_bytestosend);
+  TSHttpHdrPrint(header.m_buffer, header.m_lochdr, output_buf);
+  data->m_bytessent = hbytes;
+  TSVIOReenable(output_vio);
+
+  if (data->m_config->m_prefetchcount > 0 && data->m_blocknum == data->m_req_range.firstBlockFor(data->m_config->m_blockbytes) &&
+      header.hasKey(SLICE_CRR_HEADER.data(), SLICE_CRR_HEADER.size())) {
+    data->m_prefetchable = true;
+  }
+
+  return HeaderState::Good;
+}
+
+void
+logSliceError(char const *const message, Data const *const data, HttpHeader const &header_resp)
+{
+  Config *const conf = data->m_config;
+
+  bool const logToError = conf->canLogError();
+
+  // always write block stitch errors while in debug mode
+  if (!logToError && !dbg_ctl.on()) {
+    return;
+  }
+
+  HttpHeader const header_req(data->m_req_hdrmgr.m_buffer, data->m_req_hdrmgr.m_lochdr);
+
+  TSHRTime const timenowus = TShrtime();
+  int64_t const  msecs     = timenowus / 1000000;
+  int64_t const  secs      = msecs / 1000;
+  int64_t const  ms        = msecs % 1000;
+
+  // Gather information on the request, must delete urlstr
+  int         urllen = 0;
+  char *const urlstr = header_req.urlString(&urllen);
+
+  char   urlpstr[16384];
+  size_t urlplen = sizeof(urlpstr);
+  TSStringPercentEncode(urlstr, urllen, urlpstr, urlplen, &urlplen, nullptr);
+
+  if (nullptr != urlstr) {
+    TSfree(urlstr);
+  }
+
+  // uas
+  char uasstr[8192];
+  int  uaslen = sizeof(uasstr);
+  header_req.valueForKey(TS_MIME_FIELD_USER_AGENT, TS_MIME_LEN_USER_AGENT, uasstr, &uaslen);
+
+  // raw range request
+  char rangestr[1024];
+  int  rangelen = sizeof(rangestr);
+  header_req.valueForKey(conf->m_skip_header.data(), conf->m_skip_header.size(), rangestr, &rangelen);
+
+  // Normalized range request
+  ContentRange const crange(data->m_req_range.m_beg, data->m_req_range.m_end, data->m_contentlen);
+  char               normstr[1024];
+  int                normlen = sizeof(normstr);
+  crange.toStringClosed(normstr, &normlen);
+
+  // block range request
+  int64_t const blockbeg = data->m_blocknum * conf->m_blockbytes;
+  int64_t const blockend = std::min(blockbeg + conf->m_blockbytes, data->m_contentlen);
+
+  // Block response data
+  TSHttpStatus const statusgot = header_resp.status();
+
+  // content range
+  char crstr[1024];
+  int  crlen = sizeof(crstr);
+  header_resp.valueForKey(TS_MIME_FIELD_CONTENT_RANGE, TS_MIME_LEN_CONTENT_RANGE, crstr, &crlen);
+
+  // etag
+  char etagstr[1024];
+  int  etaglen = sizeof(etagstr);
+  header_resp.valueForKey(TS_MIME_FIELD_ETAG, TS_MIME_LEN_ETAG, etagstr, &etaglen);
+
+  // last modified
+  time_t lmgot = 0;
+  header_resp.timeForKey(TS_MIME_FIELD_LAST_MODIFIED, TS_MIME_LEN_LAST_MODIFIED, &lmgot);
+
+  // cc
+  char ccstr[2048];
+  int  cclen = sizeof(ccstr);
+  header_resp.valueForKey(TS_MIME_FIELD_CACHE_CONTROL, TS_MIME_LEN_CACHE_CONTROL, ccstr, &cclen);
+
+  // via tag
+  char viastr[8192];
+  int  vialen = sizeof(viastr);
+  header_resp.valueForKey(TS_MIME_FIELD_VIA, TS_MIME_LEN_VIA, viastr, &vialen);
+
+  char   etagexpstr[1024];
+  size_t etagexplen = sizeof(etagexpstr);
+  TSStringPercentEncode(data->m_etag, data->m_etaglen, etagexpstr, etagexplen, &etagexplen, nullptr);
+
+  char   etaggotstr[1024];
+  size_t etaggotlen = sizeof(etaggotstr);
+  TSStringPercentEncode(etagstr, etaglen, etaggotstr, etaggotlen, &etaggotlen, nullptr);
+
+  DEBUG_LOG("Logging Block Stitch error");
+
+  ERROR_LOG("%" PRId64 ".%" PRId64 " reason=\"%s\""
+            " uri=\"%.*s\""
+            " uas=\"%.*s\""
+            " req_range=\"%.*s\""
+            " norm_range=\"%.*s\""
+
+            " etag_exp=\"%.*s\""
+            " lm_exp=\"%.*s\""
+
+            " blk_range=\"%" PRId64 "-%" PRId64 "\""
+
+            " status_got=\"%d\""
+            " cr_got=\"%.*s\""
+            " etag_got=\"%.*s\""
+            " lm_got=\"%jd\""
+            " cc=\"%.*s\""
+            " via=\"%.*s\"  - attempting to recover",
+            secs, ms, message, (int)urlplen, urlpstr, uaslen, uasstr, rangelen, rangestr, normlen, normstr, (int)etagexplen,
+            etagexpstr, data->m_lastmodifiedlen, data->m_lastmodified, blockbeg, blockend - 1, statusgot, crlen, crstr,
+            (int)etaggotlen, etaggotstr, static_cast<intmax_t>(lmgot), cclen, ccstr, vialen, viastr);
+}
+
+bool
+handleNextServerHeader(Data *const data)
+{
+  // block response header
+  HttpHeader header(data->m_resp_hdrmgr.m_buffer, data->m_resp_hdrmgr.m_lochdr);
+  if (dbg_ctl.on()) {
+    DEBUG_LOG("Next Header:\n%s", header.toString().c_str());
+  }
+
+  // assume the next block header is from the same asset until proven false
+  bool same = true;
+
+  switch (header.status()) {
+  case TS_HTTP_STATUS_NOT_FOUND:
+    if (data->onlyHeader()) {
+      return false;
+    }
+    // asset is gone, reissue the reference block
+    logSliceError("404 internal block response (asset gone)", data, header);
+    same = false;
+    break;
+  case TS_HTTP_STATUS_PARTIAL_CONTENT:
+    break;
+  default:
+    if (data->onlyHeader() && header.status() == TS_HTTP_STATUS_OK) {
+      return true;
+    }
+    DEBUG_LOG("Non 206/404 internal block response encountered");
+    return false;
+    break;
+  }
+
+  // can't parse the content range header, abort -- might be too strict
+  ContentRange blockcr;
+
+  // check the content range (offset and size)
+  if (same) {
+    blockcr = contentRangeFrom(header);
+    if (!blockcr.isValid() || blockcr.m_length != data->m_contentlen) {
+      logSliceError("Mismatch/Bad block Content-Range", data, header);
+      same = false;
+    }
+  }
+
+  // identifiers.  Use them
+  char etag[8192];
+  int  etaglen = 0;
+  char lastmodified[33];
+  int  lastmodifiedlen = 0;
+
+  // check the identifiers
+  if (same) {
+    // prefer the etag
+    etaglen = sizeof(etag);
+    header.valueForKey(TS_MIME_FIELD_ETAG, TS_MIME_LEN_ETAG, etag, &etaglen);
+
+    if (0 < data->m_etaglen || 0 < etaglen) {
+      same = data->m_etaglen == etaglen && 0 == strncmp(etag, data->m_etag, etaglen);
+      if (!same) {
+        logSliceError("Mismatch block Etag", data, header);
+      }
+    } else {
+      // use Last-Modified if we must
+      lastmodifiedlen = sizeof(lastmodified);
+      header.valueForKey(TS_MIME_FIELD_LAST_MODIFIED, TS_MIME_LEN_LAST_MODIFIED, lastmodified, &lastmodifiedlen);
+      if (0 < data->m_lastmodifiedlen || 0 < lastmodifiedlen) {
+        same = data->m_lastmodifiedlen == lastmodifiedlen && 0 == strncmp(lastmodified, data->m_lastmodified, lastmodifiedlen);
+        if (!same) {
+          logSliceError("Mismatch block Last-Modified", data, header);
+        }
+      }
+    }
+  }
+
+  // Header mismatch
+  if (!same) {
+    if (data->m_blockstate == BlockState::Active) {
+      data->m_upstream.abort();
+
+      DEBUG_LOG("Starting refetch of reference block");
+
+      // Interior slice doesn't match reference slice, refetch reference
+      // In this case we've given up but are trying to fix the reference
+      // for next time
+      data->m_blockstate = BlockState::PendingRef;
+
+      // interior headers for new identifier reference
+      etaglen         = std::min(etaglen, static_cast<int>(sizeof(data->m_etag) - 1));
+      data->m_etaglen = etaglen;
+      if (0 < etaglen) {
+        memcpy(data->m_etag, etag, etaglen);
+      }
+      data->m_etag[etaglen] = '\0';
+
+      lastmodifiedlen         = std::min(lastmodifiedlen, static_cast<int>(sizeof(data->m_lastmodified) - 1));
+      data->m_lastmodifiedlen = lastmodifiedlen;
+      if (0 < lastmodifiedlen) {
+        memcpy(data->m_lastmodified, lastmodified, lastmodifiedlen);
+      }
+      data->m_lastmodified[lastmodifiedlen] = '\0';
+
+      // potentially new content length
+      data->m_contentlen = blockcr.m_length;
+
+      // Reset for first block
+      if (Config::RefType::First == data->m_config->m_reftype) {
+        data->m_blocknum = 0;
+      } else {
+        data->m_blocknum = data->m_req_range.firstBlockFor(data->m_config->m_blockbytes);
+      }
+
+      return true;
+    }
+  }
+
+  data->m_blockexpected = blockcr.rangeSize();
+
+  if (data->m_config->m_prefetchcount > 0 && data->m_blocknum == data->m_req_range.firstBlockFor(data->m_config->m_blockbytes) &&
+      header.hasKey(SLICE_CRR_HEADER.data(), SLICE_CRR_HEADER.size())) {
+    data->m_prefetchable = true;
+  }
+
+  return true;
+}
+
+// Take the largest extent any block reports: blocks disagree when the origin
+// object was replaced in place, and the shorter one would leave a tail cached.
+void
+note_purge_extent(Data *const data, int64_t const length)
+{
+  if (length <= data->m_contentlen) {
+    return;
+  }
+
+  data->m_contentlen = length;
+  DEBUG_LOG("purge extent now %" PRId64 ", walking through block %" PRId64, length,
+            data->purge_range().lastBlockFor(data->m_config->m_blockbytes));
+}
+
+// A block that could not be purged is not a block that was absent, so the client must
+// not be told the object is gone. The walk stops here: the rest of the object is
+// unknown, and a 5xx often means the cache is in no state to be asked again.
+void
+note_purge_failure(Data *const data, TSHttpStatus const status)
+{
+  data->m_purge_error = status;
+
+  // paced: a config refusing PURGE would otherwise log once per purge request
+  if (data->m_config->canLogError()) {
+    ERROR_LOG("Purge of block %" PRId64 " failed (%d), the object may be left partly cached", data->m_blocknum, status);
+  }
+}
+
+// Record what the block response said, without answering the client.
+void
+note_purge_block_result(Data *const data)
+{
+  HttpHeader const header(data->m_resp_hdrmgr.m_buffer, data->m_resp_hdrmgr.m_lochdr);
+  DEBUG_LOG("Purge block header\n%s", header.toString().c_str());
+
+  TSHttpStatus const status = header.status();
+
+  if (TS_HTTP_STATUS_OK == status) {
+    ++data->m_purge_hits;
+    data->m_purge_misses = 0;
+
+    // Not Content-Range: cache_range_requests reads that on a 200 as a stored 206
+    // and rewrites the status
+    ContentRange const purgedcr = content_range_for_key(header, PURGED_CONTENT_RANGE.data(), PURGED_CONTENT_RANGE.size());
+    if (purgedcr.isValid() && 0 < purgedcr.m_length) {
+      note_purge_extent(data, purgedcr.m_length);
+    } else {
+      DEBUG_LOG("Purged block %" PRId64 " reported no usable extent", data->m_blocknum);
+    }
+  } else if (TS_HTTP_STATUS_NOT_FOUND == status) {
+    // Already absent. The walk used to stop here, leaving every later block cached.
+    ++data->m_purge_misses;
+    DEBUG_LOG("Purge block %" PRId64 " was not cached", data->m_blocknum);
+  } else {
+    // Anything else is a refusal or a failure, which says nothing about the block
+    note_purge_failure(data, status);
+  }
+}
+
+// Issue the next purge, or answer the client if the walk is over.
+void
+advance_purge(TSCont const contp, Data *const data)
+{
+  // A block that could not be purged says nothing about the ones behind it
+  if (TS_HTTP_STATUS_NONE != data->m_purge_error) {
+    finish_purge(contp, data);
+    return;
+  }
+
+  int64_t const blockbytes = data->m_config->m_blockbytes;
+  Range const   range      = data->purge_range();
+
+  ++data->m_blocknum;
+  int64_t const firstblock = range.firstBlockFor(blockbytes);
+  if (data->m_blocknum < firstblock) {
+    data->m_blocknum = firstblock;
+  }
+
+  // The requested range bounds the walk whether or not the extent is known yet
+  if (!range.blockIsInside(blockbytes, data->m_blocknum)) {
+    finish_purge(contp, data);
+    return;
+  }
+
+  // An open ended range has no such bound until some block reports an extent
+  if (data->m_contentlen < 0 && data->m_purge_miss_bound <= data->m_purge_misses) {
+    DEBUG_LOG("purge gave up after %d consecutive uncached block(s)", data->m_purge_misses);
+    finish_purge(contp, data);
+    return;
+  }
+
+  data->m_blockstate = BlockState::Pending;
+  if (!request_block(contp, data)) {
+    note_purge_failure(data, TS_HTTP_STATUS_INTERNAL_SERVER_ERROR);
+    finish_purge(contp, data);
+  }
+}
+
+} // namespace
+
+// Answer the client once every block has been walked. Nothing is written
+// downstream before this, so one uncached block cannot leak a 404 to the client.
+// A non-NONE status overrides the outcome of the walk.
+void
+finish_purge(TSCont const contp, Data *const data, TSHttpStatus const status)
+{
+  data->m_upstream.close();
+  data->m_blockstate = BlockState::Done;
+
+  // A block that could not be purged outranks the hits: 200 has to keep meaning that
+  // the object is gone, and 404 that it was never there
+  TSHttpStatus const reply = (TS_HTTP_STATUS_NONE != status)              ? status :
+                             (TS_HTTP_STATUS_NONE != data->m_purge_error) ? data->m_purge_error :
+                             (0 < data->m_purge_hits)                     ? TS_HTTP_STATUS_OK :
+                                                                            TS_HTTP_STATUS_NOT_FOUND;
+
+  DEBUG_LOG("purge removed %" PRId64 " block(s), answering %d", data->m_purge_hits, reply);
+
+  if (!data->m_dnstream.isOpen()) {
+    shutdown(contp, data);
+    return;
+  }
+
+  HdrMgr synthmgr;
+  if (!form_purge_response(synthmgr, reply)) {
+    ERROR_LOG("Failed forming the purge response");
+    shutdown(contp, data);
+    return;
+  }
+
+  HttpHeader const synth(synthmgr.m_buffer, synthmgr.m_lochdr);
+  int const        hlen = synth.byteSize();
+
+  data->m_dnstream.setupVioWrite(contp, hlen);
+  TSHttpHdrPrint(synthmgr.m_buffer, synthmgr.m_lochdr, data->m_dnstream.m_write.m_iobuf);
+  data->m_bytessent = hlen;
+  TSVIOReenable(data->m_dnstream.m_write.m_vio);
+}
+
+// A purge walks blocks instead of transferring them, so it runs its own machine
+void
+handle_purge_resp(TSCont const contp, TSEvent const event, Data *const data)
+{
+  switch (event) {
+  case TS_EVENT_VCONN_READ_READY:
+  case TS_EVENT_VCONN_READ_COMPLETE: {
+    if (!data->m_server_block_header_parsed) {
+      int64_t                consumed  = 0;
+      TSIOBufferReader const reader    = data->m_upstream.m_read.m_reader;
+      TSVIO const            input_vio = data->m_upstream.m_read.m_vio;
+      TSParseResult const    res = data->m_resp_hdrmgr.populateFrom(data->m_http_parser, reader, TSHttpHdrParseResp, &consumed);
+
+      TSVIONDoneSet(input_vio, TSVIONDoneGet(input_vio) + consumed);
+
+      if (TS_PARSE_CONT == res) {
+        return;
+      }
+
+      data->m_server_block_header_parsed = true;
+      note_purge_block_result(data);
+    }
+
+    // No block PURGE response has a body worth reading, but drop whatever arrives
+    // so the upstream read cannot stall on a full buffer
+    data->m_upstream.m_read.drainReader();
+  } break;
+
+  case TS_EVENT_VCONN_EOS: {
+    if (!data->m_server_block_header_parsed) {
+      // No response at all is not evidence the block was absent
+      note_purge_failure(data, TS_HTTP_STATUS_BAD_GATEWAY);
+      DEBUG_LOG("Purge block %" PRId64 " ended with no response header", data->m_blocknum);
+    }
+
+    // The next block cannot be requested while this one holds the upstream
+    data->m_upstream.close();
+    advance_purge(contp, data);
+  } break;
+
+  default: {
+    DEBUG_LOG("%p handle_purge_resp unhandled event: %s", data, TSHttpEventNameLookup(event));
+  } break;
+  }
+}
+
+// this is called every time the server has data for us
+void
+handle_server_resp(TSCont contp, TSEvent event, Data *const data)
+{
+  // A purge never transfers content, so it gets its own state machine
+  if (data->is_purge()) {
+    handle_purge_resp(contp, event, data);
+    return;
+  }
+
+  switch (event) {
+  case TS_EVENT_VCONN_READ_READY: {
+    if (data->m_blockstate == BlockState::Passthru) {
+      transfer_all_bytes(data);
+      return;
+    }
+
+    // has block response header been parsed??
+    if (!data->m_server_block_header_parsed) {
+      int64_t                consumed  = 0;
+      TSIOBufferReader const reader    = data->m_upstream.m_read.m_reader;
+      TSVIO const            input_vio = data->m_upstream.m_read.m_vio;
+      TSParseResult const    res = data->m_resp_hdrmgr.populateFrom(data->m_http_parser, reader, TSHttpHdrParseResp, &consumed);
+
+      TSVIONDoneSet(input_vio, TSVIONDoneGet(input_vio) + consumed);
+
+      // the server response header didn't fit into the input buffer.
+      // wait for more data from upstream
+      if (TS_PARSE_CONT == res) {
+        return;
+      }
+
+      bool headerStat = false;
+
+      if (TS_PARSE_DONE == res) {
+        if (!data->m_server_first_header_parsed) {
+          HeaderState const state = handleFirstServerHeader(data, contp);
+
+          data->m_server_first_header_parsed = true;
+          switch (state) {
+          case HeaderState::Fail:
+            data->m_blockstate = BlockState::Fail;
+            headerStat         = false;
+            break;
+          case HeaderState::Passthru: {
+            data->m_blockstate = BlockState::Passthru;
+            transfer_all_bytes(data);
+            DEBUG_LOG("Going into a passthru state");
+            return;
+          } break;
+          case HeaderState::Good:
+          default:
+            headerStat = true;
+            break;
+          }
+        } else {
+          headerStat = handleNextServerHeader(data);
+        }
+
+        data->m_server_block_header_parsed = true;
+      }
+
+      // kill the upstream and allow dnstream to clean up
+      if (!headerStat) {
+        data->m_upstream.abort();
+        data->m_blockstate = BlockState::Fail;
+        if (data->m_dnstream.m_write.isOpen()) {
+          TSVIOReenable(data->m_dnstream.m_write.m_vio);
+        } else {
+          shutdown(contp, data);
+        }
+        return;
+      }
+
+      // header may have been successfully parsed but with caveats
+      switch (data->m_blockstate) {
+        // request new version of reference slice
+      case BlockState::PendingRef: {
+        if (!request_block(contp, data)) {
+          data->m_blockstate = BlockState::Fail;
+          if (data->m_dnstream.m_write.isOpen()) {
+            TSVIOReenable(data->m_dnstream.m_write.m_vio);
+          } else {
+            shutdown(contp, data);
+          }
+        }
+        return;
+      } break;
+      case BlockState::ActiveRef: {
+        // Mark the reference block for "skip".
+        int64_t const blockbytes = data->m_config->m_blockbytes;
+        int64_t const firstblock = data->m_req_range.firstBlockFor(blockbytes);
+        int64_t const blockpos   = firstblock * blockbytes;
+        int64_t const range_beg  = data->m_req_range.m_beg;
+
+        // Once the content no longer reaches the requested first byte, the client range is unsatisfiable.
+        if (data->m_contentlen <= range_beg) {
+          if (data->m_config->canLogError()) {
+            ERROR_LOG("Content length %" PRId64 " shrunk below requested range start %" PRId64, data->m_contentlen, range_beg);
+          }
+          data->m_upstream.abort();
+          data->m_blockstate = BlockState::Fail;
+          if (data->m_dnstream.m_write.isOpen()) {
+            TSVIOReenable(data->m_dnstream.m_write.m_vio);
+          } else {
+            shutdown(contp, data);
+          }
+          return;
+        }
+
+        int64_t const firstblockbytes = std::min(blockbytes, data->m_contentlen - blockpos);
+        data->m_blockskip             = firstblockbytes;
+
+        // Check if we should abort the client
+        if (data->m_dnstream.isOpen()) {
+          TSVIO const   output_vio  = data->m_dnstream.m_write.m_vio;
+          int64_t const output_done = TSVIONDoneGet(output_vio);
+          int64_t const output_sent = data->m_bytessent;
+          if (output_done == output_sent) {
+            data->m_dnstream.abort();
+          }
+        }
+      } break;
+      default: {
+        // how much to normally fast forward into this data block
+        data->m_blockskip = data->m_req_range.skipBytesForBlock(data->m_config->m_blockbytes, data->m_blocknum);
+      } break;
+      }
+
+      schedule_prefetch(data);
+    }
+
+    transfer_content_bytes(data);
+  } break;
+  case TS_EVENT_VCONN_READ_COMPLETE: {
+    // fprintf(stderr, "%p: TS_EVENT_VCONN_READ_COMPLETE\n", data);
+  } break;
+  case TS_EVENT_VCONN_EOS: {
+    switch (data->m_blockstate) {
+    case BlockState::ActiveRef:
+    case BlockState::Passthru: {
+      transfer_all_bytes(data);
+      data->m_upstream.close();
+      TSVIO const output_vio = data->m_dnstream.m_write.m_vio;
+      if (nullptr != output_vio) {
+        TSVIOReenable(output_vio);
+      } else {
+        shutdown(contp, data);
+      }
+      return;
+    } break;
+    default:
+      break;
+    }
+
+    // corner condition, good source header + 0 length aborted content
+    // results in no header being read, just an EOS.
+    // trying to delete the upstream will crash ATS (??)
+    if (0 == data->m_blockexpected && !data->onlyHeader()) {
+      shutdown(contp, data); // this will crash if first block
+      return;
+    }
+
+    transfer_content_bytes(data);
+
+    data->m_upstream.close();
+    data->m_blockstate = BlockState::Pending;
+
+    // check for block truncation
+    if (data->m_blockconsumed < data->m_blockexpected) {
+      DEBUG_LOG("%p handle_server_resp truncation: %" PRId64 "\n", data, data->m_blockexpected - data->m_blockconsumed);
+      data->m_blockstate = BlockState::Fail;
+      //      shutdown(contp, data);
+      return;
+    }
+
+    // prepare for the next request block
+    ++data->m_blocknum;
+
+    // when we get a "bytes=-<end>" last N bytes request the plugin
+    // issues a speculative request for the first block
+    // in that case fast forward to the real first in range block
+    // Btw this isn't implemented yet, to be handled
+    int64_t const firstblock = data->m_req_range.firstBlockFor(data->m_config->m_blockbytes);
+    if (data->m_blocknum < firstblock) {
+      data->m_blocknum = firstblock;
+    }
+
+    // continue processing blocks if more requests need to be made
+    // HEAD requests only has one slice block
+    if (data->m_req_range.blockIsInside(data->m_config->m_blockbytes, data->m_blocknum) &&
+        data->m_method_type != TS_HTTP_METHOD_HEAD) {
+      // Don't immediately request the next slice if the client
+      // isn't keeping up
+
+      bool start_next_block = false;
+      if (data->m_dnstream.m_write.isOpen()) {
+        // check throttle condition
+        TSVIO const   output_vio  = data->m_dnstream.m_write.m_vio;
+        int64_t const output_done = TSVIONDoneGet(output_vio);
+        int64_t const output_sent = data->m_bytessent;
+        int64_t const threshout   = data->m_config->m_blockbytes;
+        int64_t const buffered    = output_sent - output_done;
+
+        if (threshout < buffered) {
+          DEBUG_LOG("%p handle_server_resp: throttling %" PRId64, data, buffered);
+        } else {
+          start_next_block = true;
+        }
+      }
+      if (start_next_block) {
+        if (!request_block(contp, data)) {
+          data->m_blockstate = BlockState::Fail;
+          abort(contp, data);
+          return;
+        }
+      }
+    } else {
+      data->m_upstream.close();
+      data->m_blockstate = BlockState::Done;
+      if (!data->m_dnstream.m_write.isOpen()) {
+        shutdown(contp, data);
+      }
+    }
+  } break;
+  default: {
+    DEBUG_LOG("%p handle_server_resp uhandled event: %s", data, TSHttpEventNameLookup(event));
+  } break;
+  }
+}

@@ -2,7 +2,7 @@
 
   Implement Throttler.
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -29,7 +29,7 @@ bool
 Throttler::is_throttled(uint64_t &skipped_count)
 {
   TimePoint const now = Clock::now();
-  TimePoint last_allowed_time{_last_allowed_time.load()};
+  TimePoint       last_allowed_time{_last_allowed_time.load()};
   if ((last_allowed_time + _interval.load()) <= now) {
     if (_last_allowed_time.compare_exchange_strong(last_allowed_time, now)) {
       skipped_count     = _suppressed_count;

@@ -24,14 +24,18 @@
 #include <vector>
 #include <string>
 
-extern "C" {
-typedef struct x509_st X509;
-typedef struct bio_st BIO;
-}
+using X509 = struct x509_st;
+using BIO  = struct bio_st;
 
 #define PLUGIN_NAME "sslheaders"
 
-#define SslHdrDebug(fmt, ...) TSDebug(PLUGIN_NAME, "%s: " fmt, __func__, ##__VA_ARGS__)
+namespace sslheaders_ns
+{
+extern DbgCtl dbg_ctl;
+}
+using namespace sslheaders_ns;
+
+#define SslHdrDebug(fmt, ...) Dbg(sslheaders_ns::dbg_ctl, "%s: " fmt, __func__, ##__VA_ARGS__)
 #define SslHdrError(fmt, ...)  \
   TSError("[" PLUGIN_NAME "] " \
           ": %s: " fmt,        \
@@ -65,29 +69,29 @@ enum ExpansionField {
 
 struct SslHdrExpansion {
   SslHdrExpansion() : name() {}
-  std::string name; // HTTP header name
+  std::string    name; // HTTP header name
   ExpansionScope scope = SSL_HEADERS_SCOPE_NONE;
   ExpansionField field = SSL_HEADERS_FIELD_NONE;
 
   // noncopyable but movable
-  SslHdrExpansion(const SslHdrExpansion &) = delete;
+  SslHdrExpansion(const SslHdrExpansion &)            = delete;
   SslHdrExpansion &operator=(const SslHdrExpansion &) = delete;
   SslHdrExpansion(SslHdrExpansion &&)                 = default;
-  SslHdrExpansion &operator=(SslHdrExpansion &&) = default;
+  SslHdrExpansion &operator=(SslHdrExpansion &&)      = default;
 };
 
 struct SslHdrInstance {
-  typedef std::vector<SslHdrExpansion> expansion_list;
+  using expansion_list = std::vector<SslHdrExpansion>;
 
   SslHdrInstance();
   ~SslHdrInstance();
 
   expansion_list expansions;
-  AttachOptions attach = SSL_HEADERS_ATTACH_SERVER;
-  TSCont cont;
+  AttachOptions  attach = SSL_HEADERS_ATTACH_SERVER;
+  TSCont         cont;
 
   // noncopyable
-  SslHdrInstance(const SslHdrInstance &) = delete;
+  SslHdrInstance(const SslHdrInstance &)            = delete;
   SslHdrInstance &operator=(const SslHdrInstance &) = delete;
 };
 

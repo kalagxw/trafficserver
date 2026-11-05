@@ -31,19 +31,20 @@
 #include <openssl/x509v3.h>
 
 #include "ts/ts.h"
-#include "tscpp/util/TextView.h"
+#include "swoc/TextView.h"
 
 #define PLUGIN_NAME "cert_reporting_tool"
 TSTextLogObject cert_reporting_log;
 
+namespace
+{
+DbgCtl dbg_ctl{PLUGIN_NAME};
+}
+
 char *
 asn1_string_extract(ASN1_STRING *s)
 {
-#if OPENSSL_VERSION_NUMBER >= 0x010100000
   return reinterpret_cast<char *>(const_cast<unsigned char *>(ASN1_STRING_get0_data(s)));
-#else
-  return reinterpret_cast<char *>(ASN1_STRING_data(s));
-#endif
 }
 
 // For 1.0.2, needs access to internal structure
@@ -55,16 +56,16 @@ dump_context(const char *ca_path, const char *ck_path)
   if (ctx) {
     SSL *s = SSL_new(reinterpret_cast<SSL_CTX *>(ctx));
     if (s) {
-      char *data  = nullptr;
-      long length = 0;
+      char       *data   = nullptr;
+      long        length = 0;
       std::string subject_s, san_s, serial_s, time_s;
-      X509 *cert = SSL_get_certificate(s);
+      X509       *cert = SSL_get_certificate(s);
       if (cert) {
         // Retrieve state info and write to log object
         // expiration date, serial number, common name, and subject alternative names
-        const ASN1_TIME *not_after = X509_get_notAfter(cert);
-        const ASN1_INTEGER *serial = X509_get_serialNumber(cert);
-        X509_NAME *subject_name    = X509_get_subject_name(cert);
+        const ASN1_TIME    *not_after    = X509_get_notAfter(cert);
+        const ASN1_INTEGER *serial       = X509_get_serialNumber(cert);
+        const X509_NAME    *subject_name = X509_get_subject_name(cert);
 
         // Subject name
         BIO *subject_bio = BIO_new(BIO_s_mem());
@@ -108,14 +109,14 @@ dump_context(const char *ca_path, const char *ck_path)
               san_s.push_back(',');
             }
           }
-          if (san_s.back() == ',') {
+          if (!san_s.empty() && san_s.back() == ',') {
             san_s.pop_back();
           }
         }
 
         // Serial number
         int64_t sn = 0;
-#if !defined(OPENSSL_IS_BORINGSSL) && (OPENSSL_VERSION_NUMBER >= 0x010100000)
+#if !defined(OPENSSL_IS_BORINGSSL)
         ASN1_INTEGER_get_int64(&sn, serial);
 #else
         sn = ASN1_INTEGER_get(serial);
@@ -130,8 +131,8 @@ dump_context(const char *ca_path, const char *ck_path)
         length = BIO_get_mem_data(time_bio, &data);
         time_s = std::string(data, length);
         BIO_free(time_bio);
-        TSDebug(PLUGIN_NAME, "LookupName: %s:%s, Subject: %s. SAN: %s. Serial: %s. NotAfter: %s.", ca_path, ck_path,
-                subject_s.c_str(), san_s.c_str(), serial_s.c_str(), time_s.c_str());
+        Dbg(dbg_ctl, "LookupName: %s:%s, Subject: %s. SAN: %s. Serial: %s. NotAfter: %s.", ca_path, ck_path, subject_s.c_str(),
+            san_s.c_str(), serial_s.c_str(), time_s.c_str());
         TSTextLogObjectWrite(cert_reporting_log, "LookupName: %s:%s, Subject: %s. SAN: %s. Serial: %s. NotAfter: %s.", ca_path,
                              ck_path, subject_s.c_str(), san_s.c_str(), serial_s.c_str(), time_s.c_str());
       }
@@ -145,8 +146,8 @@ dump_context(const char *ca_path, const char *ck_path)
 int
 CB_context_dump(TSCont, TSEvent, void *edata)
 {
-  TSPluginMsg *msg = static_cast<TSPluginMsg *>(edata);
-  static constexpr std::string_view PLUGIN_PREFIX("cert_reporting_tool."_sv);
+  TSPluginMsg                      *msg = static_cast<TSPluginMsg *>(edata);
+  static constexpr std::string_view PLUGIN_PREFIX("cert_reporting_tool.");
 
   std::string_view tag(msg->tag, strlen(msg->tag));
 
@@ -170,7 +171,7 @@ CB_context_dump(TSCont, TSEvent, void *edata)
 }
 
 void
-TSPluginInit(int argc, const char *argv[])
+TSPluginInit(int /* argc ATS_UNUSED */, const char ** /* argv ATS_UNUSED */)
 {
   TSPluginRegistrationInfo info;
 
@@ -186,6 +187,6 @@ TSPluginInit(int argc, const char *argv[])
     TSError("[%s] Failed to create log file", PLUGIN_NAME);
     return;
   }
-  TSDebug(PLUGIN_NAME, "Initialized.");
+  Dbg(dbg_ctl, "Initialized.");
   TSLifecycleHookAdd(TS_LIFECYCLE_MSG_HOOK, TSContCreate(CB_context_dump, nullptr));
 }

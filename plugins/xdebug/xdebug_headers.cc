@@ -17,8 +17,10 @@
   limitations under the License.
  */
 
+#include "xdebug_headers.h"
+
 #include <cstdlib>
-#include <stdio.h>
+#include <cstdio>
 #include <cstdio>
 #include <strings.h>
 #include <string_view>
@@ -28,104 +30,33 @@
 
 #define DEBUG_TAG_LOG_HEADERS "xdebug.headers"
 
-class EscapeCharForJson
+namespace xdebug
 {
-public:
-  std::string_view
-  operator()(char const &c)
-  {
-    if ((_state != IN_VALUE) && ((' ' == c) || ('\t' == c))) {
-      return {""};
-    }
-    if ((IN_NAME == _state) && (':' == c)) {
-      _state = BEFORE_VALUE;
-      return {"' : '"};
-    }
-    if ('\r' == c) {
-      return {""};
-    }
-    if ('\n' == c) {
-      std::string_view result{_after_value()};
 
-      if (BEFORE_NAME == _state) {
-        return {""};
-      } else if (BEFORE_VALUE == _state) {
-        // Failsafe -- missing value -- this should never happen.
-        result = _missing_value();
-      }
-      _state = BEFORE_NAME;
-      return result;
-    }
-    if (BEFORE_NAME == _state) {
-      _state = IN_NAME;
-    } else if (BEFORE_VALUE == _state) {
-      _state = IN_VALUE;
-    }
-    switch (c) {
-    case '\'':
-      return {"\\\'"};
-    case '"':
-      return {"\\\""};
-    case '\\':
-      return {"\\\\"};
-    case '\b':
-      return {"\\b"};
-    case '\f':
-      return {"\\f"};
-    case '\t':
-      return {"\\t"};
-    default:
-      return {&c, 1};
-    }
-  }
-
-  // After last header line, back up and throw away everything but the closing quote.
-  //
-  static std::size_t
-  backup()
-  {
-    return _after_value().size() - 1;
-  }
-
-private:
-  static std::string_view
-  _missing_value()
-  {
-    return {"' : '',\n\t'"};
-  }
-
-  static std::string_view
-  _after_name()
-  {
-    return {_missing_value().data(), 5};
-  }
-
-  static std::string_view
-  _after_value()
-  {
-    return {_missing_value().data() + 5, 5};
-  }
-
-  enum _State { BEFORE_NAME, IN_NAME, BEFORE_VALUE, IN_VALUE };
-
-  _State _state{BEFORE_VALUE};
-};
+namespace
+{
+  DbgCtl dbg_ctl_hdrs{DEBUG_TAG_LOG_HEADERS};
+}
 
 ///////////////////////////////////////////////////////////////////////////
-// Dump a header on stderr, useful together with TSDebug().
+// Dump a header on stderr, useful together with Dbg().
 void
-print_headers(TSHttpTxn txn, TSMBuffer bufp, TSMLoc hdr_loc, std::stringstream &ss)
+print_headers(TSMBuffer bufp, TSMLoc hdr_loc, std::stringstream &ss, bool full_json)
 {
-  TSIOBuffer output_buffer;
-  TSIOBufferReader reader;
-  TSIOBufferBlock block;
-  const char *block_start;
-  int64_t block_avail;
-  EscapeCharForJson escape_char_for_json;
+  TSIOBuffer        output_buffer;
+  TSIOBufferReader  reader;
+  TSIOBufferBlock   block;
+  const char       *block_start;
+  int64_t           block_avail;
+  EscapeCharForJson escape_char_for_json{full_json};
   output_buffer = TSIOBufferCreate();
   reader        = TSIOBufferReaderAlloc(output_buffer);
 
-  ss << "\t'Start-Line' : '";
+  if (full_json) {
+    ss << R"("start-line":")";
+  } else {
+    ss << "\t'Start-Line' : '";
+  }
 
   // Print all message header lines.
   TSHttpHdrPrint(bufp, hdr_loc, output_buffer);
@@ -141,22 +72,22 @@ print_headers(TSHttpTxn txn, TSMBuffer bufp, TSMLoc hdr_loc, std::stringstream &
     block = TSIOBufferReaderStart(reader);
   } while (block && block_avail != 0);
 
-  ss.seekp(-escape_char_for_json.backup(), std::ios_base::end);
+  ss.seekp(-escape_char_for_json.backup(full_json), std::ios_base::end);
 
   /* Free up the TSIOBuffer that we used to print out the header */
   TSIOBufferReaderFree(reader);
   TSIOBufferDestroy(output_buffer);
 
-  TSDebug(DEBUG_TAG_LOG_HEADERS, "%.*s", static_cast<int>(ss.tellp()), ss.str().data());
+  Dbg(dbg_ctl_hdrs, "%.*s", static_cast<int>(ss.tellp()), ss.str().data());
 }
 
 void
-log_headers(TSHttpTxn txn, TSMBuffer bufp, TSMLoc hdr_loc, char const *type_msg)
+log_headers(TSHttpTxn /* txn ATS_UNUSED */, TSMBuffer bufp, TSMLoc hdr_loc, char const *type_msg)
 {
-  if (TSIsDebugTagSet(DEBUG_TAG_LOG_HEADERS)) {
+  if (dbg_ctl_hdrs.on()) {
     std::stringstream output;
-    print_headers(txn, bufp, hdr_loc, output);
-    TSDebug(DEBUG_TAG_LOG_HEADERS, "\n=============\n %s headers are... \n %s", type_msg, output.str().c_str());
+    print_headers(bufp, hdr_loc, output, FULL_JSON);
+    Dbg(dbg_ctl_hdrs, "\n=============\n %s headers are... \n %s", type_msg, output.str().c_str());
   }
 }
 
@@ -164,16 +95,16 @@ void
 print_request_headers(TSHttpTxn txn, std::stringstream &output)
 {
   TSMBuffer buf_c, buf_s;
-  TSMLoc hdr_loc;
+  TSMLoc    hdr_loc;
   if (TSHttpTxnClientReqGet(txn, &buf_c, &hdr_loc) == TS_SUCCESS) {
     output << "{'type':'request', 'side':'client', 'headers': {\n";
-    print_headers(txn, buf_c, hdr_loc, output);
+    print_headers(buf_c, hdr_loc, output, !FULL_JSON);
     output << "\n\t}}";
     TSHandleMLocRelease(buf_c, TS_NULL_MLOC, hdr_loc);
   }
   if (TSHttpTxnServerReqGet(txn, &buf_s, &hdr_loc) == TS_SUCCESS) {
     output << ",{'type':'request', 'side':'server', 'headers': {\n";
-    print_headers(txn, buf_s, hdr_loc, output);
+    print_headers(buf_s, hdr_loc, output, !FULL_JSON);
     output << "\n\t}}";
     TSHandleMLocRelease(buf_s, TS_NULL_MLOC, hdr_loc);
   }
@@ -183,17 +114,73 @@ void
 print_response_headers(TSHttpTxn txn, std::stringstream &output)
 {
   TSMBuffer buf_c, buf_s;
-  TSMLoc hdr_loc;
+  TSMLoc    hdr_loc;
   if (TSHttpTxnServerRespGet(txn, &buf_s, &hdr_loc) == TS_SUCCESS) {
     output << "{'type':'response', 'side':'server', 'headers': {\n";
-    print_headers(txn, buf_s, hdr_loc, output);
+    print_headers(buf_s, hdr_loc, output, !FULL_JSON);
     output << "\n\t}},";
     TSHandleMLocRelease(buf_s, TS_NULL_MLOC, hdr_loc);
   }
   if (TSHttpTxnClientRespGet(txn, &buf_c, &hdr_loc) == TS_SUCCESS) {
     output << "{'type':'response', 'side':'client', 'headers': {\n";
-    print_headers(txn, buf_c, hdr_loc, output);
+    print_headers(buf_c, hdr_loc, output, !FULL_JSON);
     output << "\n\t}}";
     TSHandleMLocRelease(buf_c, TS_NULL_MLOC, hdr_loc);
   }
 }
+
+void
+print_request_headers_full_json(TSHttpTxn txn, std::stringstream &output)
+{
+  TSMBuffer buf_c, buf_s;
+  TSMLoc    hdr_loc;
+
+  bool has_client = false;
+
+  Dbg(dbg_ctl_hdrs, "Printing client request headers for full JSON");
+  if (TSHttpTxnClientReqGet(txn, &buf_c, &hdr_loc) == TS_SUCCESS) {
+    output << "{\"client-request\":{";
+    print_headers(buf_c, hdr_loc, output, FULL_JSON);
+    output << "}";
+    has_client = true;
+    TSHandleMLocRelease(buf_c, TS_NULL_MLOC, hdr_loc);
+  }
+
+  if (TSHttpTxnServerReqGet(txn, &buf_s, &hdr_loc) == TS_SUCCESS) {
+    if (has_client) {
+      output << ",";
+    }
+    output << "\"proxy-request\":{";
+    print_headers(buf_s, hdr_loc, output, FULL_JSON);
+    output << "}";
+    TSHandleMLocRelease(buf_s, TS_NULL_MLOC, hdr_loc);
+  }
+}
+
+void
+print_response_headers_full_json(TSHttpTxn txn, std::stringstream &output)
+{
+  TSMBuffer buf_c, buf_s;
+  TSMLoc    hdr_loc;
+
+  bool has_server = false;
+
+  if (TSHttpTxnServerRespGet(txn, &buf_s, &hdr_loc) == TS_SUCCESS) {
+    output << "\"server-response\":{";
+    print_headers(buf_s, hdr_loc, output, FULL_JSON);
+    output << "}";
+    has_server = true;
+    TSHandleMLocRelease(buf_s, TS_NULL_MLOC, hdr_loc);
+  }
+
+  if (TSHttpTxnClientRespGet(txn, &buf_c, &hdr_loc) == TS_SUCCESS) {
+    if (has_server) {
+      output << ",";
+    }
+    output << "\"proxy-response\":{";
+    print_headers(buf_c, hdr_loc, output, FULL_JSON);
+    output << "}}";
+    TSHandleMLocRelease(buf_c, TS_NULL_MLOC, hdr_loc);
+  }
+}
+} // namespace xdebug

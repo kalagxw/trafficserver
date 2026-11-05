@@ -1,0 +1,104 @@
+/** @file
+
+  Catch based unit tests for EventSystem
+
+  @section license License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+
+#include "inkevent_test_fixtures.h"
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/reporters/catch_reporter_event_listener.hpp>
+#include <catch2/reporters/catch_reporter_registrars.hpp>
+#include <catch2/interfaces/catch_interfaces_config.hpp>
+
+#include "iocore/eventsystem/EventSystem.h"
+#include "tscore/ink_atomic.h"
+#include "tscore/TSSystemState.h"
+
+using inkevent_test::EventProcessorListener;
+
+#define TEST_TIME_SECOND 60
+#define TEST_THREADS     2
+
+TEST_CASE("EventSystem", "[iocore]")
+{
+  static int count;
+
+  struct alarm_printer : public Continuation {
+    alarm_printer(ProxyMutex *m) : Continuation(m) { SET_HANDLER(&alarm_printer::dummy_function); }
+
+    int
+    dummy_function(int /* event ATS_UNUSED */, Event * /* e ATS_UNUSED */)
+    {
+      ink_atomic_increment((int *)&count, 1);
+
+      EThread *e = this_ethread();
+      std::printf("thread=%d (%p) count = %d\n", e->id, e, count);
+
+      return 0;
+    }
+  };
+
+  struct process_killer : public Continuation {
+    process_killer(ProxyMutex *m) : Continuation(m) { SET_HANDLER(&process_killer::kill_function); }
+
+    int
+    kill_function(int /* event ATS_UNUSED */, Event * /* e ATS_UNUSED */)
+    {
+      EThread *e = this_ethread();
+      std::printf("thread=%d (%p) count is %d\n", e->id, e, count);
+
+      REQUIRE(count > 0);
+      REQUIRE(count <= TEST_TIME_SECOND * TEST_THREADS);
+
+      TSSystemState::shut_down_event_system();
+
+      return 0;
+    }
+  };
+
+  alarm_printer  alrm{new_ProxyMutex()};
+  process_killer killer{new_ProxyMutex()};
+  eventProcessor.schedule_in(&killer, HRTIME_SECONDS(10));
+  eventProcessor.schedule_every(&alrm, HRTIME_SECONDS(1));
+
+  while (!TSSystemState::is_event_system_shut_down()) {
+    sleep(1);
+  }
+}
+
+CATCH_REGISTER_LISTENER(EventProcessorListener);
+
+TEST_CASE("EventSystemUnixSocket", "[iocore][sock]")
+{
+  if (UnixSocket::client_fastopen_supported()) {
+    if (MSG_FASTOPEN == 0) {
+      std::printf("TCP Fast Open is supported, MSG_FASTOPEN must not be 0\n");
+      CHECK(false);
+    }
+  }
+
+  if (::access("/proc/sys/net/ipv4/tcp_fastopen", F_OK) == 0) {
+    if (MSG_FASTOPEN == 0) {
+      std::printf("TCP Fast Open is supported, MSG_FASTOPEN must not be 0\n");
+      CHECK(false);
+    }
+  }
+}

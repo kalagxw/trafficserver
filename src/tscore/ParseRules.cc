@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -50,8 +50,8 @@ const char parseRulesCTypeToLower[256] = {
 int64_t
 ink_atoi64(const char *str, const char **end)
 {
-  int64_t num  = 0;
-  int negative = 0;
+  int64_t num      = 0;
+  int     negative = 0;
 
   while (*str && ParseRules::is_wslfcr(*str)) {
     str += 1;
@@ -64,8 +64,8 @@ ink_atoi64(const char *str, const char **end)
     }
   } else {
     if (unlikely(*str == '-')) {
-      negative = 1;
-      str += 1;
+      negative  = 1;
+      str      += 1;
     }
 
     /*
@@ -142,8 +142,8 @@ ink_atoui64(const char *str)
 int64_t
 ink_atoi64(const char *str, int len)
 {
-  int64_t num  = 0;
-  int negative = 0;
+  int64_t num      = 0;
+  int     negative = 0;
 
   while (len > 0 && *str && ParseRules::is_wslfcr(*str)) {
     str += 1;
@@ -162,8 +162,8 @@ ink_atoi64(const char *str, int len)
     }
   } else {
     if (unlikely(*str == '-')) {
-      negative = 1;
-      str += 1;
+      negative  = 1;
+      str      += 1;
     }
 
     /*

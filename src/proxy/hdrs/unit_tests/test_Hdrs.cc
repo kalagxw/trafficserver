@@ -1,0 +1,3492 @@
+/** @file
+
+   Catch-based unit tests for various header logic.
+   This replaces the old regression tests in HdrTest.cc.
+
+   @section license License
+
+   Licensed to the Apache Software Foundation (ASF) under one or more contributor license agreements.
+   See the NOTICE file distributed with this work for additional information regarding copyright
+   ownership.  The ASF licenses this file to you under the Apache License, Version 2.0 (the
+   "License"); you may not use this file except in compliance with the License.  You may obtain a
+   copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software distributed under the License
+   is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+   or implied. See the License for the specific language governing permissions and limitations under
+   the License.
+ */
+
+#include <string>
+#include <string_view>
+#include <vector>
+#include <cstring>
+#include <cctype>
+#include <bitset>
+#include <initializer_list>
+#include <array>
+#include <new>
+#include <cstdio>
+#include <memory>
+
+using namespace std::literals;
+
+#include "tsutil/Regex.h"
+#include "tscore/ink_time.h"
+#include "tscore/Random.h"
+#include "tsutil/PostScript.h"
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
+#include <catch2/generators/catch_generators_range.hpp>
+
+#include "proxy/hdrs/HTTP.h"
+#include "proxy/hdrs/HttpCompat.h"
+#include "tscore/Diags.h"
+
+// replaces test_http_parser_eos_boundary_cases
+TEST_CASE("HdrTestHttpParse", "[proxy][hdrtest]")
+{
+  struct Test {
+    swoc::TextView msg;
+    ParseResult    expected_result;
+    int            expected_bytes_consumed;
+  };
+
+  static const std::vector<Test> http_parse_tests = {
+    {"GET /index.html HTTP/1.0\r\n",                                              ParseResult::DONE,  26},
+    {"GET /index.html HTTP/1.0\r\n\r\n***BODY****",                               ParseResult::DONE,  28},
+    {"GET /index.html HTTP/1.0\r\nUser-Agent: foobar\r\n\r\n***BODY****",         ParseResult::DONE,  48},
+    {"GET",                                                                       ParseResult::ERROR, 3 },
+    {"GET /index.html",                                                           ParseResult::ERROR, 15},
+    {"GET /index.html\r\n",                                                       ParseResult::ERROR, 17},
+    {"GET /index.html HTTP/1.0",                                                  ParseResult::ERROR, 24},
+    {"GET /index.html HTTP/1.0\r",                                                ParseResult::ERROR, 25},
+    {"GET /index.html HTTP/1.0\n",                                                ParseResult::DONE,  25},
+    {"GET /index.html HTTP/1.0\n\n",                                              ParseResult::DONE,  26},
+    {"GET /index.html HTTP/1.0\r\n\r\n",                                          ParseResult::DONE,  28},
+    {"GET /index.html HTTP/1.0\r\nUser-Agent: foobar",                            ParseResult::ERROR, 44},
+    {"GET /index.html HTTP/1.0\r\nUser-Agent: foobar\n",                          ParseResult::DONE,  45},
+    {"GET /index.html HTTP/1.0\r\nUser-Agent: foobar\r\n",                        ParseResult::DONE,  46},
+    {"GET /index.html HTTP/1.0\r\nUser-Agent: foobar\r\n\r\n",                    ParseResult::DONE,  48},
+    {"GET /index.html HTTP/1.0\nUser-Agent: foobar\n",                            ParseResult::DONE,  44},
+    {"GET /index.html HTTP/1.0\nUser-Agent: foobar\nBoo: foo\n",                  ParseResult::DONE,  53},
+    {"GET /index.html HTTP/1.0\r\nUser-Agent: foobar\r\n",                        ParseResult::DONE,  46},
+    {"GET /index.html HTTP/1.0\r\n",                                              ParseResult::DONE,  26},
+    {"GET /index.html hTTP/1.0\r\n",                                              ParseResult::ERROR, 26},
+    {"POST /index.html HTTP/1.0\r\nContent-Length: 0\r\n\r\n",                    ParseResult::DONE,  48},
+    {"POST /index.html HTTP/1.0\r\nContent-Length: 2147483648\r\n\r\n",           ParseResult::DONE,  57},
+    {"POST /index.html HTTP/1.0\r\nContent-Length: 9223372036854775807\r\n\r\n",  ParseResult::DONE,  66},
+    {"POST /index.html HTTP/1.0\r\nContent-Length: 9223372036854775808\r\n\r\n",  ParseResult::ERROR, 66},
+    {"POST /index.html HTTP/1.0\r\nContent-Length: 99999999999999999999\r\n\r\n", ParseResult::ERROR, 67},
+    {"POST /index.html HTTP/1.0\r\nContent-Length: -1\r\n\r\n",                   ParseResult::ERROR, 49},
+    {"POST /index.html HTTP/1.0\r\nContent-Length: \r\n\r\n",                     ParseResult::ERROR, 47},
+    {"POST /index.html HTTP/1.0\r\nContent-Length:\r\n\r\n",                      ParseResult::ERROR, 46},
+    {"CONNECT foo.example HTTP/1.1\r\n",                                          ParseResult::DONE,  30},
+    {"GET foo.example HTTP/1.1\r\n",                                              ParseResult::ERROR, 26},
+    {"",                                                                          ParseResult::ERROR, 0 },
+  };
+
+  auto test = GENERATE(from_range(http_parse_tests));
+  CAPTURE(test.msg, test.expected_result, test.expected_bytes_consumed);
+
+  HTTPParser parser;
+  http_parser_init(&parser);
+
+  HTTPHdr  req_hdr;
+  HdrHeap *heap = new_HdrHeap(HdrHeap::DEFAULT_SIZE + 64); // extra to prevent proxy allocation.
+
+  req_hdr.create(HTTPType::REQUEST, HTTP_1_1, heap);
+
+  auto start          = test.msg.data();
+  auto ret            = req_hdr.parse_req(&parser, &start, test.msg.data_end(), true);
+  auto bytes_consumed = start - test.msg.data();
+
+  REQUIRE(bytes_consumed == test.expected_bytes_consumed);
+  REQUIRE(ret == test.expected_result);
+
+  req_hdr.destroy();
+}
+
+TEST_CASE("HTTPHdr destroy clears cached request URL", "[proxy][hdrtest]")
+{
+  constexpr swoc::TextView msg = "GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n"sv;
+
+  HTTPParser parser;
+  http_parser_init(&parser);
+
+  HTTPHdr  req_hdr;
+  HdrHeap *heap = new_HdrHeap(HdrHeap::DEFAULT_SIZE + 64);
+
+  req_hdr.create(HTTPType::REQUEST, HTTP_1_1, heap);
+
+  auto start = msg.data();
+  REQUIRE(req_hdr.parse_req(&parser, &start, msg.data_end(), true) == ParseResult::DONE);
+
+  // Force population of m_url_cached so it holds a pointer into the heap.
+  URL *u = req_hdr.url_get();
+  REQUIRE(u != nullptr);
+  REQUIRE(u->valid());
+  REQUIRE(req_hdr.m_url_cached.valid());
+
+  // Force population of the target cache so m_host_mime points into the heap.
+  std::string_view host = req_hdr.host_get();
+  REQUIRE(!host.empty());
+  REQUIRE(req_hdr.m_target_cached);
+
+  req_hdr.destroy();
+
+  // After destroy(), no member should reference the freed heap.
+  REQUIRE(req_hdr.m_http == nullptr);
+  REQUIRE(req_hdr.m_mime == nullptr);
+  REQUIRE_FALSE(req_hdr.m_url_cached.valid());
+  REQUIRE(req_hdr.m_host_mime == nullptr);
+  REQUIRE_FALSE(req_hdr.m_target_cached);
+}
+
+// A single header field whose name or value exceeds the uniform UINT16_MAX
+// field-size limit must be rejected by the parser. m_len_name is uint16_t, so an
+// oversized name would truncate its stored length; m_len_value is uint32_t : 24
+// and could hold more, but the value is capped at the same limit. The caller
+// (HttpSM) turns the parse error into a 400.
+TEST_CASE("HdrTestOversizedFieldRejected", "[proxy][hdrtest]")
+{
+  HTTPParser parser;
+  http_parser_init(&parser);
+
+  HTTPHdr  req_hdr;
+  HdrHeap *heap = new_HdrHeap(HdrHeap::DEFAULT_SIZE + 64);
+
+  req_hdr.create(HTTPType::REQUEST, HTTP_1_1, heap);
+
+  // 70000-byte value: name+value stays under the default max_hdr_field_size
+  // (131070) but the value alone exceeds UINT16_MAX (65535).
+  std::string    msg = "GET /index.html HTTP/1.0\r\nX-Big: " + std::string(70000, 'a') + "\r\n\r\n";
+  swoc::TextView tv{msg};
+
+  auto start = tv.data();
+  auto ret   = req_hdr.parse_req(&parser, &start, tv.data_end(), true);
+
+  REQUIRE(ret == ParseResult::ERROR);
+
+  req_hdr.destroy();
+  http_parser_clear(&parser);
+}
+
+TEST_CASE("MIMEScanner_fragments", "[proxy][mimescanner_fragments]")
+{
+  constexpr swoc::TextView const message = "GET /index.html HTTP/1.0\r\n";
+
+  struct Fragment {
+    swoc::TextView msg;
+    bool           shares_input;
+    ParseResult    expected_result;
+  };
+  constexpr std::array<Fragment, 3> const fragments = {
+    {
+     {message.substr(0, 11), true, ParseResult::CONT},
+     {message.substr(11, 11), true, ParseResult::CONT},
+     {message.substr(22), false, ParseResult::OK},
+     }
+  };
+
+  MIMEScanner    scanner;
+  swoc::TextView output; // only set on last call
+
+  for (auto const &frag : fragments) {
+    CAPTURE(frag.msg, frag.shares_input, frag.expected_result);
+    swoc::TextView       input            = frag.msg;
+    bool                 got_shares_input = !frag.shares_input;
+    constexpr bool const is_eof           = false;
+    ParseResult const    got_res          = scanner.get(input, output, got_shares_input, is_eof, MIMEScanner::ScanType::LINE);
+
+    REQUIRE(frag.expected_result == got_res);
+    REQUIRE(frag.shares_input == got_shares_input);
+  }
+
+  REQUIRE(message == output);
+}
+
+TEST_CASE("MIMEScanner obs-fold single buffer", "[proxy][mimescanner_obsfold]")
+{
+  MIMEScanner    scanner;
+  swoc::TextView output;
+  bool           shares_input = true;
+
+  char buf[]  = "Foo: bar\r\n baz\r\n";
+  auto input  = swoc::TextView{buf};
+  auto result = scanner.get(input, output, shares_input, false, MIMEScanner::ScanType::FIELD);
+
+  REQUIRE(result == ParseResult::OK);
+  REQUIRE(output == "Foo: bar   baz\r\n"sv);
+}
+
+TEST_CASE("MIMEScanner obs-fold CR/LF split across fragments", "[proxy][mimescanner_obsfold]")
+{
+  // CR at the end of fragment 1, LF + continuation whitespace at the start
+  // of fragment 2. The unfold code must not walk backwards past the start of
+  // the second fragment's buffer.
+  MIMEScanner    scanner;
+  swoc::TextView output;
+  bool           shares_input = true;
+
+  char first[] = "Foo: bar\r";
+  auto input   = swoc::TextView{first};
+  auto result  = scanner.get(input, output, shares_input, false, MIMEScanner::ScanType::FIELD);
+  REQUIRE(result == ParseResult::CONT);
+
+  char second[] = "\n baz\r\n";
+  input         = swoc::TextView{second};
+  shares_input  = true;
+  result        = scanner.get(input, output, shares_input, false, MIMEScanner::ScanType::FIELD);
+
+  REQUIRE(result == ParseResult::OK);
+  REQUIRE(shares_input == false);
+  REQUIRE(output == "Foo: bar   baz\r\n"sv);
+}
+
+namespace
+{
+static const char *
+comp_http_hdr(HTTPHdr *h1, HTTPHdr *h2)
+{
+  int h1_len = h1->length_get();
+  int h2_len = h2->length_get();
+
+  if (h1_len != h2_len) {
+    return "length mismatch";
+  }
+
+  std::unique_ptr<char[]> h1_pbuf(new char[h1_len + 1]);
+  std::unique_ptr<char[]> h2_pbuf(new char[h2_len + 1]);
+
+  int p_index = 0, p_dumpoffset = 0;
+
+  int rval = h1->print(h1_pbuf.get(), h1_len, &p_index, &p_dumpoffset);
+  if (rval != 1) {
+    return "hdr print failed";
+  }
+
+  p_index = p_dumpoffset = 0;
+  rval                   = h2->print(h2_pbuf.get(), h2_len, &p_index, &p_dumpoffset);
+  if (rval != 1) {
+    return "hdr print failed";
+  }
+
+  rval = memcmp(h1_pbuf.get(), h2_pbuf.get(), h1_len);
+
+  if (rval != 0) {
+    return "compare failed";
+  } else {
+    return nullptr;
+  }
+}
+
+int
+test_http_hdr_copy_over_aux(int testnum, const char *request, const char *response)
+{
+  HTTPHdr req_hdr;
+  HTTPHdr resp_hdr;
+  HTTPHdr copy1;
+  HTTPHdr copy2;
+
+  ts::PostScript cleanup([&]() -> void {
+    req_hdr.destroy();
+    resp_hdr.destroy();
+    copy1.destroy();
+    copy2.destroy();
+  });
+
+  HTTPParser  parser;
+  const char *start;
+  const char *end;
+  const char *comp_str = nullptr;
+
+  /*** (1) parse the request string into hdr ***/
+
+  req_hdr.create(HTTPType::REQUEST);
+
+  start = request;
+  end   = start + strlen(start); // 1 character past end of string
+
+  http_parser_init(&parser);
+
+  ParseResult err;
+  while (true) {
+    err = req_hdr.parse_req(&parser, &start, end, true);
+    if (err != ParseResult::CONT) {
+      break;
+    }
+  }
+
+  if (err == ParseResult::ERROR) {
+    std::printf("FAILED: (test #%d) parse error parsing request hdr\n", testnum);
+    return (0);
+  }
+  http_parser_clear(&parser);
+
+  /*** (2) parse the response string into hdr ***/
+
+  resp_hdr.create(HTTPType::RESPONSE);
+
+  start = response;
+  end   = start + strlen(start); // 1 character past end of string
+
+  http_parser_init(&parser);
+
+  while (true) {
+    err = resp_hdr.parse_resp(&parser, &start, end, true);
+    if (err != ParseResult::CONT) {
+      break;
+    }
+  }
+
+  if (err == ParseResult::ERROR) {
+    printf("FAILED: (test #%d) parse error parsing response hdr\n", testnum);
+    return (0);
+  }
+
+  /*** (3) Basic copy testing ***/
+  copy1.create(HTTPType::REQUEST);
+  copy1.copy(&req_hdr);
+  comp_str = comp_http_hdr(&req_hdr, &copy1);
+
+  if (!comp_str) {
+    copy2.create(HTTPType::RESPONSE);
+    copy2.copy(&resp_hdr);
+    comp_str = comp_http_hdr(&resp_hdr, &copy2);
+  }
+
+  // The APIs for copying headers uses memcpy() which can be unsafe for
+  // overlapping memory areas. It's unclear to me why these tests were
+  // created in the first place honestly, since nothing else does this.
+
+  /*** (4) Gender bending copying ***/
+  if (!comp_str) {
+    copy1.copy(&resp_hdr);
+    comp_str = comp_http_hdr(&resp_hdr, &copy1);
+  }
+
+  if (!comp_str) {
+    copy2.copy(&req_hdr);
+    comp_str = comp_http_hdr(&req_hdr, &copy2);
+  }
+
+  if (comp_str) {
+    printf("FAILED: (test #%d) copy & compare: %s\n", testnum, comp_str);
+    printf("REQ:\n[%.*s]\n", static_cast<int>(strlen(request)), request);
+    printf("RESP  :\n[%.*s]\n", static_cast<int>(strlen(response)), response);
+    return (0);
+  }
+
+  return (1);
+}
+
+int
+test_http_hdr_null_char(int testnum, const char *request, const char * /*request_tgt*/)
+{
+  ParseResult    err;
+  HTTPHdr        hdr;
+  ts::PostScript hdr_defer([&]() -> void { hdr.destroy(); });
+  HTTPParser     parser;
+  const char    *start;
+  char           cpy_buf[2048];
+  const char    *cpy_buf_ptr = cpy_buf;
+
+  /*** (1) parse the request string into hdr ***/
+
+  hdr.create(HTTPType::REQUEST);
+
+  start = request;
+
+  if (strlen(start) > sizeof(cpy_buf)) {
+    std::printf("FAILED: (test #%d) Internal buffer too small for null char test\n", testnum);
+    return (0);
+  }
+  strcpy(cpy_buf, start);
+
+  // Put a null character somewhere in the header
+  int length          = strlen(start);
+  cpy_buf[length / 2] = '\0';
+  http_parser_init(&parser);
+
+  while (true) {
+    err = hdr.parse_req(&parser, &cpy_buf_ptr, cpy_buf_ptr + length, true);
+    if (err != ParseResult::CONT) {
+      break;
+    }
+  }
+
+  if (err != ParseResult::ERROR) {
+    std::printf("FAILED: (test #%d) no parse error parsing request with null char\n", testnum);
+    return (0);
+  }
+  return 1;
+}
+
+int
+test_http_hdr_ctl_char(int testnum, const char *request, const char * /*request_tgt */)
+{
+  ParseResult    err;
+  HTTPHdr        hdr;
+  ts::PostScript hdr_defer([&]() -> void { hdr.destroy(); });
+  HTTPParser     parser;
+  const char    *start;
+  char           cpy_buf[2048];
+  const char    *cpy_buf_ptr = cpy_buf;
+
+  /*** (1) parse the request string into hdr ***/
+
+  hdr.create(HTTPType::REQUEST);
+
+  start = request;
+
+  if (strlen(start) > sizeof(cpy_buf)) {
+    std::printf("FAILED: (test #%d) Internal buffer too small for ctl char test\n", testnum);
+    return (0);
+  }
+  strcpy(cpy_buf, start);
+
+  // Replace a character in the method
+  cpy_buf[1] = 16;
+
+  http_parser_init(&parser);
+
+  while (true) {
+    err = hdr.parse_req(&parser, &cpy_buf_ptr, cpy_buf_ptr + strlen(start), true);
+    if (err != ParseResult::CONT) {
+      break;
+    }
+  }
+
+  if (err != ParseResult::ERROR) {
+    std::printf("FAILED: (test #%d) no parse error parsing method with ctl char\n", testnum);
+    return (0);
+  }
+  return 1;
+}
+
+struct TestRefCountObj : public RefCountObj {
+  void
+  free() override
+  {
+    std::printf("FAILED: TestRefCountObj object should not be freed\n");
+    std::exit(1);
+  }
+};
+
+int
+test_http_hdr_print_and_copy_aux(int testnum, const char *request, const char *request_tgt, const char *response,
+                                 const char *response_tgt)
+{
+  ParseResult err;
+  HTTPHdr     hdr;
+  HTTPHdr     new_hdr;
+  HTTPParser  parser;
+  const char *start;
+  const char *end;
+
+  ts::PostScript cleanup([&]() -> void {
+    hdr.destroy();
+    new_hdr.destroy();
+  });
+
+  char prt_buf[2048];
+  int  prt_bufsize = sizeof(prt_buf);
+  int  prt_bufindex, prt_dumpoffset, prt_ret;
+
+  char cpy_buf[2048];
+  int  cpy_bufsize = sizeof(cpy_buf);
+  int  cpy_bufindex, cpy_dumpoffset, cpy_ret;
+
+  std::unique_ptr<char[]> marshal_buf(new char[2048]);
+  int                     marshal_bufsize = sizeof(cpy_buf);
+
+  /*** (1) parse the request string into hdr ***/
+
+  hdr.create(HTTPType::REQUEST);
+
+  start = request;
+  end   = start + strlen(start); // 1 character past end of string
+
+  http_parser_init(&parser);
+
+  while (true) {
+    err = hdr.parse_req(&parser, &start, end, true);
+    if (err != ParseResult::CONT) {
+      break;
+    }
+  }
+
+  if (err == ParseResult::ERROR) {
+    std::printf("FAILED: (test #%d) parse error parsing request hdr\n", testnum);
+    return (0);
+  }
+
+  /*** (2) copy the request header ***/
+  HTTPHdr         marshal_hdr;
+  TestRefCountObj ref;
+
+  // Pretend to pin this object with a refcount.
+  ref.refcount_inc();
+
+  int marshal_len = hdr.m_heap->marshal(marshal_buf.get(), marshal_bufsize);
+  marshal_hdr.create(HTTPType::REQUEST);
+  marshal_hdr.unmarshal(marshal_buf.get(), marshal_len, &ref);
+  new_hdr.create(HTTPType::REQUEST);
+  new_hdr.copy(&marshal_hdr);
+
+  /*** (3) print the request header and copy to buffers ***/
+
+  prt_bufindex = prt_dumpoffset = 0;
+  prt_ret                       = hdr.print(prt_buf, prt_bufsize, &prt_bufindex, &prt_dumpoffset);
+
+  cpy_bufindex = cpy_dumpoffset = 0;
+  cpy_ret                       = new_hdr.print(cpy_buf, cpy_bufsize, &cpy_bufindex, &cpy_dumpoffset);
+
+  if ((prt_ret != 1) || (cpy_ret != 1)) {
+    std::printf("FAILED: (test #%d) couldn't print req hdr or copy --- prt_ret=%d, cpy_ret=%d\n", testnum, prt_ret, cpy_ret);
+    return (0);
+  }
+
+  if ((static_cast<size_t>(prt_bufindex) != strlen(request_tgt)) || (static_cast<size_t>(cpy_bufindex) != strlen(request_tgt))) {
+    std::printf("FAILED: (test #%d) print req output size mismatch --- tgt=%d, prt_bufsize=%d, cpy_bufsize=%d\n", testnum,
+                static_cast<int>(strlen(request_tgt)), prt_bufindex, cpy_bufindex);
+
+    std::printf("ORIGINAL:\n[%.*s]\n", static_cast<int>(strlen(request)), request);
+    std::printf("TARGET  :\n[%.*s]\n", static_cast<int>(strlen(request_tgt)), request_tgt);
+    std::printf("PRT_BUFF:\n[%.*s]\n", prt_bufindex, prt_buf);
+    std::printf("CPY_BUFF:\n[%.*s]\n", cpy_bufindex, cpy_buf);
+    return (0);
+  }
+
+  if ((strncasecmp(request_tgt, prt_buf, strlen(request_tgt)) != 0) ||
+      (strncasecmp(request_tgt, cpy_buf, strlen(request_tgt)) != 0)) {
+    std::printf("FAILED: (test #%d) print req output mismatch\n", testnum);
+    std::printf("ORIGINAL:\n[%.*s]\n", static_cast<int>(strlen(request)), request);
+    std::printf("TARGET  :\n[%.*s]\n", static_cast<int>(strlen(request_tgt)), request_tgt);
+    std::printf("PRT_BUFF:\n[%.*s]\n", prt_bufindex, prt_buf);
+    std::printf("CPY_BUFF:\n[%.*s]\n", cpy_bufindex, cpy_buf);
+    return (0);
+  }
+
+  hdr.destroy();
+  new_hdr.destroy();
+
+  /*** (4) parse the response string into hdr ***/
+
+  hdr.create(HTTPType::RESPONSE);
+
+  start = response;
+  end   = start + strlen(start); // 1 character past end of string
+
+  http_parser_init(&parser);
+
+  while (true) {
+    err = hdr.parse_resp(&parser, &start, end, true);
+    if (err != ParseResult::CONT) {
+      break;
+    }
+  }
+
+  if (err == ParseResult::ERROR) {
+    std::printf("FAILED: (test #%d) parse error parsing response hdr\n", testnum);
+    return (0);
+  }
+
+  /*** (2) copy the response header ***/
+
+  new_hdr.create(HTTPType::RESPONSE);
+  new_hdr.copy(&hdr);
+
+  /*** (3) print the response header and copy to buffers ***/
+
+  prt_bufindex = prt_dumpoffset = 0;
+  prt_ret                       = hdr.print(prt_buf, prt_bufsize, &prt_bufindex, &prt_dumpoffset);
+
+  cpy_bufindex = cpy_dumpoffset = 0;
+  cpy_ret                       = new_hdr.print(cpy_buf, cpy_bufsize, &cpy_bufindex, &cpy_dumpoffset);
+
+  if ((prt_ret != 1) || (cpy_ret != 1)) {
+    std::printf("FAILED: (test #%d) couldn't print rsp hdr or copy --- prt_ret=%d, cpy_ret=%d\n", testnum, prt_ret, cpy_ret);
+    return (0);
+  }
+
+  if ((static_cast<size_t>(prt_bufindex) != strlen(response_tgt)) || (static_cast<size_t>(cpy_bufindex) != strlen(response_tgt))) {
+    std::printf("FAILED: (test #%d) print rsp output size mismatch --- tgt=%d, prt_bufsize=%d, cpy_bufsize=%d\n", testnum,
+                static_cast<int>(strlen(response_tgt)), prt_bufindex, cpy_bufindex);
+    std::printf("ORIGINAL:\n[%.*s]\n", static_cast<int>(strlen(response)), response);
+    std::printf("TARGET  :\n[%.*s]\n", static_cast<int>(strlen(response_tgt)), response_tgt);
+    std::printf("PRT_BUFF:\n[%.*s]\n", prt_bufindex, prt_buf);
+    std::printf("CPY_BUFF:\n[%.*s]\n", cpy_bufindex, cpy_buf);
+    return (0);
+  }
+
+  if ((strncasecmp(response_tgt, prt_buf, strlen(response_tgt)) != 0) ||
+      (strncasecmp(response_tgt, cpy_buf, strlen(response_tgt)) != 0)) {
+    std::printf("FAILED: (test #%d) print rsp output mismatch\n", testnum);
+    std::printf("ORIGINAL:\n[%.*s]\n", static_cast<int>(strlen(response)), response);
+    std::printf("TARGET  :\n[%.*s]\n", static_cast<int>(strlen(response_tgt)), response_tgt);
+    std::printf("PRT_BUFF:\n[%.*s]\n", prt_bufindex, prt_buf);
+    std::printf("CPY_BUFF:\n[%.*s]\n", cpy_bufindex, cpy_buf);
+    return (0);
+  }
+
+  if (test_http_hdr_copy_over_aux(testnum, request, response) == 0) {
+    return 0;
+  }
+
+  return (1);
+}
+
+int
+test_arena_aux(Arena &arena, int len)
+{
+  char *str        = arena.str_alloc(len);
+  int   verify_len = static_cast<int>(arena.str_length(str));
+
+  if (len != verify_len) {
+    std::printf("FAILED: requested %d, got %d bytes\n", len, verify_len);
+    return (1); // 1 error (different return convention)
+  } else {
+    return (0); // no errors (different return convention)
+  }
+}
+
+} // end anonymous namespace
+
+TEST_CASE("MIME fields reuse deleted slots", "[proxy][hdrtest][mime]")
+{
+  mime_init();
+  http_init();
+
+  auto add_field = [](HTTPHdr &hdr, std::string_view name) {
+    MIMEField *field = hdr.field_create(name);
+
+    hdr.field_attach(field);
+    return field;
+  };
+
+  SECTION("A fully deleted field block is retained and reused")
+  {
+    HTTPHdr hdr;
+    hdr.create(HTTPType::RESPONSE);
+    ts::PostScript cleanup([&]() -> void { hdr.destroy(); });
+
+    std::array<MIMEField *, MIME_FIELD_BLOCK_SLOTS * 2> fields;
+    for (unsigned index = 0; index < fields.size(); ++index) {
+      fields[index] = add_field(hdr, "X-Field-" + std::to_string(index));
+    }
+
+    MIMEFieldBlockImpl *second_block = hdr.m_mime->m_first_fblock.m_next;
+    REQUIRE(second_block != nullptr);
+    REQUIRE(second_block == hdr.m_mime->m_fblock_list_tail);
+
+    for (unsigned index = MIME_FIELD_BLOCK_SLOTS; index < fields.size(); ++index) {
+      hdr.field_delete(fields[index], false);
+    }
+
+    CHECK(hdr.m_mime->m_first_fblock.m_next == second_block);
+    CHECK(hdr.m_mime->m_fblock_list_tail == second_block);
+
+    MIMEField *reused = hdr.field_create("X-Reused");
+    CHECK(reused == fields.back());
+    CHECK(hdr.m_mime->m_fblock_list_tail == second_block);
+  }
+
+  SECTION("Duplicate fields skip earlier free slots")
+  {
+    HTTPHdr hdr;
+    hdr.create(HTTPType::RESPONSE);
+    ts::PostScript cleanup([&]() -> void { hdr.destroy(); });
+
+    MIMEField *first  = add_field(hdr, "X-Duplicate");
+    MIMEField *filler = add_field(hdr, "X-Filler");
+    MIMEField *last   = add_field(hdr, "X-Duplicate");
+    for (unsigned index = 3; index < MIME_FIELD_BLOCK_SLOTS; ++index) {
+      add_field(hdr, "X-Filler-" + std::to_string(index));
+    }
+
+    REQUIRE(first->m_next_dup == last);
+    hdr.field_delete(first, false);
+    REQUIRE(hdr.field_find("X-Duplicate") == last);
+
+    MIMEField *reused = add_field(hdr, "X-Duplicate");
+    CHECK(reused != first);
+    CHECK(hdr.field_find("X-Duplicate") == last);
+    CHECK(last->m_next_dup == reused);
+    CHECK(reused->m_next_dup == nullptr);
+    CHECK(mime_hdr_field_slotnum(hdr.m_mime, last) < mime_hdr_field_slotnum(hdr.m_mime, reused));
+    CHECK(filler->is_live());
+  }
+
+  SECTION("A reused earlier slot preserves same-name field order")
+  {
+    HTTPHdr hdr;
+    hdr.create(HTTPType::RESPONSE);
+    ts::PostScript cleanup([&]() -> void { hdr.destroy(); });
+
+    MIMEField *victim = add_field(hdr, "X-Victim");
+    for (unsigned index = 1; index < MIME_FIELD_BLOCK_SLOTS - 1; ++index) {
+      add_field(hdr, "X-Filler-" + std::to_string(index));
+    }
+    MIMEField *first = add_field(hdr, "Set-Cookie");
+    REQUIRE(hdr.m_mime->m_first_fblock.m_freetop == MIME_FIELD_BLOCK_SLOTS);
+
+    hdr.field_delete(victim, false);
+    MIMEField *second = add_field(hdr, "Set-Cookie");
+
+    CHECK(hdr.field_find("Set-Cookie") == first);
+    CHECK(mime_hdr_field_slotnum(hdr.m_mime, first) < mime_hdr_field_slotnum(hdr.m_mime, second));
+  }
+
+  SECTION("Unused tail slots preserve field insertion order")
+  {
+    HTTPHdr hdr;
+    hdr.create(HTTPType::RESPONSE);
+    ts::PostScript cleanup([&]() -> void { hdr.destroy(); });
+
+    MIMEField *deleted = add_field(hdr, "X-Deleted");
+    MIMEField *kept    = add_field(hdr, "X-Kept");
+
+    hdr.field_delete(deleted, false);
+    MIMEField *appended = add_field(hdr, "X-Appended");
+
+    CHECK(appended != deleted);
+    CHECK(mime_hdr_field_slotnum(hdr.m_mime, kept) < mime_hdr_field_slotnum(hdr.m_mime, appended));
+  }
+
+  SECTION("Repeated field churn stays at the high-water block count")
+  {
+    HTTPHdr hdr;
+    hdr.create(HTTPType::RESPONSE);
+    ts::PostScript cleanup([&]() -> void { hdr.destroy(); });
+
+    MIMEField *field = nullptr;
+    for (unsigned index = 0; index < MIME_FIELD_BLOCK_SLOTS * 2; ++index) {
+      field = add_field(hdr, "X-Field-" + std::to_string(index));
+    }
+
+    MIMEField          *slot         = field;
+    MIMEFieldBlockImpl *second_block = hdr.m_mime->m_first_fblock.m_next;
+    bool                reused_slot  = true;
+    constexpr unsigned  churn_cycles = 1024;
+
+    for (unsigned index = 0; index < churn_cycles; ++index) {
+      hdr.field_delete(field, false);
+      field        = add_field(hdr, "X-Churn");
+      reused_slot &= field == slot;
+    }
+
+    CHECK(reused_slot);
+    CHECK(hdr.m_mime->m_first_fblock.m_next == second_block);
+    CHECK(hdr.m_mime->m_fblock_list_tail == second_block);
+    CHECK(second_block->m_freetop == MIME_FIELD_BLOCK_SLOTS);
+  }
+
+  SECTION("Copied headers rebuild the free list")
+  {
+    HTTPHdr source;
+    HTTPHdr copy;
+    source.create(HTTPType::RESPONSE);
+    copy.create(HTTPType::RESPONSE);
+    ts::PostScript cleanup([&]() -> void {
+      source.destroy();
+      copy.destroy();
+    });
+
+    std::array<MIMEField *, MIME_FIELD_BLOCK_SLOTS * 2> fields;
+    for (unsigned index = 0; index < fields.size(); ++index) {
+      fields[index] = add_field(source, "X-Field-" + std::to_string(index));
+    }
+    source.field_delete(fields[4], false);
+    source.field_delete(fields[MIME_FIELD_BLOCK_SLOTS + 4], false);
+
+    copy.copy(&source);
+    MIMEFieldBlockImpl *tail          = copy.m_mime->m_fblock_list_tail;
+    MIMEField          *expected_slot = mime_hdr_field_get_slotnum(copy.m_mime, MIME_FIELD_BLOCK_SLOTS + 4);
+
+    CHECK(copy.field_create("X-Reused") == expected_slot);
+    CHECK(copy.m_mime->m_fblock_list_tail == tail);
+  }
+
+  SECTION("Headers copied from an unmarshaled heap rebuild the free list")
+  {
+    HTTPHdr source;
+    source.create(HTTPType::RESPONSE);
+    ts::PostScript cleanup([&]() -> void { source.destroy(); });
+
+    std::array<MIMEField *, MIME_FIELD_BLOCK_SLOTS * 2> fields;
+    for (unsigned index = 0; index < fields.size(); ++index) {
+      fields[index] = add_field(source, "X-Field-" + std::to_string(index));
+    }
+    source.field_delete(fields[MIME_FIELD_BLOCK_SLOTS + 4], false);
+
+    std::vector<char> marshal_buffer(source.m_heap->marshal_length());
+    int               marshal_length = source.m_heap->marshal(marshal_buffer.data(), marshal_buffer.size());
+    REQUIRE(marshal_length > 0);
+
+    TestRefCountObj ref;
+    ref.refcount_inc();
+
+    HTTPHdr unmarshaled;
+    REQUIRE(unmarshaled.unmarshal(marshal_buffer.data(), marshal_length, &ref) > 0);
+
+    HTTPHdr writable;
+    writable.create(HTTPType::RESPONSE);
+    ts::PostScript writable_cleanup([&]() -> void { writable.destroy(); });
+    writable.copy(&unmarshaled);
+
+    MIMEFieldBlockImpl *tail          = writable.m_mime->m_fblock_list_tail;
+    MIMEField          *expected_slot = mime_hdr_field_get_slotnum(writable.m_mime, MIME_FIELD_BLOCK_SLOTS + 4);
+
+    CHECK(writable.field_create("X-Reused") == expected_slot);
+    CHECK(writable.m_mime->m_fblock_list_tail == tail);
+  }
+}
+
+TEST_CASE("HdrTest", "[proxy][hdrtest]")
+{
+  hdrtoken_init();
+  url_init();
+  mime_init();
+  http_init();
+
+  SECTION("Field Char Check")
+  {
+    static struct {
+      std::string_view line;
+      ParseResult      expected;
+    } test_cases[] = {
+      ////
+      // Field Name
+      {"Content-Length: 10\r\n",     ParseResult::CONT },
+      {"Content-Length\x0b: 10\r\n", ParseResult::ERROR},
+      {"Content-Length\xff: 10\r\n", ParseResult::ERROR},
+      // Delimiters in field name
+      {"delimiter_\": 10\r\n",       ParseResult::ERROR},
+      {"delimiter_(: 0\r\n",         ParseResult::ERROR},
+      {"delimiter_): 0\r\n",         ParseResult::ERROR},
+      {"delimiter_,: 0\r\n",         ParseResult::ERROR},
+      {"delimiter_/: 0\r\n",         ParseResult::ERROR},
+      {"delimiter_:: 0\r\n",         ParseResult::CONT }, // Parsed as field name "delimiter_" and field value ": 0", which is valid
+      {"delimiter_;: 0\r\n",         ParseResult::ERROR},
+      {"delimiter_<: 0\r\n",         ParseResult::ERROR},
+      {"delimiter_=: 0\r\n",         ParseResult::ERROR},
+      {"delimiter_>: 0\r\n",         ParseResult::ERROR},
+      {"delimiter_?: 0\r\n",         ParseResult::ERROR},
+      {"delimiter_@: 0\r\n",         ParseResult::CONT }, // Not allowed by the spec, but we use it as internal header indicator
+      {"delimiter_[: 0\r\n",         ParseResult::ERROR},
+      {"delimiter_\\: 0\r\n",        ParseResult::ERROR},
+      {"delimiter_]: 0\r\n",         ParseResult::ERROR},
+      {"delimiter_{: 0\r\n",         ParseResult::ERROR},
+      {"delimiter_}: 0\r\n",         ParseResult::ERROR},
+      ////
+      // Field Value
+      // SP
+      {"Content-Length: 10\r\n",     ParseResult::CONT },
+      // HTAB
+      {"Foo: ab\td/cd\r\n",          ParseResult::CONT },
+      // VCHAR
+      {"Foo: ab\x21/cd\r\n",         ParseResult::CONT },
+      {"Foo: ab\x7e/cd\r\n",         ParseResult::CONT },
+      // DEL
+      {"Foo: ab\x7f/cd\r\n",         ParseResult::ERROR},
+      // obs-text
+      {"Foo: ab\x80/cd\r\n",         ParseResult::CONT },
+      {"Foo: ab\xff/cd\r\n",         ParseResult::CONT },
+      // control char
+      {"Content-Length: 10\x0b\r\n", ParseResult::ERROR},
+      {"Content-Length:\x0b 10\r\n", ParseResult::ERROR},
+      {"Foo: ab\x1d/cd\r\n",         ParseResult::ERROR},
+    };
+
+    MIMEHdr        hdr;
+    ts::PostScript hdr_defer([&]() -> void { hdr.destroy(); });
+    MIMEParser     parser;
+    mime_parser_init(&parser);
+
+    for (const auto &t : test_cases) {
+      CAPTURE(t.line, t.expected);
+      mime_parser_clear(&parser);
+
+      const char *start = t.line.data();
+      const char *end   = start + t.line.size();
+
+      auto r = hdr.parse(&parser, &start, end, false, false, false);
+      if (r != t.expected) {
+        std::printf("Expected %s is %s, but not", t.line.data(), t.expected == ParseResult::ERROR ? "invalid" : "valid");
+        CHECK(false);
+      }
+    }
+  }
+
+  SECTION("Test parse date")
+  {
+    static struct {
+      const char *fast;
+      const char *slow;
+    } dates[] = {
+      {"Sun, 06 Nov 1994 08:49:37 GMT", "Sunday, 06-Nov-1994 08:49:37 GMT"   },
+      {"Mon, 07 Nov 1994 08:49:37 GMT", "Monday, 07-Nov-1994 08:49:37 GMT"   },
+      {"Tue, 08 Nov 1994 08:49:37 GMT", "Tuesday, 08-Nov-1994 08:49:37 GMT"  },
+      {"Wed, 09 Nov 1994 08:49:37 GMT", "Wednesday, 09-Nov-1994 08:49:37 GMT"},
+      {"Thu, 10 Nov 1994 08:49:37 GMT", "Thursday, 10-Nov-1994 08:49:37 GMT" },
+      {"Fri, 11 Nov 1994 08:49:37 GMT", "Friday, 11-Nov-1994 08:49:37 GMT"   },
+      {"Sat, 11 Nov 1994 08:49:37 GMT", "Saturday, 11-Nov-1994 08:49:37 GMT" },
+      {"Sun, 03 Jan 1999 08:49:37 GMT", "Sunday, 03-Jan-1999 08:49:37 GMT"   },
+      {"Sun, 07 Feb 1999 08:49:37 GMT", "Sunday, 07-Feb-1999 08:49:37 GMT"   },
+      {"Sun, 07 Mar 1999 08:49:37 GMT", "Sunday, 07-Mar-1999 08:49:37 GMT"   },
+      {"Sun, 04 Apr 1999 08:49:37 GMT", "Sunday, 04-Apr-1999 08:49:37 GMT"   },
+      {"Sun, 02 May 1999 08:49:37 GMT", "Sunday, 02-May-1999 08:49:37 GMT"   },
+      {"Sun, 06 Jun 1999 08:49:37 GMT", "Sunday, 06-Jun-1999 08:49:37 GMT"   },
+      {"Sun, 04 Jul 1999 08:49:37 GMT", "Sunday, 04-Jul-1999 08:49:37 GMT"   },
+      {"Sun, 01 Aug 1999 08:49:37 GMT", "Sunday, 01-Aug-1999 08:49:37 GMT"   },
+      {"Sun, 05 Sep 1999 08:49:37 GMT", "Sunday, 05-Sep-1999 08:49:37 GMT"   },
+      {"Sun, 03 Oct 1999 08:49:37 GMT", "Sunday, 03-Oct-1999 08:49:37 GMT"   },
+      {"Sun, 07 Nov 1999 08:49:37 GMT", "Sunday, 07-Nov-1999 08:49:37 GMT"   },
+      {"Sun, 05 Dec 1999 08:49:37 GMT", "Sunday, 05-Dec-1999 08:49:37 GMT"   },
+      {nullptr,                         nullptr                              },
+    };
+
+    int    i;
+    time_t fast_t, slow_t;
+
+    for (i = 0; dates[i].fast; i++) {
+      fast_t = mime_parse_date(dates[i].fast, dates[i].fast + static_cast<int>(strlen(dates[i].fast)));
+      slow_t = mime_parse_date(dates[i].slow, dates[i].slow + static_cast<int>(strlen(dates[i].slow)));
+      // compare with strptime here!
+      if (fast_t != slow_t) {
+        std::printf("FAILED: date %lu (%s) != %lu (%s)\n", static_cast<unsigned long>(fast_t), dates[i].fast,
+                    static_cast<unsigned long>(slow_t), dates[i].slow);
+        CHECK(false);
+      }
+    }
+  }
+
+  SECTION("Test format date")
+  {
+    static const char *dates[] = {
+      "Sun, 06 Nov 1994 08:49:37 GMT",
+      "Sun, 03 Jan 1999 08:49:37 GMT",
+      "Sun, 05 Dec 1999 08:49:37 GMT",
+      "Tue, 25 Apr 2000 20:29:53 GMT",
+      nullptr,
+    };
+
+    // (1) Test a few hand-created dates
+
+    int                i;
+    time_t             t, t2, t3;
+    char               buffer[128], buffer2[128];
+    static const char *envstr = "TZ=GMT0";
+
+    // shift into GMT timezone for cftime conversions
+    putenv(const_cast<char *>(envstr));
+    tzset();
+
+    for (i = 0; dates[i]; i++) {
+      t = mime_parse_date(dates[i], dates[i] + static_cast<int>(strlen(dates[i])));
+
+      cftime_replacement(buffer, sizeof(buffer), "%a, %d %b %Y %T %Z", &t);
+      if (memcmp(dates[i], buffer, 29) != 0) {
+        std::printf("FAILED: original date doesn't match cftime date\n");
+        std::printf("  input date:  %s\n", dates[i]);
+        std::printf("  cftime date: %s\n", buffer);
+        CHECK(false);
+      }
+
+      mime_format_date(buffer, t);
+      if (memcmp(dates[i], buffer, 29) != 0) {
+        std::printf("FAILED: original date doesn't match mime_format_date date\n");
+        std::printf("  input date:  %s\n", dates[i]);
+        std::printf("  cftime date: %s\n", buffer);
+        CHECK(false);
+      }
+    }
+
+    // (2) test a few times per day from 1/1/1970 to past 2010
+
+    for (t = 0; t < 40 * 366 * (24 * 60 * 60); t += static_cast<time_t>(ts::Random::drandom() * (24 * 60 * 60))) {
+      cftime_replacement(buffer, sizeof(buffer), "%a, %d %b %Y %T %Z", &t);
+      t2 = mime_parse_date(buffer, buffer + static_cast<int>(strlen(buffer)));
+      if (t2 != t) {
+        std::printf("FAILED: parsed time_t doesn't match original time_t\n");
+        std::printf("  input time_t:  %" PRIdMAX " (%s)\n", t, buffer);
+        std::printf("  parsed time_t: %" PRIdMAX "\n", t2);
+        CHECK(false);
+      }
+      mime_format_date(buffer2, t);
+      if (memcmp(buffer, buffer2, 29) != 0) {
+        std::printf("FAILED: formatted date doesn't match original date\n");
+        std::printf("  original date:  %s\n", buffer);
+        std::printf("  formatted date: %s\n", buffer2);
+        CHECK(false);
+      }
+      t3 = mime_parse_date(buffer2, buffer2 + static_cast<int>(strlen(buffer2)));
+      if (t != t3) {
+        std::printf("FAILED: parsed time_t doesn't match original time_t\n");
+        std::printf("  input time_t:  %" PRIdMAX " (%s)\n", t, buffer2);
+        std::printf("  parsed time_t: %" PRIdMAX "\n", t3);
+        CHECK(false);
+      }
+    }
+  }
+
+  SECTION("Test url")
+  {
+    static const char *strs[] = {
+      "http://some.place/path;params?query#fragment",
+
+      // Start with an easy one...
+      "http://trafficserver.apache.org/index.html",
+
+      "cheese://bogosity",
+
+      "some.place",
+      "some.place/",
+      "http://some.place",
+      "http://some.place/",
+      "http://some.place/path",
+      "http://some.place/path;params",
+      "http://some.place/path;params?query",
+      "http://some.place/path;params?query#fragment",
+      "http://some.place/path?query#fragment",
+      "http://some.place/path#fragment",
+
+      "some.place:80",
+      "some.place:80/",
+      "http://some.place:80",
+      "http://some.place:80/",
+
+      "foo@some.place:80",
+      "foo@some.place:80/",
+      "http://foo@some.place:80",
+      "http://foo@some.place:80/",
+
+      "foo:bar@some.place:80",
+      "foo:bar@some.place:80/",
+      "http://foo:bar@some.place:80",
+      "http://foo:bar@some.place:80/",
+
+      // Some address stuff
+      "http://172.16.28.101",
+      "http://172.16.28.101:8080",
+      "http://[::]",
+      "http://[::1]",
+      "http://[fc01:172:16:28::101]",
+      "http://[fc01:172:16:28::101]:80",
+      "http://[fc01:172:16:28:BAAD:BEEF:DEAD:101]",
+      "http://[fc01:172:16:28:BAAD:BEEF:DEAD:101]:8080",
+      "http://172.16.28.101/some/path",
+      "http://172.16.28.101:8080/some/path",
+      "http://[::1]/some/path",
+      "http://[fc01:172:16:28::101]/some/path",
+      "http://[fc01:172:16:28::101]:80/some/path",
+      "http://[fc01:172:16:28:BAAD:BEEF:DEAD:101]/some/path",
+      "http://[fc01:172:16:28:BAAD:BEEF:DEAD:101]:8080/some/path",
+      "http://172.16.28.101/",
+      "http://[fc01:172:16:28:BAAD:BEEF:DEAD:101]:8080/",
+
+      // "foo:@some.place", TODO - foo:@some.place is change to foo@some.place in the test
+      "foo:bar@some.place",
+      "foo:bar@some.place/",
+      "http://foo:bar@some.place",
+      "http://foo:bar@some.place/",
+      "http://foo:bar@[::1]:8080/",
+      "http://foo@[::1]",
+
+      "mms://sm02.tsqa.example.com/0102rally.asf",
+      "pnm://foo:bar@some.place:80/path;params?query#fragment",
+      "rtsp://foo:bar@some.place:80/path;params?query#fragment",
+      "rtspu://foo:bar@some.place:80/path;params?query#fragment",
+      "/finance/external/cbsm/*http://cbs.marketwatch.com/archive/19990713/news/current/net.htx?source=blq/yhoo&dist=yhoo",
+      "http://a.b.com/xx.jpg?newpath=http://bob.dave.com",
+
+      "ht-tp://a.b.com",
+      "ht+tp://a.b.com",
+      "ht.tp://a.b.com",
+
+      "h1ttp://a.b.com",
+      "http1://a.b.com",
+    };
+
+    static const char *bad[] = {
+      "http://[1:2:3:4:5:6:7:8:9]",
+      "http://1:2:3:4:5:6:7:8:A:B",
+      "http://bob.com[::1]",
+      "http://[::1].com",
+
+      "http://foo:bar:baz@bob.com/",
+      "http://foo:bar:baz@[::1]:8080/",
+
+      "http://]",
+      "http://:",
+
+      "http:/",
+      "http:/foo.bar.com/",
+      "~http://invalid.char.in.scheme/foo",
+      "http~://invalid.char.in.scheme/foo",
+      "ht~tp://invalid.char.in.scheme/foo",
+      "1http://first.char.not.alpha",
+      "some.domain.com/http://invalid.domain/foo",
+      ":",
+      "://",
+
+      // maybe this should be a valid URL
+      "a.b.com/xx.jpg?newpath=http://bob.dave.com",
+    };
+
+    ParseResult err;
+    int         failed = 0;
+    URL         url;
+    const char *start;
+    const char *end;
+    int         old_length, new_length;
+
+    for (unsigned i = 0; i < countof(strs); i++) {
+      old_length = static_cast<int>(strlen(strs[i]));
+      start      = strs[i];
+      end        = start + old_length;
+
+      url.create(nullptr);
+      err = url.parse(&start, end);
+      if (static_cast<int>(err) < 0) {
+        std::printf("Failed to parse url '%s'\n", start);
+        failed = 1;
+        break;
+      }
+
+      char print_buf[1024];
+      new_length = 0;
+      int offset = 0;
+      url.print(print_buf, 1024, &new_length, &offset);
+      print_buf[new_length] = '\0';
+
+      const char *fail_text = nullptr;
+
+      if (old_length == new_length) {
+        if (memcmp(print_buf, strs[i], new_length) != 0) {
+          fail_text = "URLS DIFFER";
+        }
+      } else if (old_length == new_length - 1) {
+        // Check to see if the difference is the trailing
+        //   slash we add
+        if (memcmp(print_buf, strs[i], old_length) != 0 || print_buf[new_length - 1] != '/' || (strs[i])[old_length - 1] == '/') {
+          fail_text = "TRAILING SLASH";
+        }
+      } else {
+        fail_text = "LENGTHS DIFFER";
+      }
+
+      if (fail_text) {
+        failed = 1;
+        std::printf("%16s: OLD: (%4d) %s\n", fail_text, old_length, strs[i]);
+        std::printf("%16s: NEW: (%4d) %s\n", "", new_length, print_buf);
+        obj_describe(url.m_url_impl, true);
+      } else {
+        std::printf("%16s: '%s'\n", "PARSE SUCCESS", strs[i]);
+      }
+
+      url.destroy();
+    }
+
+    for (unsigned i = 0; i < countof(bad); ++i) {
+      const char *x = bad[i];
+
+      url.create(nullptr);
+      err = url.parse(x, strlen(x));
+      url.destroy();
+      if (err == ParseResult::DONE) {
+        failed = 1;
+        std::printf("Successfully parsed invalid url '%s'", x);
+        break;
+      } else {
+        std::printf("   bad URL - PARSE FAILED: '%s'\n", bad[i]);
+      }
+    }
+
+    CHECK(failed == 0);
+  }
+
+  SECTION("Test mime")
+  {
+    // This can not be a static string (any more) since we unfold the headers
+    // in place.
+    char mime[] = {
+      //        "Date: Tuesday, 08-Dec-98 20:32:17 GMT\r\n"
+      "Date: 6 Nov 1994 08:49:37 GMT\r\n"
+      "Max-Forwards: 65535\r\n"
+      "Cache-Control: private\r\n"
+      "accept: foo\r\n"
+      "accept: bar\n"
+      "aCCept: \n"
+      "ACCEPT\r\n"
+      "foo: bar\r\n"
+      "foo: argh\r\n"
+      "foo: three, four\r\n"
+      "accept: \"fazzle, dazzle\"\r\n"
+      "accept: 1, 2, 3, 4, 5, 6, 7, 8\r\n"
+      "continuation: part1\r\n"
+      " part2\r\n"
+      "scooby: doo\r\n"
+      " scooby: doo\r\n"
+      "bar: foo\r\n"
+      "\r\n",
+    };
+
+    MIMEHdr     hdr;
+    MIMEParser  parser;
+    const char *start;
+    const char *end;
+
+    std::printf("   <<< MUST BE HAND-VERIFIED FOR FULL-BENEFIT>>>\n\n");
+
+    start = mime;
+    end   = start + strlen(start);
+
+    mime_parser_init(&parser);
+
+    bool must_copy_strs = false;
+
+    hdr.create(nullptr);
+    auto err = hdr.parse(&parser, &start, end, must_copy_strs, false, false);
+
+    REQUIRE(static_cast<int>(err) >= 0);
+
+    // Test the (new) continuation line folding to be correct. This should replace the
+    // \r\n with two spaces (so a total of three between "part1" and "part2").
+    auto continuation{hdr.value_get("continuation"sv)};
+
+    if ((13 != continuation.length())) {
+      std::printf("FAILED: continue header folded line was too short\n");
+      REQUIRE(false);
+    }
+
+    if (!continuation.substr(5).starts_with("   "sv)) {
+      std::printf("FAILED: continue header unfolding did not produce correct WS's\n");
+      REQUIRE(false);
+    }
+
+    if (continuation != "part1   part2"sv) {
+      std::printf("FAILED: continue header unfolding was not correct\n");
+      REQUIRE(false);
+    }
+
+    hdr.field_delete("not_there"sv);
+    hdr.field_delete("accept"sv);
+    hdr.field_delete("scooby"sv);
+    hdr.field_delete("scooby"sv);
+    hdr.field_delete("bar"sv);
+    hdr.field_delete("continuation"sv);
+
+    int count = hdr.fields_count();
+    std::printf("hdr.fields_count() = %d\n", count);
+
+    int i_max_forwards = hdr.value_get_int("Max-Forwards"sv);
+    int u_max_forwards = hdr.value_get_uint("Max-Forwards"sv);
+    std::printf("i_max_forwards = %d   u_max_forwards = %d\n", i_max_forwards, u_max_forwards);
+
+    hdr.set_age(9999);
+
+    auto length{hdr.length_get()};
+    std::printf("hdr.length_get() = %d\n", length);
+
+    time_t t0, t1, t2;
+
+    t0 = hdr.get_date();
+    if (t0 == 0) {
+      std::printf("FAILED: Initial date is zero but shouldn't be\n");
+      REQUIRE(false);
+    }
+
+    t1 = time(nullptr);
+    hdr.set_date(t1);
+    t2 = hdr.get_date();
+    if (t1 != t2) {
+      std::printf("FAILED: set_date(%" PRId64 ") ... get_date = %" PRId64 "\n\n", static_cast<int64_t>(t1),
+                  static_cast<int64_t>(t2));
+      REQUIRE(false);
+    }
+
+    hdr.value_append("Cache-Control"sv, "no-cache"sv, true);
+
+    MIMEField *cc_field;
+    StrList    slist;
+
+    cc_field = hdr.field_find("Cache-Control"sv);
+
+    if (cc_field == nullptr) {
+      std::printf("FAILED: missing Cache-Control header\n\n");
+      REQUIRE(false);
+      return; // REQUIRE throws, but make the early exit explicit so the dereferences below are
+              // unreachable to a reader and to the compiler
+    }
+
+    // TODO: Do we need to check the "count" returned?
+    cc_field->value_get_comma_list(&slist); // FIX: correct usage?
+
+    if (cc_field->value_get_index("Private"sv) < 0) {
+      std::printf("Failed: value_get_index of Cache-Control did not find private");
+      REQUIRE(false);
+    }
+    if (cc_field->value_get_index("Bogus"sv) >= 0) {
+      std::printf("Failed: value_get_index of Cache-Control incorrectly found bogus");
+      REQUIRE(false);
+    }
+    if (hdr.value_get_index("foo"sv, "three"sv) < 0) {
+      std::printf("Failed: value_get_index of foo did not find three");
+      REQUIRE(false);
+    }
+    if (hdr.value_get_index("foo"sv, "bar"sv) < 0) {
+      std::printf("Failed: value_get_index of foo did not find bar");
+      REQUIRE(false);
+    }
+    if (hdr.value_get_index("foo"sv, "Bogus"sv) >= 0) {
+      std::printf("Failed: value_get_index of foo incorrectly found bogus");
+      REQUIRE(false);
+    }
+
+    mime_parser_clear(&parser);
+
+    hdr.print(nullptr, 0, nullptr, nullptr);
+    std::printf("\n");
+
+    obj_describe((HdrHeapObjImpl *)(hdr.m_mime), true);
+
+    const char *field_name = "Test_heap_reuse";
+
+    MIMEField *f = hdr.field_create(field_name);
+    REQUIRE(f->m_ptr_value == nullptr);
+
+    hdr.field_attach(f);
+    REQUIRE(f->m_ptr_value == nullptr);
+
+    const char *test_value = "mytest";
+
+    std::printf("Testing Heap Reuse..\n");
+    hdr.field_value_set(f, "orig_value");
+    const char *m_ptr_value_orig = f->m_ptr_value;
+    hdr.field_value_set(f, test_value, true);
+    REQUIRE(f->m_ptr_value != test_value);       // should be copied
+    REQUIRE(f->m_ptr_value == m_ptr_value_orig); // heap doesn't change
+    REQUIRE(f->m_len_value == strlen(test_value));
+    REQUIRE(memcmp(f->m_ptr_value, test_value, f->m_len_value) == 0);
+
+    m_ptr_value_orig           = f->m_ptr_value;
+    const char *new_test_value = "myTest";
+    hdr.field_value_set(f, new_test_value, false);
+    REQUIRE(f->m_ptr_value != new_test_value);   // should be copied
+    REQUIRE(f->m_ptr_value != m_ptr_value_orig); // new heap
+    REQUIRE(f->m_len_value == strlen(new_test_value));
+    REQUIRE(memcmp(f->m_ptr_value, new_test_value, f->m_len_value) == 0);
+
+    hdr.fields_clear();
+
+    hdr.destroy();
+  }
+
+  SECTION("Test http hdr print and copy")
+  {
+    static struct {
+      const char *req;
+      const char *req_tgt;
+      const char *rsp;
+      const char *rsp_tgt;
+    } tests[] = {
+      {"GET http://foo.com/bar.txt HTTP/1.0\r\n"
+       "Accept-Language: fjdfjdslkf dsjkfdj flkdsfjlk sjfdlk ajfdlksa\r\n"
+       "\r\n",                           "GET http://foo.com/bar.txt HTTP/1.0\r\n"
+       "Accept-Language: fjdfjdslkf dsjkfdj flkdsfjlk sjfdlk ajfdlksa\r\n"
+       "\r\n",                           "HTTP/1.0 200 OK\r\n"
+       "\r\n",                                                                          "HTTP/1.0 200 OK\r\n"
+       "\r\n"                                                                         },
+      {"GET http://foo.com/bar.txt HTTP/1.0\r\n"
+       "Accept-Language: fjdfjdslkf dsjkfdj flkdsfjlk sjfdlk ajfdlksa fjfj dslkfjdslk fjsdafkl dsajfkldsa jfkldsafj "
+       "klsafjs lkafjdsalk fsdjakfl sdjaflkdsaj flksdjflsd ;ffd salfdjs lf;sdaf ;dsaf jdsal;fdjsaflkjsda \r\n"
+       "\r\n",                           "GET http://foo.com/bar.txt HTTP/1.0\r\n"
+       "Accept-Language: fjdfjdslkf dsjkfdj flkdsfjlk sjfdlk ajfdlksa fjfj dslkfjdslk fjsdafkl dsajfkldsa jfkldsafj "
+       "klsafjs lkafjdsalk fsdjakfl sdjaflkdsaj flksdjflsd ;ffd salfdjs lf;sdaf ;dsaf jdsal;fdjsaflkjsda \r\n"
+       "\r\n",                           "HTTP/1.0 200 OK\r\n"
+       "\r\n",                                                                          "HTTP/1.0 200 OK\r\n"
+       "\r\n"                                                                         },
+      {"GET http://foo.com/bar.txt HTTP/1.0\r\n"
+       "Accept-Language: fjdfjdslkf dsjkfdj flkdsfjlk sjfdlk ajfdlksa fjfj dslkfjdslk fjsdafkl dsajfkldsa jfkldsafj "
+       "klsafjs lkafjdsalk fsdjakfl sdjaflkdsaj flksdjflsd ;ffd salfdjs lf;sdaf ;dsaf jdsal;fdjsaflkjsda kfl; fsdajfl; "
+       "sdjafl;dsajlsjfl;sdafjsdal;fjds al;fdjslaf ;slajdk;f\r\n"
+       "\r\n",                           "GET http://foo.com/bar.txt HTTP/1.0\r\n"
+       "Accept-Language: fjdfjdslkf dsjkfdj flkdsfjlk sjfdlk ajfdlksa fjfj dslkfjdslk fjsdafkl dsajfkldsa jfkldsafj "
+       "klsafjs lkafjdsalk fsdjakfl sdjaflkdsaj flksdjflsd ;ffd salfdjs lf;sdaf ;dsaf jdsal;fdjsaflkjsda kfl; fsdajfl; "
+       "sdjafl;dsajlsjfl;sdafjsdal;fjds al;fdjslaf ;slajdk;f\r\n"
+       "\r\n",                           "HTTP/1.0 200 OK\r\n"
+       "\r\n",                                                                          "HTTP/1.0 200 OK\r\n"
+       "\r\n"                                                                         },
+      {"GET http://people.netscape.com/jwz/hacks-1.gif HTTP/1.0\r\n"
+       "If-Modified-Since: Wednesday, 26-Feb-97 06:58:17 GMT; length=842\r\n"
+       "Referer: chocolate fribble\r\n", // missing final CRLF
+       "GET http://people.netscape.com/jwz/hacks-1.gif HTTP/1.0\r\n"
+       "If-Modified-Since: Wednesday, 26-Feb-97 06:58:17 GMT; length=842\r\n"
+       "Referer: chocolate fribble\r\n"
+       "\r\n", "HTTP/1.0 200 OK\r\n"
+       "MIME-Version: 1.0\r\n"
+       "Server: WebSTAR/2.1 ID/30013\r\n"
+       "Content-Type: text/html\r\n"
+       "Content-Length: 939\r\n"
+       "Last-Modified: Thursday, 01-Jan-04 05:00:00 GMT\r\n", // missing final CRLF
+       "HTTP/1.0 200 OK\r\n"
+       "MIME-Version: 1.0\r\n"
+       "Server: WebSTAR/2.1 ID/30013\r\n"
+       "Content-Type: text/html\r\n"
+       "Content-Length: 939\r\n"
+       "Last-Modified: Thursday, 01-Jan-04 05:00:00 GMT\r\n"
+       "\r\n"},
+      {"GET http://people.netscape.com/jwz/hacks-1.gif HTTP/1.0\r\n"
+       "If-Modified-Since: Wednesday, 26-Feb-97 06:58:17 GMT; length=842\r\n"
+       "Referer: \r\n",                  // missing final CRLF
+       "GET http://people.netscape.com/jwz/hacks-1.gif HTTP/1.0\r\n"
+       "If-Modified-Since: Wednesday, 26-Feb-97 06:58:17 GMT; length=842\r\n"
+       "Referer: \r\n"
+       "\r\n",                  "HTTP/1.0 200 OK\r\n"
+       "MIME-Version: 1.0\r\n"
+       "Server: WebSTAR/2.1 ID/30013\r\n"
+       "Content-Type: text/html\r\n"
+       "Content-Length: 939\r\n"
+       "Last-Modified: Thursday, 01-Jan-04 05:00:00 GMT\r\n"
+       "\r\n",                                                                 "HTTP/1.0 200 OK\r\n"
+       "MIME-Version: 1.0\r\n"
+       "Server: WebSTAR/2.1 ID/30013\r\n"
+       "Content-Type: text/html\r\n"
+       "Content-Length: 939\r\n"
+       "Last-Modified: Thursday, 01-Jan-04 05:00:00 GMT\r\n"
+       "\r\n"                                                                },
+      {"GET http://www.news.com:80/ HTTP/1.0\r\n"
+       "Proxy-Connection: Keep-Alive\r\n"
+       "User-Agent: Mozilla/4.04 [en] (X11; I; Linux 2.0.33 i586)\r\n"
+       "Pragma: no-cache\r\n"
+       "Host: www.news.com\r\n"
+       "Accept: image/gif, image/x-xbitmap, image/jpeg, image/pjpeg, image/png, */*\r\n"
+       "Accept-Language: en\r\n"
+       "Accept-Charset: iso-8859-1, *, utf-8\r\n"
+       "Client-ip: D1012148\r\n"
+       "Foo: abcdefghijklmnopqrtu\r\n"
+       "\r\n",                           "GET http://www.news.com:80/ HTTP/1.0\r\n"
+       "Proxy-Connection: Keep-Alive\r\n"
+       "User-Agent: Mozilla/4.04 [en] (X11; I; Linux 2.0.33 i586)\r\n"
+       "Pragma: no-cache\r\n"
+       "Host: www.news.com\r\n"
+       "Accept: image/gif, image/x-xbitmap, image/jpeg, image/pjpeg, image/png, */*\r\n"
+       "Accept-Language: en\r\n"
+       "Accept-Charset: iso-8859-1, *, utf-8\r\n"
+       "Client-ip: D1012148\r\n"
+       "Foo: abcdefghijklmnopqrtu\r\n"
+       "\r\n",                           "HTTP/1.0 200 OK\r\n"
+       "Content-Length: 16428\r\n"
+       "Content-Type: text/html\r\n"
+       "\r\n",                                                                          "HTTP/1.0 200 OK\r\n"
+       "Content-Length: 16428\r\n"
+       "Content-Type: text/html\r\n"
+       "\r\n"                                                                         },
+      {"GET http://people.netscape.com/jwz/hacks-1.gif HTTP/1.0\r\n"
+       "If-Modified-Since: Wednesday, 26-Feb-97 06:58:17 GMT; length=842\r\n"
+       "Referer: http://people.netscape.com/jwz/index.html\r\n"
+       "Proxy-Connection: Keep-Alive\r\n"
+       "User-Agent:  Mozilla/3.01 (X11; I; Linux 2.0.28 i586)\r\n"
+       "Pragma: no-cache\r\n"
+       "Host: people.netscape.com\r\n"
+       "Accept: image/gif, image/x-xbitmap, image/jpeg, image/pjpeg, */*\r\n"
+       "\r\n",                           "GET http://people.netscape.com/jwz/hacks-1.gif HTTP/1.0\r\n"
+       "If-Modified-Since: Wednesday, 26-Feb-97 06:58:17 GMT; length=842\r\n"
+       "Referer: http://people.netscape.com/jwz/index.html\r\n"
+       "Proxy-Connection: Keep-Alive\r\n"
+       "User-Agent:  Mozilla/3.01 (X11; I; Linux 2.0.28 i586)\r\n"
+       "Pragma: no-cache\r\n"
+       "Host: people.netscape.com\r\n"
+       "Accept: image/gif, image/x-xbitmap, image/jpeg, image/pjpeg, */*\r\n"
+       "\r\n",                           "HTTP/1.0 200 OK\r\n"
+       "Content-Length: 16428\r\n"
+       "Content-Type: text/html\r\n"
+       "\r\n",                                                                          "HTTP/1.0 200 OK\r\n"
+       "Content-Length: 16428\r\n"
+       "Content-Type: text/html\r\n"
+       "\r\n"                                                                         },
+    };
+
+    int ntests = sizeof(tests) / sizeof(tests[0]);
+    int i;
+
+    for (i = 0; i < ntests; i++) {
+      int status = test_http_hdr_print_and_copy_aux(i + 1, tests[i].req, tests[i].req_tgt, tests[i].rsp, tests[i].rsp_tgt);
+      CHECK(status != 0);
+
+      // Test for expected failures
+      // parse with a '\0' in the header.  Should fail
+      status = test_http_hdr_null_char(i + 1, tests[i].req, tests[i].req_tgt);
+      CHECK(status != 0);
+
+      // Parse with a CTL character in the method name.  Should fail
+      status = test_http_hdr_ctl_char(i + 1, tests[i].req, tests[i].req_tgt);
+      CHECK(status != 0);
+    }
+  }
+
+  SECTION("Test http")
+  {
+    static const char request0[] = {
+      "GET http://www.news.com:80/ HTTP/1.0\r\n"
+      "Proxy-Connection: Keep-Alive\r\n"
+      "User-Agent: Mozilla/4.04 [en] (X11; I; Linux 2.0.33 i586)\r\n"
+      "Pragma: no-cache\r\n"
+      "Host: www.news.com\r\n"
+      "Accept: image/gif, image/x-xbitmap, image/jpeg, image/pjpeg, image/png, */*\r\n"
+      "Accept-Language: en\r\n"
+      "Accept-Charset: iso-8859-1, *, utf-8\r\n"
+      "Cookie: u_vid_0_0=00031ba3; "
+      "s_cur_0_0=0101sisi091314775496e7d3Jx4+POyJakrMybmNOsq6XOn5bVn5Z6a4Ln5crU5M7Rxq2lm5aWpqupo20=; "
+      "SC_Cnet001=Sampled; SC_Cnet002=Sampled\r\n"
+      "Client-ip: D1012148\r\n"
+      "Foo: abcdefghijklmnopqrtu\r\n"
+      "\r\n",
+    };
+
+    static const char request09[] = {
+      "GET /index.html\r\n"
+      "\r\n",
+    };
+
+    static const char request1[] = {
+      "GET http://people.netscape.com/jwz/hacks-1.gif HTTP/1.0\r\n"
+      "If-Modified-Since: Wednesday, 26-Feb-97 06:58:17 GMT; length=842\r\n"
+      "Referer: http://people.netscape.com/jwz/index.html\r\n"
+      "Proxy-Connection: Keep-Alive\r\n"
+      "User-Agent:  Mozilla/3.01 (X11; I; Linux 2.0.28 i586)\r\n"
+      "Pragma: no-cache\r\n"
+      "Host: people.netscape.com\r\n"
+      "Accept: image/gif, image/x-xbitmap, image/jpeg, image/pjpeg, */*\r\n"
+      "\r\n",
+    };
+
+    static const char request_no_colon[] = {
+      "GET http://people.netscape.com/jwz/hacks-1.gif HTTP/1.0\r\n"
+      "If-Modified-Since Wednesday, 26-Feb-97 06:58:17 GMT; length=842\r\n"
+      "Referer http://people.netscape.com/jwz/index.html\r\n"
+      "Proxy-Connection Keep-Alive\r\n"
+      "User-Agent  Mozilla/3.01 (X11; I; Linux 2.0.28 i586)\r\n"
+      "Pragma no-cache\r\n"
+      "Host people.netscape.com\r\n"
+      "Accept image/gif, image/x-xbitmap, image/jpeg, image/pjpeg, */*\r\n"
+      "\r\n",
+    };
+
+    static const char request_no_val[] = {
+      "GET http://people.netscape.com/jwz/hacks-1.gif HTTP/1.0\r\n"
+      "If-Modified-Since:\r\n"
+      "Referer:     "
+      "Proxy-Connection:\r\n"
+      "User-Agent:     \r\n"
+      "Host:::\r\n"
+      "\r\n",
+    };
+
+    static const char request_multi_fblock[] = {
+      "GET http://people.netscape.com/jwz/hacks-1.gif HTTP/1.0\r\n"
+      "If-Modified-Since: Wednesday, 26-Feb-97 06:58:17 GMT; length=842\r\n"
+      "Referer: http://people.netscape.com/jwz/index.html\r\n"
+      "Proxy-Connection: Keep-Alive\r\n"
+      "User-Agent:  Mozilla/3.01 (X11; I; Linux 2.0.28 i586)\r\n"
+      "Pragma: no-cache\r\n"
+      "Host: people.netscape.com\r\n"
+      "Accept: image/gif, image/x-xbitmap, image/jpeg, image/pjpeg, */*\r\n"
+      "X-1: blah\r\n"
+      "X-2: blah\r\n"
+      "X-3: blah\r\n"
+      "X-4: blah\r\n"
+      "X-5: blah\r\n"
+      "X-6: blah\r\n"
+      "X-7: blah\r\n"
+      "X-8: blah\r\n"
+      "X-9: blah\r\n"
+      "Pragma: no-cache\r\n"
+      "X-X-1: blah\r\n"
+      "X-X-2: blah\r\n"
+      "X-X-3: blah\r\n"
+      "X-X-4: blah\r\n"
+      "X-X-5: blah\r\n"
+      "X-X-6: blah\r\n"
+      "X-X-7: blah\r\n"
+      "X-X-8: blah\r\n"
+      "X-X-9: blah\r\n"
+      "\r\n",
+    };
+
+    static const char request_leading_space[] = {
+      " GET http://www.news.com:80/ HTTP/1.0\r\n"
+      "Proxy-Connection: Keep-Alive\r\n"
+      "User-Agent: Mozilla/4.04 [en] (X11; I; Linux 2.0.33 i586)\r\n"
+      "\r\n",
+    };
+
+    static const char request_padding[] = {
+      "GET http://www.padding.com:80/ HTTP/1.0\r\n"
+      "X-1: blah1\r\n"
+      //       "X-2:  blah2\r\n"
+      "X-3:   blah3\r\n"
+      //       "X-4:    blah4\r\n"
+      "X-5:     blah5\r\n"
+      //       "X-6:      blah6\r\n"
+      "X-7:       blah7\r\n"
+      //       "X-8:        blah8\r\n"
+      "X-9:         blah9\r\n"
+      "\r\n",
+    };
+
+    static const char request_09p[] = {
+      "GET http://www.news09.com/\r\n"
+      "\r\n",
+    };
+
+    static const char request_09ht[] = {
+      "GET http://www.news09.com/ HT\r\n"
+      "\r\n",
+    };
+
+    static const char request_11[] = {
+      "GET http://www.news.com/ HTTP/1.1\r\n"
+      "Connection: close\r\n"
+      "\r\n",
+    };
+
+    static const char request_too_long[] = {
+      "GET http://www.news.com/i/am/too/long HTTP/1.1\r\n"
+      "Connection: close\r\n"
+      "\r\n",
+    };
+
+    static const char request_unterminated[] = {
+      "GET http://www.unterminated.com/ HTTP/1.1",
+    };
+
+    static const char request_blank[] = {
+      "\r\n",
+    };
+
+    static const char request_blank2[] = {
+      "\r\n"
+      "\r\n",
+    };
+
+    static const char request_blank3[] = {
+      "     "
+      "\r\n",
+    };
+
+    ////////////////////////////////////////////////////
+
+    static const char response0[] = {
+      "HTTP/1.0 200 OK\r\n"
+      "MIME-Version: 1.0\r\n"
+      "Server: WebSTAR/2.1 ID/30013\r\n"
+      "Content-Type: text/html\r\n"
+      "Content-Length: 939\r\n"
+      "Last-Modified: Thursday, 01-Jan-04 05:00:00 GMT\r\n"
+      "\r\n",
+    };
+
+    static const char response1[] = {
+      "HTTP/1.0 200 OK\r\n"
+      "Server: Netscape-Communications/1.12\r\n"
+      "Date: Tuesday, 08-Dec-98 20:32:17 GMT\r\n"
+      "Content-Type: text/html\r\n"
+      "\r\n",
+    };
+
+    static const char response_no_colon[] = {
+      "HTTP/1.0 200 OK\r\n"
+      "Server Netscape-Communications/1.12\r\n"
+      "Date: Tuesday, 08-Dec-98 20:32:17 GMT\r\n"
+      "Content-Type: text/html\r\n"
+      "\r\n",
+    };
+
+    static const char response_unterminated[] = {
+      "HTTP/1.0 200 OK",
+    };
+
+    static const char response09[] = {
+      "",
+    };
+
+    static const char response_blank[] = {
+      "\r\n",
+    };
+
+    static const char response_blank2[] = {
+      "\r\n"
+      "\r\n",
+    };
+
+    static const char response_blank3[] = {
+      "     "
+      "\r\n",
+    };
+
+    static const char response_too_long_req[] = {
+      "HTTP/1.0 414 URI Too Long\r\n"
+      "\r\n",
+    };
+
+    struct RequestResponse {
+      char const *request;
+      char const *response;
+    };
+
+    RequestResponse rr[] = {
+      {request0,              response0            },
+      {request09,             response09           },
+      {request1,              response1            },
+      {request_no_colon,      response_no_colon    },
+      {request_no_val,        response_no_colon    },
+      {request_leading_space, response0            },
+      {request_multi_fblock,  response0            },
+      {request_padding,       response0            },
+      {request_09p,           response0            },
+      {request_09ht,          response0            },
+      {request_11,            response0            },
+      {request_unterminated,  response_unterminated},
+      {request_blank,         response_blank       },
+      {request_blank2,        response_blank2      },
+      {request_blank3,        response_blank3      }
+    };
+
+    ParseResult err;
+    HTTPHdr     req_hdr, rsp_hdr;
+    HTTPParser  parser;
+    const char *start;
+    const char *end;
+    const char *request;
+    const char *response;
+
+    for (unsigned idx = 0; idx < (sizeof(rr) / sizeof(*rr)); ++idx) {
+      request  = rr[idx].request;
+      response = rr[idx].response;
+
+      std::printf("   <<< MUST BE HAND-VERIFIED FOR FULL BENEFIT >>>\n\n");
+
+      /*** (1) parse the request string into req_hdr ***/
+
+      start = request;
+      end   = start + strlen(start); // 1 character past end of string
+
+      http_parser_init(&parser);
+
+      req_hdr.create(HTTPType::REQUEST);
+      rsp_hdr.create(HTTPType::RESPONSE);
+
+      std::printf("======== parsing\n\n");
+      while (true) {
+        err = req_hdr.parse_req(&parser, &start, end, true);
+        if (err != ParseResult::CONT) {
+          break;
+        }
+      }
+      if (err == ParseResult::ERROR) {
+        req_hdr.destroy();
+        rsp_hdr.destroy();
+        break;
+      }
+
+      /*** useless copy to exercise copy function ***/
+
+      HTTPHdr new_hdr;
+      new_hdr.create(HTTPType::REQUEST);
+      new_hdr.copy(&req_hdr);
+      new_hdr.destroy();
+
+      /*** (2) print out the request ***/
+
+      std::printf("======== real request (length=%d)\n\n", static_cast<int>(strlen(request)));
+      std::printf("%s\n", request);
+
+      std::printf("\n[");
+      req_hdr.print(nullptr, 0, nullptr, nullptr);
+      std::printf("]\n\n");
+
+      obj_describe(req_hdr.m_http, true);
+
+      // req_hdr.destroy ();
+      // REQUIRE(!"req_hdr.destroy() not defined");
+
+      /*** (3) parse the response string into rsp_hdr ***/
+
+      start = response;
+      end   = start + strlen(start);
+
+      http_parser_clear(&parser);
+      http_parser_init(&parser);
+
+      while (true) {
+        err = rsp_hdr.parse_resp(&parser, &start, end, true);
+        if (err != ParseResult::CONT) {
+          break;
+        }
+      }
+      if (err == ParseResult::ERROR) {
+        req_hdr.destroy();
+        rsp_hdr.destroy();
+        break;
+      }
+
+      http_parser_clear(&parser);
+
+      /*** (4) print out the response ***/
+
+      std::printf("\n======== real response (length=%d)\n\n", static_cast<int>(strlen(response)));
+      std::printf("%s\n", response);
+
+      std::printf("\n[");
+      rsp_hdr.print(nullptr, 0, nullptr, nullptr);
+      std::printf("]\n\n");
+
+      obj_describe(rsp_hdr.m_http, true);
+
+      const int NNN = 1000;
+      {
+        char buf[NNN];
+        int  bufindex, last_bufindex;
+        int  tmp;
+        int  i;
+        int  print_err;
+
+        bufindex = 0;
+
+        do {
+          last_bufindex = bufindex;
+          tmp           = bufindex;
+          buf[0]        = '#'; // make it obvious if hdr.print doesn't print anything
+          print_err     = rsp_hdr.print(buf, NNN, &bufindex, &tmp);
+
+          // std::printf("test_header: tmp = %d  err = %d  bufindex = %d\n", tmp, print_err, bufindex);
+          putchar('{');
+          for (i = 0; i < bufindex - last_bufindex; i++) {
+            if (!iscntrl(buf[i])) {
+              putchar(buf[i]);
+            } else {
+              std::printf("\\%o", buf[i]);
+            }
+          }
+          putchar('}');
+        } while (!print_err);
+      }
+
+      // rsp_hdr.print (NULL, 0, NULL, NULL);
+
+      req_hdr.destroy();
+      rsp_hdr.destroy();
+    }
+
+    {
+      request  = request_too_long;
+      response = response_too_long_req;
+
+      int status = 1;
+
+      /*** (1) parse the request string into req_hdr ***/
+
+      start = request;
+      end   = start + strlen(start); // 1 character past end of string
+
+      http_parser_init(&parser);
+
+      req_hdr.create(HTTPType::REQUEST);
+      rsp_hdr.create(HTTPType::RESPONSE);
+
+      std::printf("======== test_http_req_parse_error parsing\n\n");
+      err = req_hdr.parse_req(&parser, &start, end, true, true, 1);
+      if (err != ParseResult::ERROR) {
+        status = 0;
+      }
+
+      http_parser_clear(&parser);
+
+      /*** (4) print out the response ***/
+
+      std::printf("\n======== real response (length=%d)\n\n", static_cast<int>(strlen(response)));
+      std::printf("%s\n", response);
+
+      obj_describe(rsp_hdr.m_http, true);
+
+      req_hdr.destroy();
+      rsp_hdr.destroy();
+
+      CHECK(status != 0);
+    }
+  }
+
+  SECTION("Test http mutation")
+  {
+    std::printf("   <<< MUST BE HAND-VERIFIED FOR FULL BENEFIT>>>\n\n");
+
+    HTTPHdr     resp_hdr;
+    int         i;
+    HTTPParser  parser;
+    const char  base_resp[] = "HTTP/1.0 200 OK\r\n\r\n";
+    const char *start, *end;
+
+    /*** (1) parse the response string into req_hdr ***/
+
+    start = base_resp;
+    end   = start + strlen(start);
+
+    http_parser_init(&parser);
+
+    resp_hdr.create(HTTPType::RESPONSE);
+
+    ParseResult err;
+    while (true) {
+      err = resp_hdr.parse_resp(&parser, &start, end, true);
+      if (err != ParseResult::CONT) {
+        break;
+      }
+    }
+
+    std::printf("\n======== before mutation ==========\n\n");
+    std::printf("\n[");
+    resp_hdr.print(nullptr, 0, nullptr, nullptr);
+    std::printf("]\n\n");
+
+    /*** (2) add in a bunch of header fields ****/
+    char field_name[1024];
+    char field_value[1024];
+    for (i = 1; i <= 100; i++) {
+      snprintf(field_name, sizeof(field_name), "Test%d", i);
+      snprintf(field_value, sizeof(field_value), "%d %d %d %d %d", i, i, i, i, i);
+      resp_hdr.value_set(std::string_view{field_name}, std::string_view{field_value});
+    }
+
+    /**** (3) delete all the even numbered fields *****/
+    for (i = 2; i <= 100; i += 2) {
+      snprintf(field_name, sizeof(field_name), "Test%d", i);
+      resp_hdr.field_delete(std::string_view{field_name});
+    }
+
+    /***** (4) add in secondary fields for all multiples of 3 ***/
+    for (i = 3; i <= 100; i += 3) {
+      snprintf(field_name, sizeof(field_name), "Test%d", i);
+      MIMEField *f = resp_hdr.field_create(field_name);
+      resp_hdr.field_attach(f);
+      snprintf(field_value, sizeof(field_value), "d %d %d %d %d %d", i, i, i, i, i);
+      f->value_set(resp_hdr.m_heap, resp_hdr.m_mime, std::string_view{field_value});
+    }
+
+    /***** (5) append all fields with multiples of 5 ***/
+    for (i = 5; i <= 100; i += 5) {
+      snprintf(field_name, sizeof(field_name), "Test%d", i);
+      snprintf(field_value, sizeof(field_value), "a %d", i);
+
+      resp_hdr.value_append(field_name, field_value, true);
+    }
+
+    /**** (6) delete all multiples of nine *****/
+    for (i = 9; i <= 100; i += 9) {
+      snprintf(field_name, sizeof(field_name), "Test%d", i);
+      resp_hdr.field_delete(std::string_view{field_name});
+    }
+
+    std::printf("\n======== mutated response ==========\n\n");
+    std::printf("\n[");
+    resp_hdr.print(nullptr, 0, nullptr, nullptr);
+    std::printf("]\n\n");
+
+    resp_hdr.destroy();
+  }
+
+  SECTION("Test arena")
+  {
+    auto arena = std::make_unique<Arena>();
+
+    CHECK(test_arena_aux(*arena, 1) != 1);
+    CHECK(test_arena_aux(*arena, 127) != 1);
+    CHECK(test_arena_aux(*arena, 128) != 1);
+    CHECK(test_arena_aux(*arena, 129) != 1);
+    CHECK(test_arena_aux(*arena, 255) != 1);
+    CHECK(test_arena_aux(*arena, 256) != 1);
+    CHECK(test_arena_aux(*arena, 16384) != 1);
+    CHECK(test_arena_aux(*arena, 16385) != 1);
+    CHECK(test_arena_aux(*arena, 16511) != 1);
+    CHECK(test_arena_aux(*arena, 16512) != 1);
+    CHECK(test_arena_aux(*arena, 2097152) != 1);
+    CHECK(test_arena_aux(*arena, 2097153) != 1);
+    CHECK(test_arena_aux(*arena, 2097279) != 1);
+    CHECK(test_arena_aux(*arena, 2097280) != 1);
+  }
+
+  SECTION("Test regex")
+  {
+    DFA dfa;
+
+    const char *test_harness[] = {"foo", "(.*\\.apache\\.org)", "(.*\\.example\\.com)"};
+
+    dfa.compile(test_harness, SIZEOF(test_harness));
+    CHECK(dfa.match("trafficserver.apache.org") == 1);
+    CHECK(dfa.match("www.example.com") == 2);
+    CHECK(dfa.match("aaaaaafooooooooinktomi....com.org") == -1);
+    CHECK(dfa.match("foo") == 0);
+  }
+
+  SECTION("Test accept language match")
+  {
+    struct {
+      const char *content_language;
+      const char *accept_language;
+      float       Q;
+      int         L;
+      int         I;
+    } test_cases[] = {
+      {"en",         "*",                                      1.0, 1,  1},
+      {"en",         "fr",                                     0.0, 0,  0},
+      {"en",         "de, fr, en;q=0.7",                       0.7, 2,  3},
+      {"en-cockney", "de, fr, en;q=0.7",                       0.7, 2,  3},
+      {"en-cockney", "de, fr, en-foobar;q=0.8, en;q=0.7",      0.7, 2,  4},
+      {"en-cockney", "de, fr, en-cockney;q=0.8, en;q=0.7",     0.8, 10, 3},
+      {"en-cockney", "de, fr, en;q=0.8, en;q=0.7",             0.8, 2,  3},
+      {"en-cockney", "de, fr, en;q=0.7, en;q=0.8",             0.8, 2,  4},
+      {"en-cockney", "de, fr, en;q=0.8, en;q=0.8",             0.8, 2,  3},
+      {"en-cockney", "de, fr, en-cockney;q=0.7, en;q=0.8",     0.7, 10, 3},
+      {"en-cockney", "de, fr, en;q=0.8, en-cockney;q=0.7",     0.7, 10, 4},
+      {"en-cockney", "de, fr, en-cockney;q=0.8, en;q=0.8",     0.8, 10, 3},
+      {"en-cockney", "de, fr, en-cockney;q=0.8, en;q=0.7",     0.8, 10, 3},
+      {"en-cockney", "de, fr, en-american",                    0.0, 0,  0},
+      {"en-cockney", "de, fr, en;q=0.8, en;q=0.8, *",          0.8, 2,  3},
+      {"en-cockney", "de, fr, en;q=0.8, en;q=0.8, *;q=0.9",    0.8, 2,  3},
+      {"en-foobar",  "de, fr, en;q=0.8, en;q=0.8, *;q=0.9",    0.8, 2,  3},
+      {"oo-foobar",  "de, fr, en;q=0.8, en;q=0.8, *;q=0.9",    0.9, 1,  5},
+      {"oo-foobar",  "de, fr, en;q=0.8, en;q=0.8, *;q=0.9, *", 1.0, 1,  6},
+      {"oo-foobar",  "de, fr, en;q=0.8, en;q=0.8, *, *;q=0.9", 1.0, 1,  5},
+      {"fr-belgian", "de, fr;hi-there;q=0.9, fr;q=0.8, en",    0.9, 2,  2},
+      {"fr-belgian", "de, fr;q=0.8, fr;hi-there;q=0.9, en",    0.9, 2,  3},
+      {nullptr,      nullptr,                                  0.0, 0,  0},
+    };
+
+    int   i, I, L;
+    float Q;
+
+    for (i = 0; test_cases[i].accept_language; i++) {
+      StrList acpt_lang_list(false);
+      HttpCompat::parse_comma_list(&acpt_lang_list, test_cases[i].accept_language,
+                                   static_cast<int>(strlen(test_cases[i].accept_language)));
+
+      Q = HttpCompat::match_accept_language(test_cases[i].content_language,
+                                            static_cast<int>(strlen(test_cases[i].content_language)), &acpt_lang_list, &L, &I);
+
+      if ((Q != test_cases[i].Q) || (L != test_cases[i].L) || (I != test_cases[i].I)) {
+        std::printf(
+          "FAILED: (#%d) got { Q = %.3f; L = %d; I = %d; }, expected { Q = %.3f; L = %d; I = %d; }, from matching\n  '%s' "
+          "against '%s'\n",
+          i, Q, L, I, test_cases[i].Q, test_cases[i].L, test_cases[i].I, test_cases[i].content_language,
+          test_cases[i].accept_language);
+        CHECK(false);
+      }
+    }
+  }
+
+  SECTION("Test accept charset match")
+  {
+    struct {
+      const char *content_charset;
+      const char *accept_charset;
+      float       Q;
+      int         I;
+    } test_cases[] = {
+      {"iso-8859-1", "*",                                                                1.0,   1},
+      {"iso-8859-1", "iso-8859-2",                                                       0.0,   0},
+      {"iso-8859-1", "iso-8859",                                                         0.0,   0},
+      {"iso-8859-1", "iso-8859-12",                                                      0.0,   0},
+      {"iso-8859-1", "koi-8-r",                                                          0.0,   0},
+      {"euc-jp",     "shift_jis, iso-2022-jp, euc-jp;q=0.7",                             0.7,   3},
+      {"euc-jp",     "shift_jis, iso-2022-jp, euc-jp;q=0.7",                             0.7,   3},
+      {"euc-jp",     "shift_jis, iso-2022-jp, euc-jp;q=0.8, euc-jp;q=0.7",               0.8,   3},
+      {"euc-jp",     "shift_jis, iso-2022-jp, euc-jp;q=0.7, euc-jp;q=0.8",               0.8,   4},
+      {"euc-jp",     "euc-jp;q=0.9, shift_jis, iso-2022-jp, euc-jp;q=0.7, euc-jp;q=0.8", 0.9,   1},
+      {"EUC-JP",     "euc-jp;q=0.9, shift_jis, iso-2022-jp, euc-jp, euc-jp;q=0.8",       1.0,   4},
+      {"euc-jp",     "euc-jp;q=0.9, shift_jis, iso-2022-jp, EUC-JP, euc-jp;q=0.8",       1.0,   4},
+      {"euc-jp",     "shift_jis, iso-2022-jp, euc-jp-foobar",                            0.0,   0},
+      {"euc-jp",     "shift_jis, iso-2022-jp, euc-jp-foobar, *",                         1.0,   4},
+      {"euc-jp",     "shift_jis, iso-2022-jp, euc-jp-foobar, *;q=0.543",                 0.543, 4},
+      {"euc-jp",     "shift_jis, iso-2022-jp, euc-jp-foobar, *;q=0.0",                   0.0,   4},
+      {"euc-jp",     "shift_jis, iso-2022-jp, *;q=0.0, euc-jp-foobar, *;q=0.0",          0.0,   3},
+      {"euc-jp",     "shift_jis, iso-2022-jp, *;q=0.0, euc-jp-foobar, *;q=0.5",          0.5,   5},
+      {"euc-jp",     "shift_jis, iso-2022-jp, *;q=0.5, euc-jp-foobar, *;q=0.0",          0.5,   3},
+      {"euc-jp",     "shift_jis, iso-2022-jp, *;q=0.5, euc-jp-foobar, *, *;q=0.0",       1.0,   5},
+      {"euc-jp",     "shift_jis, euc-jp;hi-there;q=0.5, iso-2022-jp",                    0.5,   2},
+      {"euc-jp",     "shift_jis, euc-jp;hi-there;q= 0.5, iso-2022-jp",                   0.5,   2},
+      {"euc-jp",     "shift_jis, euc-jp;hi-there;q = 0.5, iso-2022-jp",                  0.5,   2},
+      {"euc-jp",     "shift_jis, euc-jp;hi-there ; q = 0.5, iso-2022-jp",                0.5,   2},
+      {"euc-jp",     "shift_jis, euc-jp;hi-there ;; q = 0.5, iso-2022-jp",               0.5,   2},
+      {"euc-jp",     "shift_jis, euc-jp;hi-there ;; Q = 0.5, iso-2022-jp",               0.5,   2},
+      {nullptr,      nullptr,                                                            0.0,   0},
+    };
+
+    int   i, I;
+    float Q;
+
+    for (i = 0; test_cases[i].accept_charset; i++) {
+      StrList acpt_lang_list(false);
+      HttpCompat::parse_comma_list(&acpt_lang_list, test_cases[i].accept_charset,
+                                   static_cast<int>(strlen(test_cases[i].accept_charset)));
+
+      Q = HttpCompat::match_accept_charset(test_cases[i].content_charset, static_cast<int>(strlen(test_cases[i].content_charset)),
+                                           &acpt_lang_list, &I);
+
+      if ((Q != test_cases[i].Q) || (I != test_cases[i].I)) {
+        std::printf("FAILED: (#%d) got { Q = %.3f; I = %d; }, expected { Q = %.3f; I = %d; }, from matching\n  '%s' against '%s'\n",
+                    i, Q, I, test_cases[i].Q, test_cases[i].I, test_cases[i].content_charset, test_cases[i].accept_charset);
+        CHECK(false);
+      }
+    }
+  }
+
+  SECTION("Test comma vals")
+  {
+    static struct {
+      const char *value;
+      int         value_count;
+      struct {
+        int offset;
+        int len;
+      } pieces[4];
+    } tests[] = {
+      {",",          2, {{0, 0}, {1, 0}, {-1, 0}, {-1, 0}} },
+      {"",           1, {{0, 0}, {-1, 0}, {-1, 0}, {-1, 0}}},
+      {" ",          1, {{0, 0}, {-1, 0}, {-1, 0}, {-1, 0}}},
+      {", ",         2, {{0, 0}, {1, 0}, {-1, 0}, {-1, 0}} },
+      {",,",         3, {{0, 0}, {1, 0}, {2, 0}, {-1, 0}}  },
+      {" ,",         2, {{0, 0}, {2, 0}, {-1, 0}, {-1, 0}} },
+      {" , ",        2, {{0, 0}, {2, 0}, {-1, 0}, {-1, 0}} },
+      {"a, ",        2, {{0, 1}, {2, 0}, {-1, 0}, {-1, 0}} },
+      {" a, ",       2, {{1, 1}, {3, 0}, {-1, 0}, {-1, 0}} },
+      {" ,a",        2, {{0, 0}, {2, 1}, {-1, 0}, {-1, 0}} },
+      {" , a",       2, {{0, 0}, {3, 1}, {-1, 0}, {-1, 0}} },
+      {"a,a",        2, {{0, 1}, {2, 1}, {-1, 0}, {-1, 0}} },
+      {"foo",        1, {{0, 3}, {-1, 0}, {-1, 0}, {-1, 0}}},
+      {"foo,",       2, {{0, 3}, {4, 0}, {-1, 0}, {-1, 0}} },
+      {"foo, ",      2, {{0, 3}, {4, 0}, {-1, 0}, {-1, 0}} },
+      {"foo, bar",   2, {{0, 3}, {5, 3}, {-1, 0}, {-1, 0}} },
+      {"foo, bar,",  3, {{0, 3}, {5, 3}, {9, 0}, {-1, 0}}  },
+      {"foo, bar, ", 3, {{0, 3}, {5, 3}, {9, 0}, {-1, 0}}  },
+      {",foo,bar,",  4, {{0, 0}, {1, 3}, {5, 3}, {9, 0}}   },
+    };
+
+    HTTPHdr hdr;
+    char    field_name[32];
+    int     i, j, len, ntests, ncommavals;
+
+    ntests = sizeof(tests) / sizeof(tests[0]);
+
+    hdr.create(HTTPType::REQUEST);
+
+    for (i = 0; i < ntests; i++) {
+      snprintf(field_name, sizeof(field_name), "Test%d", i);
+
+      MIMEField *f = hdr.field_create(field_name);
+      REQUIRE(f->m_ptr_value == nullptr);
+
+      hdr.field_attach(f);
+      REQUIRE(f->m_ptr_value == nullptr);
+
+      hdr.field_value_set(f, tests[i].value);
+      REQUIRE(f->m_ptr_value != tests[i].value); // should be copied
+      REQUIRE(f->m_len_value == strlen(tests[i].value));
+      REQUIRE(memcmp(f->m_ptr_value, tests[i].value, f->m_len_value) == 0);
+
+      ncommavals = mime_field_value_get_comma_val_count(f);
+      if (ncommavals != tests[i].value_count) {
+        std::printf("FAILED: test #%d (field value '%s') expected val count %d, got %d\n", i + 1, tests[i].value,
+                    tests[i].value_count, ncommavals);
+        CHECK(false);
+      }
+
+      for (j = 0; j < tests[i].value_count; j++) {
+        const char *val    = mime_field_value_get_comma_val(f, &len, j);
+        int         offset = ((val == nullptr) ? -1 : (val - f->m_ptr_value));
+
+        if ((offset != tests[i].pieces[j].offset) || (len != tests[i].pieces[j].len)) {
+          std::printf(
+            "FAILED: test #%d (field value '%s', commaval idx %d) expected [offset %d, len %d], got [offset %d, len %d]\n", i + 1,
+            tests[i].value, j, tests[i].pieces[j].offset, tests[i].pieces[j].len, offset, len);
+          CHECK(false);
+        }
+      }
+    }
+
+    hdr.destroy();
+  }
+
+  SECTION("Test set comma vals")
+  {
+    static struct {
+      const char *old_raw;
+      int         idx;
+      const char *slice;
+      const char *new_raw;
+    } tests[] = {
+      {"a,b,c",              0, "fred", "fred, b, c"           },
+      {"a,b,c",              1, "fred", "a, fred, c"           },
+      {"a,b,c",              2, "fred", "a, b, fred"           },
+      {"a,b,c",              3, "fred", "a,b,c"                },
+      {"",                   0, "",     ""                     },
+      {"",                   0, "foo",  "foo"                  },
+      {"",                   1, "foo",  ""                     },
+      {" ",                  0, "",     ""                     },
+      {" ",                  0, "foo",  "foo"                  },
+      {" ",                  1, "foo",  " "                    },
+      {",",                  0, "foo",  "foo, "                },
+      {",",                  1, "foo",  ", foo"                },
+      {",,",                 0, "foo",  "foo, , "              },
+      {",,",                 1, "foo",  ", foo, "              },
+      {",,",                 2, "foo",  ", , foo"              },
+      {"foo",                0, "abc",  "abc"                  },
+      {"foo",                1, "abc",  "foo"                  },
+      {"foo",                0, "abc,", "abc,"                 },
+      {"foo",                0, ",abc", ",abc"                 },
+      {",,",                 1, ",,,",  ", ,,,, "              },
+      {" a , b , c",         0, "fred", "fred, b, c"           },
+      {" a , b , c",         1, "fred", "a, fred, c"           },
+      {" a , b , c",         2, "fred", "a, b, fred"           },
+      {" a , b , c",         3, "fred", " a , b , c"           },
+      {"    a   ,   b ",     0, "fred", "fred, b"              },
+      {"    a   ,   b ",     1, "fred", "a, fred"              },
+      {"    a   , b ",       1, "fred", "a, fred"              },
+      {"    a   ,b ",        1, "fred", "a, fred"              },
+      {"a, , , , e, , g,",   0, "fred", "fred, , , , e, , g, " },
+      {"a, , , , e, , g,",   1, "fred", "a, fred, , , e, , g, "},
+      {"a, , , , e, , g,",   2, "fred", "a, , fred, , e, , g, "},
+      {"a, , , , e, , g,",   5, "fred", "a, , , , e, fred, g, "},
+      {"a, , , , e, , g,",   7, "fred", "a, , , , e, , g, fred"},
+      {"a, , , , e, , g,",   8, "fred", "a, , , , e, , g,"     },
+      {R"(a, "boo,foo", c)", 0, "wawa", R"(wawa, "boo,foo", c)"},
+      {R"(a, "boo,foo", c)", 1, "wawa", "a, wawa, c"           },
+      {R"(a, "boo,foo", c)", 2, "wawa", R"(a, "boo,foo", wawa)"},
+    };
+
+    HTTPHdr hdr;
+    char    field_name[32];
+    int     i, ntests;
+
+    ntests = sizeof(tests) / sizeof(tests[0]);
+
+    hdr.create(HTTPType::REQUEST);
+
+    for (i = 0; i < ntests; i++) {
+      snprintf(field_name, sizeof(field_name), "Test%d", i);
+
+      MIMEField *f = hdr.field_create(field_name);
+      hdr.field_value_set(f, tests[i].old_raw);
+      mime_field_value_set_comma_val(hdr.m_heap, hdr.m_mime, f, tests[i].idx, std::string_view{tests[i].slice});
+      REQUIRE(f->m_ptr_value != nullptr);
+
+      if ((f->m_len_value != strlen(tests[i].new_raw)) || (memcmp(f->m_ptr_value, tests[i].new_raw, f->m_len_value) != 0)) {
+        std::printf("FAILED:  test #%d (setting idx %d of '%s' to '%s') expected '%s' len %d, got '%.*s' len %d\n", i + 1,
+                    tests[i].idx, tests[i].old_raw, tests[i].slice, tests[i].new_raw, static_cast<int>(strlen(tests[i].new_raw)),
+                    f->m_len_value, f->m_ptr_value, f->m_len_value);
+        CHECK(false);
+      }
+    }
+
+    hdr.destroy();
+  }
+
+  SECTION("Test delete comma vals")
+  {
+    // TEST NOT IMPLEMENTED
+  }
+
+  SECTION("Test extend comma vals")
+  {
+    // TEST NOT IMPLEMENTED
+  }
+
+  SECTION("Test insert comma vals")
+  {
+    // TEST NOT IMPLEMENTED
+  }
+
+  SECTION("Test parse comma list")
+  {
+    static struct {
+      const char *value;
+      int         count;
+      struct {
+        int offset;
+        int len;
+      } pieces[3];
+    } tests[] = {
+      {"",               1, {{0, 0}, {-1, 0}, {-1, 0}}},
+      {",",              2, {{0, 0}, {1, 0}, {-1, 0}} },
+      {" ,",             2, {{0, 0}, {2, 0}, {-1, 0}} },
+      {", ",             2, {{0, 0}, {1, 0}, {-1, 0}} },
+      {" , ",            2, {{0, 0}, {2, 0}, {-1, 0}} },
+      {"abc,",           2, {{0, 3}, {4, 0}, {-1, 0}} },
+      {"abc, ",          2, {{0, 3}, {4, 0}, {-1, 0}} },
+      {"",               1, {{0, 0}, {-1, 0}, {-1, 0}}},
+      {" ",              1, {{0, 0}, {-1, 0}, {-1, 0}}},
+      {"  ",             1, {{0, 0}, {-1, 0}, {-1, 0}}},
+      {"a",              1, {{0, 1}, {-1, 0}, {-1, 0}}},
+      {" a",             1, {{1, 1}, {-1, 0}, {-1, 0}}},
+      {"  a  ",          1, {{2, 1}, {-1, 0}, {-1, 0}}},
+      {"abc,defg",       2, {{0, 3}, {4, 4}, {-1, 0}} },
+      {" abc,defg",      2, {{1, 3}, {5, 4}, {-1, 0}} },
+      {" abc, defg",     2, {{1, 3}, {6, 4}, {-1, 0}} },
+      {" abc , defg",    2, {{1, 3}, {7, 4}, {-1, 0}} },
+      {" abc , defg ",   2, {{1, 3}, {7, 4}, {-1, 0}} },
+      {" abc , defg, ",  3, {{1, 3}, {7, 4}, {12, 0}} },
+      {" abc , defg ,",  3, {{1, 3}, {7, 4}, {13, 0}} },
+      {", abc , defg ",  3, {{0, 0}, {2, 3}, {8, 4}}  },
+      {" ,abc , defg ",  3, {{0, 0}, {2, 3}, {8, 4}}  },
+      {"a,b",            2, {{0, 1}, {2, 1}, {-1, 0}} },
+      {"a,,b",           3, {{0, 1}, {2, 0}, {3, 1}}  },
+      {"a, ,b",          3, {{0, 1}, {2, 0}, {4, 1}}  },
+      {"a ,,b",          3, {{0, 1}, {3, 0}, {4, 1}}  },
+      {",",              2, {{0, 0}, {1, 0}, {-1, 0}} },
+      {" ,",             2, {{0, 0}, {2, 0}, {-1, 0}} },
+      {", ",             2, {{0, 0}, {1, 0}, {-1, 0}} },
+      {" , ",            2, {{0, 0}, {2, 0}, {-1, 0}} },
+      {"a,b,",           3, {{0, 1}, {2, 1}, {4, 0}}  },
+      {"a,b, ",          3, {{0, 1}, {2, 1}, {4, 0}}  },
+      {"a,b,  ",         3, {{0, 1}, {2, 1}, {4, 0}}  },
+      {"a,b,  c",        3, {{0, 1}, {2, 1}, {6, 1}}  },
+      {"a,b,  c ",       3, {{0, 1}, {2, 1}, {6, 1}}  },
+      {R"(a,"b,c",d)",   3, {{0, 1}, {3, 3}, {8, 1}}  },
+      {R"(a,b,c="d,e")", 3, {{0, 1}, {2, 1}, {4, 7}}  },
+    };
+
+    int i, j, ntests, offset;
+
+    offset = 0;
+    ntests = sizeof(tests) / sizeof(tests[0]);
+
+    for (i = 0; i < ntests; i++) {
+      StrList list(false);
+      HttpCompat::parse_comma_list(&list, tests[i].value);
+      if (list.count != tests[i].count) {
+        std::printf("FAILED: test #%d (string '%s') expected list count %d, got %d\n", i + 1, tests[i].value, tests[i].count,
+                    list.count);
+        CHECK(false);
+      }
+
+      for (j = 0; j < tests[i].count; j++) {
+        Str *cell = list.get_idx(j);
+        if (cell != nullptr) {
+          offset = cell->str - tests[i].value;
+        }
+
+        if (tests[i].pieces[j].offset == -1) // should not have a piece
+        {
+          if (cell != nullptr) {
+            std::printf("FAILED: test #%d (string '%s', idx %d) expected NULL piece, got [offset %d len %d]\n", i + 1,
+                        tests[i].value, j, offset, static_cast<int>(cell->len));
+            CHECK(false);
+          }
+        } else // should have a piece
+        {
+          if (cell == nullptr) {
+            std::printf("FAILED: test #%d (string '%s', idx %d) expected [offset %d len %d], got NULL piece\n", i + 1,
+                        tests[i].value, j, tests[i].pieces[j].offset, tests[i].pieces[j].len);
+            CHECK(false);
+          } else if ((offset != tests[i].pieces[j].offset) || (cell->len != static_cast<size_t>(tests[i].pieces[j].len))) {
+            std::printf("FAILED: test #%d (string '%s', idx %d) expected [offset %d len %d], got [offset %d len %d]\n", i + 1,
+                        tests[i].value, j, tests[i].pieces[j].offset, tests[i].pieces[j].len, offset, static_cast<int>(cell->len));
+            CHECK(false);
+          }
+        }
+      }
+    }
+  }
+}
+
+// Test that HTTPHdr::host_get() returns correct length after Host header is modified.
+// This reproduces a bug where the cached host length was stale after the Host header
+// was changed via MIME layer functions, causing host_get() to return a string_view
+// with the wrong length (reading garbage bytes past the actual hostname).
+TEST_CASE("HdrTestHostCacheInvalidation", "[proxy][hdrtest]")
+{
+  hdrtoken_init();
+  url_init();
+  mime_init();
+  http_init();
+
+  // Test case: modify Host header to a shorter value, verify host_get() returns correct length
+  SECTION("Host header modification invalidates cache")
+  {
+    static const char request[] = {
+      "GET / HTTP/1.1\r\n"
+      "Host: very.long.hostname.example.com\r\n"
+      "\r\n",
+    };
+
+    HTTPHdr     req_hdr;
+    HTTPParser  parser;
+    const char *start = request;
+    const char *end   = start + strlen(start);
+
+    http_parser_init(&parser);
+    req_hdr.create(HTTPType::REQUEST);
+
+    ParseResult err;
+    while (true) {
+      err = req_hdr.parse_req(&parser, &start, end, true);
+      if (err != ParseResult::CONT) {
+        break;
+      }
+    }
+    REQUIRE(err == ParseResult::DONE);
+    http_parser_clear(&parser);
+
+    // First call to host_get() - this populates the cache
+    std::string_view host1 = req_hdr.host_get();
+    REQUIRE(host1 == "very.long.hostname.example.com"sv);
+    REQUIRE(host1.length() == 30);
+
+    // Now modify the Host header to a SHORTER value via MIME layer
+    MIMEField *host_field = req_hdr.field_find("Host"sv);
+    REQUIRE(host_field != nullptr);
+
+    // Set to a shorter hostname - this is what plugins do
+    host_field->value_set(req_hdr.m_heap, req_hdr.m_mime, "short.com"sv);
+
+    // Second call to host_get() - should return the NEW, SHORTER hostname
+    // BUG: Without the fix, this returns a string_view with the old cached length (30)
+    // but pointing to the new value buffer, causing it to read garbage past "short.com"
+    std::string_view host2 = req_hdr.host_get();
+
+    // This is the key assertion that fails without the fix:
+    // The length should be 9 ("short.com"), not 30 (the old cached length)
+    CHECK(host2.length() == 9);
+    CHECK(host2 == "short.com"sv);
+
+    req_hdr.destroy();
+  }
+
+  // Test case: modify Host header to a longer value
+  SECTION("Host header modification to longer value")
+  {
+    static const char request[] = {
+      "GET / HTTP/1.1\r\n"
+      "Host: short.com\r\n"
+      "\r\n",
+    };
+
+    HTTPHdr     req_hdr;
+    HTTPParser  parser;
+    const char *start = request;
+    const char *end   = start + strlen(start);
+
+    http_parser_init(&parser);
+    req_hdr.create(HTTPType::REQUEST);
+
+    ParseResult err;
+    while (true) {
+      err = req_hdr.parse_req(&parser, &start, end, true);
+      if (err != ParseResult::CONT) {
+        break;
+      }
+    }
+    REQUIRE(err == ParseResult::DONE);
+    http_parser_clear(&parser);
+
+    // First call to host_get() - populates the cache
+    std::string_view host1 = req_hdr.host_get();
+    REQUIRE(host1 == "short.com"sv);
+
+    // Modify to a longer hostname
+    MIMEField *host_field = req_hdr.field_find("Host"sv);
+    REQUIRE(host_field != nullptr);
+    host_field->value_set(req_hdr.m_heap, req_hdr.m_mime, "very.long.hostname.example.com"sv);
+
+    // Should return the new longer hostname
+    std::string_view host2 = req_hdr.host_get();
+    CHECK(host2.length() == 30);
+    CHECK(host2 == "very.long.hostname.example.com"sv);
+
+    req_hdr.destroy();
+  }
+
+  // Test case: multiple modifications
+  SECTION("Multiple Host header modifications")
+  {
+    static const char request[] = {
+      "GET / HTTP/1.1\r\n"
+      "Host: first.example.com\r\n"
+      "\r\n",
+    };
+
+    HTTPHdr     req_hdr;
+    HTTPParser  parser;
+    const char *start = request;
+    const char *end   = start + strlen(start);
+
+    http_parser_init(&parser);
+    req_hdr.create(HTTPType::REQUEST);
+
+    ParseResult err;
+    while (true) {
+      err = req_hdr.parse_req(&parser, &start, end, true);
+      if (err != ParseResult::CONT) {
+        break;
+      }
+    }
+    REQUIRE(err == ParseResult::DONE);
+    http_parser_clear(&parser);
+
+    MIMEField *host_field = req_hdr.field_find("Host"sv);
+    REQUIRE(host_field != nullptr);
+
+    // Initial
+    std::string_view host = req_hdr.host_get();
+    REQUIRE(host == "first.example.com"sv);
+
+    // Modification 1
+    host_field->value_set(req_hdr.m_heap, req_hdr.m_mime, "second.com"sv);
+    host = req_hdr.host_get();
+    CHECK(host == "second.com"sv);
+
+    // Modification 2
+    host_field->value_set(req_hdr.m_heap, req_hdr.m_mime, "third.very.long.example.org"sv);
+    host = req_hdr.host_get();
+    CHECK(host == "third.very.long.example.org"sv);
+
+    // Modification 3 - back to short
+    host_field->value_set(req_hdr.m_heap, req_hdr.m_mime, "x.co"sv);
+    host = req_hdr.host_get();
+    CHECK(host == "x.co"sv);
+
+    req_hdr.destroy();
+  }
+
+  // Test case: Host header with port - incoming request has port
+  SECTION("Host header with port - modify hostname only")
+  {
+    static const char request[] = {
+      "GET / HTTP/1.1\r\n"
+      "Host: original.example.com:8080\r\n"
+      "\r\n",
+    };
+
+    HTTPHdr     req_hdr;
+    HTTPParser  parser;
+    const char *start = request;
+    const char *end   = start + strlen(start);
+
+    http_parser_init(&parser);
+    req_hdr.create(HTTPType::REQUEST);
+
+    ParseResult err;
+    while (true) {
+      err = req_hdr.parse_req(&parser, &start, end, true);
+      if (err != ParseResult::CONT) {
+        break;
+      }
+    }
+    REQUIRE(err == ParseResult::DONE);
+    http_parser_clear(&parser);
+
+    // First call - populates the cache
+    std::string_view host1 = req_hdr.host_get();
+    int              port1 = req_hdr.port_get();
+    REQUIRE(host1 == "original.example.com"sv);
+    REQUIRE(port1 == 8080);
+
+    // Now modify the Host header to a shorter value with different port
+    MIMEField *host_field = req_hdr.field_find("Host"sv);
+    REQUIRE(host_field != nullptr);
+
+    host_field->value_set(req_hdr.m_heap, req_hdr.m_mime, "short.com:9090"sv);
+
+    // Should return the new hostname and port
+    std::string_view host2 = req_hdr.host_get();
+    int              port2 = req_hdr.port_get();
+    CHECK(host2 == "short.com"sv);
+    CHECK(port2 == 9090);
+
+    req_hdr.destroy();
+  }
+
+  // Test case: Host header without port - add port
+  SECTION("Host header without port - add port")
+  {
+    static const char request[] = {
+      "GET / HTTP/1.1\r\n"
+      "Host: original.example.com\r\n"
+      "\r\n",
+    };
+
+    HTTPHdr     req_hdr;
+    HTTPParser  parser;
+    const char *start = request;
+    const char *end   = start + strlen(start);
+
+    http_parser_init(&parser);
+    req_hdr.create(HTTPType::REQUEST);
+
+    ParseResult err;
+    while (true) {
+      err = req_hdr.parse_req(&parser, &start, end, true);
+      if (err != ParseResult::CONT) {
+        break;
+      }
+    }
+    REQUIRE(err == ParseResult::DONE);
+    http_parser_clear(&parser);
+
+    // First call - populates the cache
+    // Note: port is 0 when no port in Host header and no URL scheme
+    std::string_view host1 = req_hdr.host_get();
+    int              port1 = req_hdr.port_get();
+    REQUIRE(host1 == "original.example.com"sv);
+    REQUIRE(port1 == 0); // no port specified, no scheme to default from
+
+    // Modify to add a port
+    MIMEField *host_field = req_hdr.field_find("Host"sv);
+    REQUIRE(host_field != nullptr);
+
+    host_field->value_set(req_hdr.m_heap, req_hdr.m_mime, "newhost.com:3128"sv);
+
+    // Should return the new hostname and port
+    std::string_view host2 = req_hdr.host_get();
+    int              port2 = req_hdr.port_get();
+    CHECK(host2 == "newhost.com"sv);
+    CHECK(port2 == 3128);
+
+    req_hdr.destroy();
+  }
+
+  // Test case: Host header with port - remove port
+  SECTION("Host header with port - remove port")
+  {
+    static const char request[] = {
+      "GET / HTTP/1.1\r\n"
+      "Host: original.example.com:8080\r\n"
+      "\r\n",
+    };
+
+    HTTPHdr     req_hdr;
+    HTTPParser  parser;
+    const char *start = request;
+    const char *end   = start + strlen(start);
+
+    http_parser_init(&parser);
+    req_hdr.create(HTTPType::REQUEST);
+
+    ParseResult err;
+    while (true) {
+      err = req_hdr.parse_req(&parser, &start, end, true);
+      if (err != ParseResult::CONT) {
+        break;
+      }
+    }
+    REQUIRE(err == ParseResult::DONE);
+    http_parser_clear(&parser);
+
+    // First call - populates the cache
+    std::string_view host1 = req_hdr.host_get();
+    int              port1 = req_hdr.port_get();
+    REQUIRE(host1 == "original.example.com"sv);
+    REQUIRE(port1 == 8080);
+
+    // Modify to remove the port
+    MIMEField *host_field = req_hdr.field_find("Host"sv);
+    REQUIRE(host_field != nullptr);
+
+    host_field->value_set(req_hdr.m_heap, req_hdr.m_mime, "noport.example.org"sv);
+
+    // Should return the new hostname
+    // Note: port is 0 when no port in Host header and no URL scheme
+    std::string_view host2 = req_hdr.host_get();
+    int              port2 = req_hdr.port_get();
+    CHECK(host2 == "noport.example.org"sv);
+    CHECK(port2 == 0); // no port specified, no scheme to default from
+
+    req_hdr.destroy();
+  }
+
+  // Test case: Multiple modifications with varying ports
+  SECTION("Multiple Host modifications with ports")
+  {
+    static const char request[] = {
+      "GET / HTTP/1.1\r\n"
+      "Host: first.com:1111\r\n"
+      "\r\n",
+    };
+
+    HTTPHdr     req_hdr;
+    HTTPParser  parser;
+    const char *start = request;
+    const char *end   = start + strlen(start);
+
+    http_parser_init(&parser);
+    req_hdr.create(HTTPType::REQUEST);
+
+    ParseResult err;
+    while (true) {
+      err = req_hdr.parse_req(&parser, &start, end, true);
+      if (err != ParseResult::CONT) {
+        break;
+      }
+    }
+    REQUIRE(err == ParseResult::DONE);
+    http_parser_clear(&parser);
+
+    MIMEField *host_field = req_hdr.field_find("Host"sv);
+    REQUIRE(host_field != nullptr);
+
+    // Initial
+    CHECK(req_hdr.host_get() == "first.com"sv);
+    CHECK(req_hdr.port_get() == 1111);
+
+    // Modification 1: change host and port
+    host_field->value_set(req_hdr.m_heap, req_hdr.m_mime, "second.com:2222"sv);
+    CHECK(req_hdr.host_get() == "second.com"sv);
+    CHECK(req_hdr.port_get() == 2222);
+
+    // Modification 2: longer host, remove port
+    // Note: port is 0 when no port in Host header and no URL scheme
+    host_field->value_set(req_hdr.m_heap, req_hdr.m_mime, "very.long.third.example.org"sv);
+    CHECK(req_hdr.host_get() == "very.long.third.example.org"sv);
+    CHECK(req_hdr.port_get() == 0);
+
+    // Modification 3: short host, add port back
+    host_field->value_set(req_hdr.m_heap, req_hdr.m_mime, "x.co:443"sv);
+    CHECK(req_hdr.host_get() == "x.co"sv);
+    CHECK(req_hdr.port_get() == 443);
+
+    // Modification 4: change just the port
+    host_field->value_set(req_hdr.m_heap, req_hdr.m_mime, "x.co:8443"sv);
+    CHECK(req_hdr.host_get() == "x.co"sv);
+    CHECK(req_hdr.port_get() == 8443);
+
+    req_hdr.destroy();
+  }
+}
+
+TEST_CASE("HdrHostHeaderParserAcceptsValidValues", "[proxy][hdrtest]")
+{
+  struct TestCase {
+    std::string_view value;
+    std::string_view expected_host;
+    int              expected_port;
+    bool             expected_has_port;
+  };
+
+  static const std::vector<TestCase> test_cases = {
+    {"example.com",          "example.com",      0,     false},
+    {"example.com:80",       "example.com",      80,    true },
+    {"localhost:65535",      "localhost",        65535, true },
+    {"127.0.0.1",            "127.0.0.1",        0,     false},
+    {"127.0.0.1:8080",       "127.0.0.1",        8080,  true },
+    {"[::1]",                "[::1]",            0,     false},
+    {"[::1]:443",            "[::1]",            443,   true },
+    {"[::1]:00080",          "[::1]",            80,    true },
+    {"[2001:db8::1]:8443",   "[2001:db8::1]",    8443,  true },
+    {"[fe80::1%25eth0]:444", "[fe80::1%25eth0]", 444,   true },
+    {" example.com:81 ",     "example.com",      81,    true },
+    {" [::1]:444 ",          "[::1]",            444,   true },
+  };
+
+  auto test_case = GENERATE(from_range(test_cases));
+  CAPTURE(test_case.value, test_case.expected_host, test_case.expected_port, test_case.expected_has_port);
+
+  std::string_view host;
+  int              port     = -1;
+  bool             has_port = true;
+
+  bool const valid = http_parse_host_header(test_case.value, host, port, has_port);
+
+  REQUIRE(valid);
+  CHECK(host == test_case.expected_host);
+  CHECK(port == test_case.expected_port);
+  CHECK(has_port == test_case.expected_has_port);
+}
+
+TEST_CASE("HdrHostHeaderParserRejectsInvalidValues", "[proxy][hdrtest]")
+{
+  static const std::vector<std::string_view> test_cases = {
+    ""sv,
+    "   "sv,
+    ":8080"sv,
+    "example.com:"sv,
+    "example.com:-1"sv,
+    "example.com:0"sv,
+    "example.com:65536"sv,
+    "example.com:999999"sv,
+    "example.com:http"sv,
+    "example.com:80x"sv,
+    "example.com:80:90"sv,
+    "127.0.0.1:-1"sv,
+    "127.0.0.1:80:90"sv,
+    "::1"sv,
+    "::1:443"sv,
+    "[::1"sv,
+    "[::1]:"sv,
+    "[::1]:-1"sv,
+    "[::1]:0"sv,
+    "[::1]:65536"sv,
+    "[::1]:80:90"sv,
+    "[::1]extra"sv,
+  };
+
+  auto test_case = GENERATE(from_range(test_cases));
+  CAPTURE(test_case);
+
+  std::string_view host;
+  int              port     = -1;
+  bool             has_port = true;
+
+  bool const valid = http_parse_host_header(test_case, host, port, has_port);
+
+  CHECK_FALSE(valid);
+}
+
+TEST_CASE("HdrValidatesHostHeaderOnRequestParse", "[proxy][hdrtest]")
+{
+  struct TestCase {
+    std::string_view host_header;
+    ParseResult      expected_result;
+    std::string_view expected_host;
+    int              expected_port;
+    bool             expected_port_in_header;
+  };
+
+  static const std::vector<TestCase> test_cases = {
+    {"example.com",         ParseResult::DONE,  "example.com",   0,    false},
+    {"example.com:8080",    ParseResult::DONE,  "example.com",   8080, true },
+    {"localhost",           ParseResult::DONE,  "localhost",     0,    false},
+    {"127.0.0.1",           ParseResult::DONE,  "127.0.0.1",     0,    false},
+    {"127.0.0.1:81",        ParseResult::DONE,  "127.0.0.1",     81,   true },
+    {"[::1]",               ParseResult::DONE,  "[::1]",         0,    false},
+    {"[::1]:443",           ParseResult::DONE,  "[::1]",         443,  true },
+    {"[2001:db8::1]:8443",  ParseResult::DONE,  "[2001:db8::1]", 8443, true },
+    {"test:8080:9090:1234", ParseResult::ERROR, ""sv,            0,    false},
+    {"example.com:",        ParseResult::ERROR, ""sv,            0,    false},
+    {"example.com:-1",      ParseResult::ERROR, ""sv,            0,    false},
+    {"example.com:65536",   ParseResult::ERROR, ""sv,            0,    false},
+    {"example.com:http",    ParseResult::ERROR, ""sv,            0,    false},
+    {"127.0.0.1:-1",        ParseResult::ERROR, ""sv,            0,    false},
+    {"127.0.0.1:80:90",     ParseResult::ERROR, ""sv,            0,    false},
+    {"::1",                 ParseResult::ERROR, ""sv,            0,    false},
+    {"[::1]:-1",            ParseResult::ERROR, ""sv,            0,    false},
+    {"[::1]:80:90",         ParseResult::ERROR, ""sv,            0,    false},
+    {"[::1]extra",          ParseResult::ERROR, ""sv,            0,    false},
+    {"[::1",                ParseResult::ERROR, ""sv,            0,    false},
+    {":8080",               ParseResult::ERROR, ""sv,            0,    false},
+    {"",                    ParseResult::ERROR, ""sv,            0,    false},
+  };
+
+  auto test_case = GENERATE(from_range(test_cases));
+  CAPTURE(test_case.host_header, test_case.expected_result, test_case.expected_host, test_case.expected_port,
+          test_case.expected_port_in_header);
+
+  hdrtoken_init();
+  url_init();
+  mime_init();
+  http_init();
+
+  auto parse_request = [](std::string_view host_header, HTTPHdr &req_hdr, HTTPParser &parser) {
+    std::string request = "GET / HTTP/1.1\r\nHost: " + std::string(host_header) + "\r\n\r\n";
+    const char *start   = request.data();
+    const char *end     = start + request.size();
+    ParseResult err;
+
+    do {
+      err = req_hdr.parse_req(&parser, &start, end, true);
+    } while (err == ParseResult::CONT);
+
+    return err;
+  };
+
+  HTTPHdr    req_hdr;
+  HTTPParser parser;
+
+  http_parser_init(&parser);
+  req_hdr.create(HTTPType::REQUEST);
+
+  ParseResult const err = parse_request(test_case.host_header, req_hdr, parser);
+  REQUIRE(err == test_case.expected_result);
+
+  if (err == ParseResult::DONE) {
+    CHECK(req_hdr.host_get() == test_case.expected_host);
+    CHECK(req_hdr.port_get() == test_case.expected_port);
+    CHECK(req_hdr.is_port_in_header() == test_case.expected_port_in_header);
+  }
+
+  http_parser_clear(&parser);
+  req_hdr.destroy();
+}
+
+TEST_CASE("HdrPromotesOnlyValidHostHeaderMutations", "[proxy][hdrtest]")
+{
+  struct TestCase {
+    std::string_view host_header;
+    std::string_view expected_host;
+    int              expected_port;
+    bool             expected_port_in_header;
+    bool             expected_valid;
+  };
+
+  static const std::vector<TestCase> test_cases = {
+    {"rewritten.example.com",     "rewritten.example.com", 0,    false, true },
+    {"rewritten.example.com:443", "rewritten.example.com", 443,  true,  true },
+    {"127.0.0.1:81",              "127.0.0.1",             81,   true,  true },
+    {"[::1]",                     "[::1]",                 0,    false, true },
+    {"[2001:db8::1]:8443",        "[2001:db8::1]",         8443, true,  true },
+    {"test:8080:9090:1234",       ""sv,                    0,    false, false},
+    {"example.com:",              ""sv,                    0,    false, false},
+    {"example.com:-1",            ""sv,                    0,    false, false},
+    {"127.0.0.1:-1",              ""sv,                    0,    false, false},
+    {"::1",                       ""sv,                    0,    false, false},
+    {"[::1]:-1",                  ""sv,                    0,    false, false},
+    {"[::1]:80:90",               ""sv,                    0,    false, false},
+    {"[::1]extra",                ""sv,                    0,    false, false},
+    {":8080",                     ""sv,                    0,    false, false},
+  };
+
+  auto test_case = GENERATE(from_range(test_cases));
+  CAPTURE(test_case.host_header, test_case.expected_host, test_case.expected_port, test_case.expected_port_in_header,
+          test_case.expected_valid);
+
+  hdrtoken_init();
+  url_init();
+  mime_init();
+  http_init();
+
+  static constexpr std::string_view request = "GET / HTTP/1.1\r\n"
+                                              "Host: original.example.com:8080\r\n"
+                                              "\r\n";
+
+  HTTPHdr     req_hdr;
+  HTTPParser  parser;
+  const char *start = request.data();
+  const char *end   = start + request.size();
+
+  http_parser_init(&parser);
+  req_hdr.create(HTTPType::REQUEST);
+
+  ParseResult err;
+  do {
+    err = req_hdr.parse_req(&parser, &start, end, true);
+  } while (err == ParseResult::CONT);
+
+  REQUIRE(err == ParseResult::DONE);
+
+  MIMEField *host_field = req_hdr.field_find("Host"sv);
+  REQUIRE(host_field != nullptr);
+  host_field->value_set(req_hdr.m_heap, req_hdr.m_mime, test_case.host_header);
+
+  CHECK(req_hdr.host_get() == test_case.expected_host);
+  CHECK(req_hdr.port_get() == test_case.expected_port);
+  CHECK(req_hdr.is_port_in_header() == test_case.expected_port_in_header);
+
+  req_hdr.set_url_target_from_host_field(req_hdr.url_get());
+  CHECK(req_hdr.url_get()->host_get() == test_case.expected_host);
+  CHECK(req_hdr.url_get()->port_get_raw() == test_case.expected_port);
+
+  if (!test_case.expected_valid) {
+    CHECK(req_hdr.host_get().empty());
+    CHECK(req_hdr.url_get()->host_get().empty());
+  }
+
+  http_parser_clear(&parser);
+  req_hdr.destroy();
+}
+
+// ---------------------------------------------------------------------------
+// Helpers for HTTPInfo::unmarshal frag-offset bounds-check tests.
+// Builds a minimal marshalled HTTPCacheAlt buffer.  All header-heap pointers
+// are left null so unmarshal() returns after the frag-offset check without
+// requiring a real heap.
+// ---------------------------------------------------------------------------
+static std::vector<char>
+make_marshalled_alt(int frag_offset_count, intptr_t frag_ptr_value)
+{
+  // Ensure diags are initialized so Warning() calls in unmarshal() don't crash.
+  [[maybe_unused]] static bool diags_initialized = []() {
+    if (diags() == nullptr) {
+      DiagsPtr::set(new Diags("test_hdrs", nullptr, nullptr, new BaseLogFile("stderr")));
+    }
+    return true;
+  }();
+  std::vector<char> buf(sizeof(HTTPCacheAlt) + 4096, 0);
+  auto             *alt    = reinterpret_cast<HTTPCacheAlt *>(buf.data());
+  alt->m_magic             = CacheAltMagic::MARSHALED;
+  alt->m_writeable         = 0;
+  alt->m_unmarshal_len     = -1;
+  alt->m_frag_offset_count = frag_offset_count;
+  // Store the raw offset value in the pointer field (mirrors what marshal() does).
+  *reinterpret_cast<intptr_t *>(&alt->m_frag_offsets) = frag_ptr_value;
+  return buf;
+}
+
+TEST_CASE("HTTPInfo::unmarshal frag bounds checks", "[proxy][hdrtest][unmarshal]")
+{
+  SECTION("huge frag_offset_count rejected")
+  {
+    auto buf = make_marshalled_alt(INT_MAX, 0);
+    int  len = static_cast<int>(buf.size());
+    CHECK(HTTPInfo::unmarshal(buf.data(), len, nullptr) == -1);
+  }
+
+  SECTION("negative frag_offset pointer value rejected")
+  {
+    // count > N_INTEGRAL_FRAG_OFFSETS but the stored offset is negative
+    auto buf = make_marshalled_alt(5, -1);
+    int  len = static_cast<int>(buf.size());
+    CHECK(HTTPInfo::unmarshal(buf.data(), len, nullptr) == -1);
+  }
+
+  SECTION("frag pointer near INTPTR_MAX rejected (overflow-safe check)")
+  {
+    // Without the subtraction-form check, frag_offset + frag_table_size wraps.
+    auto buf = make_marshalled_alt(5, std::numeric_limits<intptr_t>::max() - 1);
+    int  len = static_cast<int>(buf.size());
+    CHECK(HTTPInfo::unmarshal(buf.data(), len, nullptr) == -1);
+  }
+
+  SECTION("frag offset beyond orig_len rejected")
+  {
+    auto buf = make_marshalled_alt(5, 0);
+    // Set offset to one byte past the end of the buffer.
+    int  buf_len = static_cast<int>(buf.size());
+    auto buf2    = make_marshalled_alt(5, static_cast<intptr_t>(buf_len + 1));
+    CHECK(HTTPInfo::unmarshal(buf2.data(), buf_len, nullptr) == -1);
+  }
+}
+
+TEST_CASE("HTTPInfo::unmarshal_v24_1 frag bounds checks", "[proxy][hdrtest][unmarshal]")
+{
+  SECTION("huge frag_offset_count rejected")
+  {
+    auto buf = make_marshalled_alt(INT_MAX, 0);
+    int  len = static_cast<int>(buf.size());
+    CHECK(HTTPInfo::unmarshal_v24_1(buf.data(), len, nullptr) == -1);
+  }
+
+  SECTION("negative frag_offset pointer value rejected")
+  {
+    auto buf = make_marshalled_alt(5, -1);
+    int  len = static_cast<int>(buf.size());
+    CHECK(HTTPInfo::unmarshal_v24_1(buf.data(), len, nullptr) == -1);
+  }
+
+  SECTION("frag pointer near INTPTR_MAX rejected (overflow-safe check)")
+  {
+    auto buf = make_marshalled_alt(5, std::numeric_limits<intptr_t>::max() - 1);
+    int  len = static_cast<int>(buf.size());
+    CHECK(HTTPInfo::unmarshal_v24_1(buf.data(), len, nullptr) == -1);
+  }
+
+  SECTION("frag offset beyond orig_len rejected")
+  {
+    auto buf     = make_marshalled_alt(5, 0);
+    int  buf_len = static_cast<int>(buf.size());
+    auto buf2    = make_marshalled_alt(5, static_cast<intptr_t>(buf_len + 1));
+    CHECK(HTTPInfo::unmarshal_v24_1(buf2.data(), buf_len, nullptr) == -1);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Well-known string index rebuilding.
+//
+// A cached object stores indexes into the well-known string table next to the strings those
+// indexes stand for. A build whose table differs from the writer's would read those indexes as
+// different strings, so HTTPInfo::unmarshal() rebuilds them from the strings.
+//
+// There is only one table in a process, so these tests stand in for a differing table by rotating
+// every stored index and clearing the presence bits and slot accelerators derived from them, the
+// way a build that lacked some of these strings would leave them.
+// ---------------------------------------------------------------------------
+namespace
+{
+int16_t
+rotate_wks_idx(int16_t wks_idx)
+{
+  return wks_idx < 0 ? wks_idx : static_cast<int16_t>((wks_idx + 7) % hdrtoken_num_wks);
+}
+
+/// Rotate every well-known string index in one marshalled header heap.
+void
+scramble_marshalled_heap(HdrHeap *heap)
+{
+  char *obj_data = reinterpret_cast<char *>(heap) + reinterpret_cast<intptr_t>(heap->m_data_start);
+  char *heap_end = reinterpret_cast<char *>(heap) + heap->m_size;
+
+  while (obj_data < heap_end) {
+    HdrHeapObjImpl *obj = reinterpret_cast<HdrHeapObjImpl *>(obj_data);
+
+    REQUIRE(obj->m_length > 0);
+    switch (static_cast<HdrHeapObjType>(obj->m_type)) {
+    case HdrHeapObjType::URL: {
+      URLImpl *url          = reinterpret_cast<URLImpl *>(obj);
+      url->m_scheme_wks_idx = rotate_wks_idx(url->m_scheme_wks_idx);
+      break;
+    }
+    case HdrHeapObjType::HTTP_HEADER: {
+      HTTPHdrImpl *hh = reinterpret_cast<HTTPHdrImpl *>(obj);
+      if (hh->m_polarity == HTTPType::REQUEST) {
+        hh->u.req.m_method_wks_idx = rotate_wks_idx(hh->u.req.m_method_wks_idx);
+      }
+      break;
+    }
+    case HdrHeapObjType::FIELD_BLOCK: {
+      MIMEFieldBlockImpl *fblock = reinterpret_cast<MIMEFieldBlockImpl *>(obj);
+      for (uint32_t i = 0; i < fblock->m_freetop; ++i) {
+        MIMEField &field = fblock->m_field_slots[i];
+        if (field.is_live()) {
+          field.m_wks_idx = rotate_wks_idx(field.m_wks_idx);
+        }
+      }
+      break;
+    }
+    case HdrHeapObjType::MIME_HEADER: {
+      MIMEHdrImpl *mh            = reinterpret_cast<MIMEHdrImpl *>(obj);
+      mh->m_presence_bits        = MIME_PRESENCE_NONE;
+      mh->m_slot_accelerators[0] = 0xFFFFFFFF;
+      mh->m_slot_accelerators[1] = 0xFFFFFFFF;
+      mh->m_slot_accelerators[2] = 0xFFFFFFFF;
+      mh->m_slot_accelerators[3] = 0xFFFFFFFF;
+      for (uint32_t i = 0; i < mh->m_first_fblock.m_freetop; ++i) {
+        MIMEField &field = mh->m_first_fblock.m_field_slots[i];
+        if (field.is_live()) {
+          field.m_wks_idx = rotate_wks_idx(field.m_wks_idx);
+        }
+      }
+      break;
+    }
+    default:
+      break;
+    }
+    obj_data += obj->m_length;
+  }
+}
+
+void
+parse_request(HTTPHdr &hdr, std::string_view text)
+{
+  HTTPParser parser;
+
+  http_parser_init(&parser);
+  hdr.create(HTTPType::REQUEST);
+
+  char const *start = text.data();
+  char const *end   = text.data() + text.length();
+
+  REQUIRE(hdr.parse_req(&parser, &start, end, true) == ParseResult::DONE);
+  http_parser_clear(&parser);
+}
+
+void
+parse_response(HTTPHdr &hdr, std::string_view text)
+{
+  HTTPParser parser;
+
+  http_parser_init(&parser);
+  hdr.create(HTTPType::RESPONSE);
+
+  char const *start = text.data();
+  char const *end   = text.data() + text.length();
+
+  REQUIRE(hdr.parse_resp(&parser, &start, end, true) == ParseResult::DONE);
+  http_parser_clear(&parser);
+}
+
+struct BareCRLineTest {
+  std::string_view raw_line_suffix_before_lf;
+  std::string_view normalized_field;
+};
+
+static const std::vector<BareCRLineTest> bare_cr_line_tests = {
+  {"\r\r\r\r"sv, "Extra-CRs: \r\n"sv   },
+  {"\r \r"sv,    "Extra-CRs: \r\n"sv   },
+  {"\r\r \r"sv,  "Extra-CRs: \r\n"sv   },
+  {"bar\r \r"sv, "Extra-CRs: bar\r\n"sv},
+  {"\r\t\r"sv,   "Extra-CRs: \r\n"sv   },
+};
+} // anonymous namespace
+
+TEST_CASE("HTTPHdrImpl::recompute_wks_indices rebuilds from the stored strings", "[proxy][hdrtest][wks]")
+{
+  HTTPHdr req;
+  parse_request(req, "GET /a HTTP/1.1\r\nHost: example.com\r\nCache-Control: no-cache\r\nAccept: */*\r\n\r\n"sv);
+  req.url_get()->scheme_set(static_cast<std::string_view>(URL_SCHEME_HTTP));
+
+  // Everything the header derives from the table is now wrong, as it would be had it come from a
+  // build whose table differed.
+  req.m_http->u.req.m_method_wks_idx             = rotate_wks_idx(req.m_http->u.req.m_method_wks_idx);
+  req.m_http->u.req.m_url_impl->m_scheme_wks_idx = rotate_wks_idx(req.m_http->u.req.m_url_impl->m_scheme_wks_idx);
+  req.m_mime->m_presence_bits                    = MIME_PRESENCE_NONE;
+  for (MIMEFieldBlockImpl *fblock = &req.m_mime->m_first_fblock; fblock != nullptr; fblock = fblock->m_next) {
+    for (uint32_t i = 0; i < fblock->m_freetop; ++i) {
+      MIMEField &field = fblock->m_field_slots[i];
+      if (field.is_live()) {
+        field.m_wks_idx = rotate_wks_idx(field.m_wks_idx);
+      }
+    }
+  }
+  CHECK(req.method_get() != "GET"sv);
+  CHECK(req.presence(MIME_PRESENCE_CACHE_CONTROL) == 0);
+
+  req.m_http->recompute_wks_indices();
+
+  CHECK(req.method_get() == "GET"sv);
+  CHECK(req.method_get_wksidx() == HTTP_WKSIDX_GET);
+  CHECK(req.url_get()->scheme_get() == static_cast<std::string_view>(URL_SCHEME_HTTP));
+  CHECK(req.presence(MIME_PRESENCE_CACHE_CONTROL) != 0);
+  CHECK(req.value_get(static_cast<std::string_view>(MIME_FIELD_CACHE_CONTROL)) == "no-cache"sv);
+  CHECK(req.value_get(static_cast<std::string_view>(MIME_FIELD_HOST)) == "example.com"sv);
+
+  req.destroy();
+}
+
+TEST_CASE("HTTPInfo::unmarshal rebuilds well-known string indices", "[proxy][hdrtest][wks]")
+{
+  HTTPHdr req;
+  HTTPHdr resp;
+
+  parse_request(req, "GET /a HTTP/1.1\r\nHost: example.com\r\nAccept-Encoding: gzip\r\n\r\n"sv);
+  req.url_get()->scheme_set(static_cast<std::string_view>(URL_SCHEME_HTTP));
+  parse_response(resp,
+                 "HTTP/1.1 200 OK\r\nCache-Control: max-age=300\r\nContent-Type: text/plain\r\nVary: Accept-Encoding\r\n\r\n"sv);
+
+  HTTPInfo info;
+  info.create();
+  info.request_set(&req);
+  info.response_set(&resp);
+
+  int const len = info.marshal_length();
+  // uint64_t elements so the buffer meets the alignment marshal() asserts on.
+  std::vector<uint64_t> storage((len + sizeof(uint64_t) - 1) / sizeof(uint64_t), 0);
+  char *const           buf = reinterpret_cast<char *>(storage.data());
+
+  REQUIRE(info.marshal(buf, len) <= len);
+
+  HTTPCacheAlt *marshalled = reinterpret_cast<HTTPCacheAlt *>(buf);
+  REQUIRE(marshalled->m_request_hdr.m_heap != nullptr);
+  REQUIRE(marshalled->m_response_hdr.m_heap != nullptr);
+  scramble_marshalled_heap(reinterpret_cast<HdrHeap *>(buf + reinterpret_cast<intptr_t>(marshalled->m_request_hdr.m_heap)));
+  scramble_marshalled_heap(reinterpret_cast<HdrHeap *>(buf + reinterpret_cast<intptr_t>(marshalled->m_response_hdr.m_heap)));
+
+  // The synthetic writer used a different table, so its identity must differ too.
+  uint64_t const other_identity = 0;
+  memcpy(buf + len - sizeof(other_identity), &other_identity, sizeof(other_identity));
+  REQUIRE(HTTPInfo::unmarshal(buf, len, nullptr) == len);
+
+  HTTPInfo got;
+  REQUIRE(got.get_handle(buf, len) > 0);
+
+  HTTPHdr *got_req  = got.request_get();
+  HTTPHdr *got_resp = got.response_get();
+
+  CHECK(got_req->method_get() == "GET"sv);
+  CHECK(got_req->method_get_wksidx() == HTTP_WKSIDX_GET);
+  CHECK(got_req->url_get()->scheme_get() == static_cast<std::string_view>(URL_SCHEME_HTTP));
+  CHECK(got_req->value_get(static_cast<std::string_view>(MIME_FIELD_ACCEPT_ENCODING)) == "gzip"sv);
+  CHECK(got_req->presence(MIME_PRESENCE_HOST) != 0);
+
+  CHECK(got_resp->value_get(static_cast<std::string_view>(MIME_FIELD_CACHE_CONTROL)) == "max-age=300"sv);
+  CHECK(got_resp->value_get(static_cast<std::string_view>(MIME_FIELD_VARY)) == "Accept-Encoding"sv);
+  CHECK(got_resp->presence(MIME_PRESENCE_CACHE_CONTROL) != 0);
+  CHECK(got_resp->presence(MIME_PRESENCE_VARY) != 0);
+  // The cooked Cache-Control cache is keyed by directive name, so it survives independently, but
+  // it has to still agree with the rebuilt indices.
+  CHECK(got_resp->get_cooked_cc_mask() & MIME_COOKED_MASK_CC_MAX_AGE);
+  CHECK(got_resp->get_cooked_cc_max_age() == 300);
+
+  info.destroy();
+  req.destroy();
+  resp.destroy();
+}
+
+TEST_CASE("http_parse_status overflow protection", "[proxy][hdrtest]")
+{
+  SECTION("valid 3-digit status codes")
+  {
+    std::string_view s200 = "200";
+    CHECK(http_parse_status(s200.data(), s200.data() + s200.size()) == static_cast<HTTPStatus>(200));
+
+    std::string_view s404 = "404";
+    CHECK(http_parse_status(s404.data(), s404.data() + s404.size()) == static_cast<HTTPStatus>(404));
+
+    std::string_view s999 = "999";
+    CHECK(http_parse_status(s999.data(), s999.data() + s999.size()) == static_cast<HTTPStatus>(999));
+  }
+
+  SECTION("4-digit status returns NONE")
+  {
+    std::string_view s1000 = "1000";
+    CHECK(http_parse_status(s1000.data(), s1000.data() + s1000.size()) == HTTPStatus::NONE);
+
+    std::string_view s9999 = "9999";
+    CHECK(http_parse_status(s9999.data(), s9999.data() + s9999.size()) == HTTPStatus::NONE);
+  }
+
+  SECTION("very long digit sequence returns NONE")
+  {
+    std::string s_long = "99999999999999999999";
+    CHECK(http_parse_status(s_long.data(), s_long.data() + s_long.size()) == HTTPStatus::NONE);
+  }
+
+  SECTION("empty and zero")
+  {
+    std::string_view empty = "";
+    CHECK(http_parse_status(empty.data(), empty.data()) == HTTPStatus::NONE);
+
+    std::string_view zero = "0";
+    CHECK(http_parse_status(zero.data(), zero.data() + zero.size()) == static_cast<HTTPStatus>(0));
+  }
+
+  SECTION("leading spaces are skipped")
+  {
+    std::string_view s = "  200";
+    CHECK(http_parse_status(s.data(), s.data() + s.size()) == static_cast<HTTPStatus>(200));
+  }
+
+  SECTION("high-bit bytes are rejected without UB")
+  {
+    char buf[] = {'\xff', '\xff', '\xff'};
+    CHECK(http_parse_status(buf, buf + sizeof(buf)) == static_cast<HTTPStatus>(0));
+  }
+}
+
+TEST_CASE("HTTP parser tolerates high-bit bytes without UB", "[proxy][hdrtest]")
+{
+  struct Test {
+    std::string_view msg;
+    ParseResult      expected_result;
+  };
+
+  static const std::vector<Test> tests = {
+    {"GET /x HTTP/\xff.0\r\n\r\n"sv, ParseResult::ERROR},
+    {"GET /x HTTP/1.\xff\r\n\r\n"sv, ParseResult::ERROR},
+    {"GET /\xff HTTP/1.0\r\n\r\n"sv, ParseResult::DONE },
+  };
+
+  auto test = GENERATE(from_range(tests));
+  CAPTURE(test.expected_result);
+
+  HTTPParser parser;
+  http_parser_init(&parser);
+
+  HTTPHdr  req_hdr;
+  HdrHeap *heap = new_HdrHeap(HdrHeap::DEFAULT_SIZE + 64);
+
+  req_hdr.create(HTTPType::REQUEST, HTTP_1_1, heap);
+
+  auto start = test.msg.data();
+  auto ret   = req_hdr.parse_req(&parser, &start, test.msg.data() + test.msg.size(), true);
+
+  CHECK(ret == test.expected_result);
+
+  req_hdr.destroy();
+}
+
+TEST_CASE("HTTP request parser normalizes bare carriage returns in header line endings", "[proxy][hdrtest]")
+{
+  // Four CRs followed by LF recreate #12195. This gives a pad of 7, the largest the
+  // 3-bit field allows, so raw copying is still eligible. With five or more CRs, the
+  // pad limit alone forces a rebuild; the smaller cases below test the parser check.
+  auto test = GENERATE(from_range(bare_cr_line_tests));
+  CAPTURE(test.raw_line_suffix_before_lf);
+
+  std::string message  = "GET / HTTP/1.1\r\nHost: example.com\r\nExtra-CRs: ";
+  message             += test.raw_line_suffix_before_lf;
+  message             += '\n';
+  message             += "\r\n";
+
+  HTTPParser parser;
+  http_parser_init(&parser);
+
+  HTTPHdr  req_hdr;
+  HdrHeap *heap = new_HdrHeap(HdrHeap::DEFAULT_SIZE + 64);
+  req_hdr.create(HTTPType::REQUEST, HTTP_1_1, heap);
+
+  const char *start = message.data();
+  REQUIRE(req_hdr.parse_req(&parser, &start, message.data() + message.size(), true) == ParseResult::DONE);
+
+  std::string serialized(static_cast<size_t>(req_hdr.length_get()), '\0');
+  int         index  = 0;
+  int         offset = 0;
+  req_hdr.print(serialized.data(), static_cast<int>(serialized.size()), &index, &offset);
+  serialized.resize(static_cast<size_t>(index));
+
+  CHECK(serialized.find(test.normalized_field) != std::string::npos);
+  std::string raw_field  = "Extra-CRs: ";
+  raw_field             += test.raw_line_suffix_before_lf;
+  raw_field             += '\n';
+  CHECK(serialized.find(raw_field) == std::string::npos);
+
+  req_hdr.destroy();
+}
+
+TEST_CASE("HTTP response parser normalizes bare carriage returns in header line endings", "[proxy][hdrtest]")
+{
+  auto test = GENERATE(from_range(bare_cr_line_tests));
+  CAPTURE(test.raw_line_suffix_before_lf);
+  std::string message  = "HTTP/1.1 200 OK\r\nExtra-CRs: ";
+  message             += test.raw_line_suffix_before_lf;
+  message             += '\n';
+  message             += "\r\n";
+
+  HTTPParser parser;
+  http_parser_init(&parser);
+
+  HTTPHdr  resp_hdr;
+  HdrHeap *heap = new_HdrHeap(HdrHeap::DEFAULT_SIZE + 64);
+  resp_hdr.create(HTTPType::RESPONSE, HTTP_1_1, heap);
+
+  const char *start = message.data();
+  REQUIRE(resp_hdr.parse_resp(&parser, &start, message.data() + message.size(), true) == ParseResult::DONE);
+
+  std::string serialized(static_cast<size_t>(resp_hdr.length_get()), '\0');
+  int         index  = 0;
+  int         offset = 0;
+  resp_hdr.print(serialized.data(), static_cast<int>(serialized.size()), &index, &offset);
+  serialized.resize(static_cast<size_t>(index));
+
+  CHECK(serialized.find(test.normalized_field) != std::string::npos);
+  std::string raw_field  = "Extra-CRs: ";
+  raw_field             += test.raw_line_suffix_before_lf;
+  raw_field             += '\n';
+  CHECK(serialized.find(raw_field) == std::string::npos);
+
+  resp_hdr.destroy();
+}
+
+TEST_CASE("HTTP response parser tolerates high-bit bytes without UB", "[proxy][hdrtest]")
+{
+  struct Test {
+    std::string_view msg;
+    ParseResult      expected_result;
+  };
+
+  static const std::vector<Test> tests = {
+    {"HTTP/\xff.0 200 OK\r\n\r\n"sv,       ParseResult::ERROR},
+    {"HTTP/1.\xff 200 OK\r\n\r\n"sv,       ParseResult::ERROR},
+    {"HTTP/1.0 \xff\xff\xff OK\r\n\r\n"sv, ParseResult::DONE },
+  };
+
+  auto test = GENERATE(from_range(tests));
+  CAPTURE(test.expected_result);
+
+  HTTPParser parser;
+  http_parser_init(&parser);
+
+  HTTPHdr  resp_hdr;
+  HdrHeap *heap = new_HdrHeap(HdrHeap::DEFAULT_SIZE + 64);
+
+  resp_hdr.create(HTTPType::RESPONSE, HTTP_1_1, heap);
+
+  auto start = test.msg.data();
+  auto ret   = resp_hdr.parse_resp(&parser, &start, test.msg.data() + test.msg.size(), true);
+
+  CHECK(ret == test.expected_result);
+
+  resp_hdr.destroy();
+}

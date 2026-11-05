@@ -9,25 +9,18 @@ For complete installation documentation, see the on-line documentation at
 Various popular platforms have up-to-date build instructions available
 online, at
 
-    https://cwiki.apache.org/confluence/display/TS/Building
+    https://docs.trafficserver.apache.org/en/latest/admin-guide/installation/index.en.html
 
 
 BUILD AND INSTALLATION
 ----------------------
 
-Configure & Build from Git source tree:
-    $ autoreconf -if  # generate the configure script and Makefile.in files
-
-On Linux and macOS:
-    $ ./configure [--prefix=PREFIX]
-    $ make
-
-On OpenSolaris and FreeBSD:
-    $ ./configure [--prefix=PREFIX]
-    $ gmake
+On Linux, macOS and FreeBSD:
+    $ cmake -B build [-DCMAKE_INSTALL_PREFIX=PREFIX]
+    $ cmake --build build
 
 To install:
-    $ sudo make install
+    $ sudo cmake --install build
 
 * Building on FreeBSD requires GNU make. This is the preferred make
   on all platforms.
@@ -42,18 +35,17 @@ To install:
   the layout name you have created.
 
 * The easiest way to find all of the configuration flags
-  for Traffic Server is to run ./configure --help.
+  for Traffic Server is to run `ccmake build`
 
 
 By default the build will use the highest level of compiler
-optimization. To alter this, specify your own optimizer flags at
-configuration time:
+optimization. To alter this, specify the Release build type:
 
-    $ ./configure CXXFLAGS=-Os CFLAGS=-Os
+    $ cmake -B build -DCMAKE_BUILD_TYPE=Release
 
 To compile with an alternate set of compilers, e.g. LLVM/Clang
 
-    $ ./configure CC=clang CXX=clang++
+    $ cmake -B build CC=clang CXX=clang++
 
 
 To start the Traffic Server process stack (TC, TM, TS):
@@ -66,9 +58,15 @@ INSTALLATION HELP
 The Apache Traffic Server group cannot field user's installation
 questions.  There are many valuable forums to help you get started.
 Please refer your questions to the appropriate forum, such as the
-Users Mailing List at
+users mailing list at users@trafficserver.apache.org. To join it, send
+an empty email to users-subscribe@trafficserver.apache.org. The list
+archive is at
 
-    https://cwiki.apache.org/confluence/display/TS/Apache+Traffic+Server
+    https://lists.apache.org/list.html?users@trafficserver.apache.org
+
+and how ASF mailing lists work is described at
+
+    https://www.apache.org/foundation/mailinglists.html
 
 Thanks for using the Apache Traffic Server.
 

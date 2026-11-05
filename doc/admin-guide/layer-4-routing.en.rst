@@ -16,7 +16,7 @@
    under the License.
 
 .. include:: ../common.defs
-.. default-domain:: c
+.. default-domain:: cpp
 .. _layer-4-routing:
 
 Layer 4 Routing
@@ -28,7 +28,7 @@ accomplished by examining the initial data from the inbound connection to decide
 destination. The initial data is then sent to the destination and subsequently |TS| forwards all
 data read on one connection to the other and vice versa.
 
-.. figure:: ../uml/images/l4-basic-sequence.svg
+.. uml:: ../uml/l4-basic-sequence.uml
    :align: center
 
 In this way it acts similarly to `nc <https://linux.die.net/man/1/nc>`__.
@@ -62,8 +62,8 @@ request to itself with the ``tunnel_route`` host and port as the upstream. That 
 connection is treated as if the user agent had sent a
 ``CONNECT`` to the upstream and forwards the "`CLIENT HELLO
 <https://tools.ietf.org/html/rfc5246#section-7.4.1.2>`__" to it. In addition to the method appearing
-as ``CONNECT``, be aware that logs printing the URL via the ``<%cquc>`` field format will show the
-scheme in the URL as ``tunnel``. The scheme as printed via ``<%cqus>``, however, will show the
+as ``CONNECT``, be aware that logs printing the URL via the ``<%pquc>`` field format will show the
+scheme in the URL as ``tunnel``. The scheme as printed via ``<%pqus>``, however, will show the
 scheme used in the original client request.
 
 Example
@@ -81,11 +81,9 @@ services.
 
 The basic set up is therefore
 
-.. figure:: ../uml/images/l4-example-cdn-layout.svg
+.. uml:: ../uml/l4-example-cdn-layout.uml
    :align: center
-
-   A Client connects to an edge |TS| which forwards the connection to the internal Service.
-   The Client then negotiates TLS with the Service.
+   :caption: A Client connects to an edge |TS| which forwards the connection to the internal Service. The Client then negotiates TLS with the Service.
 
 
 For the example, let us define two services inside the corporate network of Example, Inc.
@@ -111,22 +109,31 @@ The :file:`sni.yaml` contents would be
    - tunnel_route: app-server-56:4443
      fqdn: service-2.example.com
 
-In addition to this, in the :file:`records.config` file, edit ``connect_ports`` like so:
+In addition to this, in the :file:`records.yaml` file, edit ``connect_ports`` like so:
 
    -  :ts:cv:`proxy.config.http.connect_ports`: ``443 4443`` to allow |TS| to connect
       to the destination port
 
+If the route target resolves to an unspecified, loopback, private, link-local, or IPv4-mapped IPv6
+address, the default :file:`ip_allow.yaml` outbound policy will deny the synthesized ``CONNECT``.
+Add an explicit ``apply: out`` allow rule for the intended destination before the default deny rule.
+
+``forward_route`` and ``partial_blind_route`` do not blind tunnel the original TLS session, but
+their upstream destinations are also subject to outbound :file:`ip_allow.yaml` policy before |TS|
+opens the connection. Configure explicit outbound policy for intentional local or private layer-4
+routes.
+
 The sequence of network activity for a Client connecting to ``service-2`` is
 
-.. figure:: ../uml/images/l4-sni-routing-seq.svg
+.. uml:: ../uml/l4-sni-routing-seq.uml
    :align: center
 
 Note the destination for the outbound TCP connection and the HTTP ``CONNECT`` is the same. If this
 is a problem (which it will be in general) a plugin is needed to change the URL in the ``CONNECT``.
-In this case the proxy request is available in the :c:macro:`TS_HTTP_TXN_START_HOOK` hook. This
+In this case the proxy request is available in the :enumerator:`TS_HTTP_TXN_START_HOOK` hook. This
 cannot be done using remap because for a ``CONNECT`` there is no remap phase. Note that for a
 tunneled connection like this, the only transaction hooks that will be triggered are
-:c:macro:`TS_HTTP_TXN_START_HOOK` and :c:macro:`TS_HTTP_TXN_CLOSE_HOOK`. In addition, because |TS|
+:enumerator:`TS_HTTP_TXN_START_HOOK` and :enumerator:`TS_HTTP_TXN_CLOSE_HOOK`. In addition, because |TS|
 does not terminate (and therefore does not decrypt) the connection, it cannot be cached or served from
 cache.
 
@@ -138,7 +145,7 @@ Pre-warming TLS Tunnel
 Pre-warming TLS Tunnel reduces the latency of TLS connections (``forward_route`` and ``partial_blind_route`` type SNI
 Routing). When this feature is enabled, each ET_NET thread makes TLS connections pool per routing type, SNI, and ALPN.
 
-.. figure:: ../uml/images/l4-pre-warming-overview.svg
+.. uml:: ../uml/l4-pre-warming-overview.uml
    :align: center
 
 Stats for connection pools are registered dynamically on start up. Details in :ref:`pre-warming-tls-tunnel-stats`.

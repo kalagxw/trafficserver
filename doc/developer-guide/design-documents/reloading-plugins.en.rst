@@ -16,7 +16,7 @@
    under the License.
 
 .. include:: ../../common.defs
-
+.. default-domain:: cpp
 .. _developer-plugins-reloading-plugins:
 
 Reloading Plugins
@@ -30,7 +30,7 @@ configuration reload, i.e.::
 
   traffic_ctl config reload
 
-This feature is enabled by default. It can be turned off by setting the configuration variable :ts:cv:`proxy.config.plugin.dynamic_reload_mode` to ``0`` in :file:`records.config`. When the feature is turned off, once ATS is started one will be able load only one version of a plugin, and re-loading the same plugin would do nothing.
+This feature is enabled by default. It can be turned off by setting the configuration variable :ts:cv:`proxy.config.plugin.dynamic_reload_mode` to ``0`` in :file:`records.yaml`. When the feature is turned off, once ATS is started one will be able load only one version of a plugin, and re-loading the same plugin would do nothing.
 
 Although plugin reloading should be transparent to plugin developers, the following are some design considerations
 and implementation details for this feature.
@@ -101,9 +101,9 @@ event handling functions of continuations created by the plugin code.
 The plugin reload mechanism should guarantee that all necessary plugin DSOs are still loaded when those calls
 are performed.
 
-Those continuations are created by :c:func:`TSContCreate` and :c:func:`TSVConnCreate` and
-could be used for registering hooks (i.e. registered by :c:func:`TSHttpHookAdd`) or for
-scheduling events in the future (i.e. :c:func:`TSContScheduleOnPool`).
+Those continuations are created by :func:`TSContCreate` and :func:`TSVConnCreate` and
+could be used for registering hooks (i.e. registered by :func:`TSHttpHookAdd`) or for
+scheduling events in the future (i.e. :func:`TSContScheduleOnPool`).
 
 Registering hooks always requires creating continuations from inside the plugin code and a separate
 instrumentation around handling of hooks is not necessary.
@@ -135,10 +135,10 @@ TSUserArgs
 can be used by plugins to store information. To avoid collisions between plugins a plugin should first
 *reserve* an index in the array.
 
-Since :c:func:`TSUserArgIndexReserve` is meant to be called during plugin initialization we could end up
+Since :func:`TSUserArgIndexReserve` is meant to be called during plugin initialization we could end up
 "leaking" indices during plugin reload. Hence it is necessary to make sure only one index is allocated per
-"plugin identifying name", current :c:func:`TSUserArgIndexNameLookup` and
-:c:func:`TSUserArgIndexLookup` implementation assumes 1-1 index-to-name relationship as well.
+"plugin identifying name", current :func:`TSUserArgIndexNameLookup` and
+:func:`TSUserArgIndexLookup` implementation assumes 1-1 index-to-name relationship as well.
 
 
 PluginFactory

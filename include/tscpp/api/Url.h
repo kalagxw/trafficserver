@@ -19,10 +19,13 @@
  * @file Url.h
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include <string>
 #include <cstdint>
+#include <memory>
 #include "tscpp/api/noncopyable.h"
 
 namespace atscppapi
@@ -125,9 +128,9 @@ public:
   void setPort(const uint16_t);
 
 private:
-  bool isInitialized() const;
-  void init(void *hdr_buf, void *url_loc);
-  UrlState *state_;
+  bool                      isInitialized() const;
+  void                      init(void *hdr_buf, void *url_loc);
+  std::unique_ptr<UrlState> state_;
   friend class Request;
   friend class ClientRequest;
   friend class RemapPlugin;

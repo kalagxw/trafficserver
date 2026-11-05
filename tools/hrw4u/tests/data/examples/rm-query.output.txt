@@ -1,0 +1,4 @@
+cond %{REMAP_PSEUDO_HOOK} [AND]
+    rm-destination QUERY
+    rm-destination QUERY "foo,bar"
+    rm-destination QUERY "foo,bar" [I]

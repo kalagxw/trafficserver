@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -23,31 +23,19 @@
 
 #include "tscore/ink_platform.h"
 #include "tscore/ink_args.h"
-#include "tscore/I_Version.h"
-#include "mgmtapi.h"
+#include "tscore/Version.h"
 #include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <string_view>
-#include "tscore/Regex.h"
-
-/// XXX Use DFA or Regex wrappers?
-#ifdef HAVE_PCRE_PCRE_H
-#include <pcre/pcre.h>
-#else
-#include <pcre.h>
-#endif
-
-#define SUBSTRING_VECTOR_COUNT 30 // Should be multiple of 3
-
-static AppVersionInfo appVersionInfo;
+#include "tsutil/Regex.h"
 
 struct VIA {
   VIA(const char *t) : title(t) {}
   ~VIA() { delete next; }
   const char *title;
   const char *viaData[128] = {}; // zero initialize
-  VIA *next                = nullptr;
+  VIA        *next         = nullptr;
 };
 
 // Function to get via header table for every field/category in the via header
@@ -106,7 +94,7 @@ detailViaLookup(char flag)
     break;
   default:
     viaTable = nullptr;
-    fprintf(stderr, "%s: %s: %c\n", appVersionInfo.AppStr, "Invalid VIA header character", flag);
+    fprintf(stderr, "%s: %s: %c\n", AppVersionInfo::get_version().application(), "Invalid VIA header character", flag);
     break;
   }
 
@@ -136,6 +124,7 @@ standardViaLookup(char flag)
     viaTable->viaData[static_cast<unsigned char>('H')] = "in cache, fresh (a cache \"HIT\")";
     viaTable->viaData[static_cast<unsigned char>('S')] = "in cache, stale (a cache \"MISS\")";
     viaTable->viaData[static_cast<unsigned char>('R')] = "in cache, fresh Ram hit (a cache \"HIT\")";
+    viaTable->viaData[static_cast<unsigned char>('W')] = "in cache, fresh Read While Write (a cache \"HIT\")";
     viaTable->viaData[static_cast<unsigned char>('M')] = "miss (a cache \"MISS\")";
     viaTable->viaData[static_cast<unsigned char>(' ')] = "no cache lookup";
     break;
@@ -177,7 +166,7 @@ standardViaLookup(char flag)
     break;
   default:
     viaTable = nullptr;
-    fprintf(stderr, "%s: %s: %c\n", appVersionInfo.AppStr, "Invalid VIA header character", flag);
+    fprintf(stderr, "%s: %s: %c\n", AppVersionInfo::get_version().application(), "Invalid VIA header character", flag);
     break;
   }
 
@@ -219,7 +208,7 @@ printViaHeader(std::string_view header)
 }
 
 // Check validity of via header and then decode it
-static TSMgmtError
+static bool
 decodeViaHeader(std::string_view text)
 {
   // Via header inside square brackets
@@ -228,7 +217,7 @@ decodeViaHeader(std::string_view text)
     text.remove_suffix(1);
   }
   if (text.empty()) {
-    return TS_ERR_FAIL;
+    return false;
   }
 
   printf("Via header is [%.*s], Length is %zu\n", int(text.size()), text.data(), text.size());
@@ -243,72 +232,54 @@ decodeViaHeader(std::string_view text)
   if (text.size() == 22 || text.size() == 6) {
     // Decode via header
     printViaHeader(text);
-    return TS_ERR_OKAY;
+    return true;
   }
   // Invalid header size, come out.
   printf("\nInvalid VIA header. VIA header length should be 6 or 22 characters\n");
   printf("Valid via header format is "
          "[u<client-stuff>c<cache-lookup-stuff>s<server-stuff>f<cache-fill-stuff>p<proxy-stuff>e<error-codes>:t<tunneling-info>c<"
          "cache type><cache-lookup-result>p<parent-proxy-conn-info>s<server-conn-info>]\n");
-  return TS_ERR_FAIL;
+  return false;
 }
 
 // Read user input from stdin
-static TSMgmtError
+static bool
 filterViaHeader()
 {
-  const pcre *compiledReg;
-  const pcre_extra *extraReg = nullptr;
-  int subStringVector[SUBSTRING_VECTOR_COUNT];
-  const char *err;
-  int errOffset;
-  int pcreExecCode;
-  int i;
-  const char *viaPattern =
-    R"(\[([ucsfpe]+[^\]]+)\])"; // Regex to match via header with in [] which can start with character class ucsfpe
-  std::string line;
-
-  // Compile PCRE via header pattern
-  compiledReg = pcre_compile(viaPattern, 0, &err, &errOffset, nullptr);
-
-  if (compiledReg == nullptr) {
-    printf("PCRE regex compilation failed with error %s at offset %d\n", err, errOffset);
-    return TS_ERR_FAIL;
+  // Regex to match the via header format
+  Regex                             regex;
+  static constexpr std::string_view via_pattern{R"(\[([ucsfpe]+[^\]]+)\])"};
+  if (regex.compile(via_pattern) == false) {
+    fprintf(stderr, "Error compiling regex pattern: %s\n", via_pattern.data());
+    return false;
   }
 
   // Read all lines from stdin
+  std::string line;
   while (std::getline(std::cin, line)) {
-    // Match for via header pattern
-    pcreExecCode = pcre_exec(compiledReg, extraReg, line.data(), line.size(), 0, 0, subStringVector, SUBSTRING_VECTOR_COUNT);
-
-    // Match failed, don't worry. Continue to next line.
-    if (pcreExecCode < 0) {
+    // Match the regex against the line
+    RegexMatches matches;
+    if (regex.exec(line, matches) < 0) {
+      // If no match found, continue to next line
       continue;
     }
 
-    // Match successful, but too many substrings
-    if (pcreExecCode == 0) {
-      pcreExecCode = SUBSTRING_VECTOR_COUNT / 3;
-      printf("Too many substrings were found. %d substrings couldn't fit into subStringVector\n", pcreExecCode - 1);
-    }
-
-    // Loop based on number of matches found
-    for (i = 1; i < pcreExecCode; i++) {
-      std::string_view match{line.data() + subStringVector[2 * i], size_t(subStringVector[2 * i + 1] - subStringVector[2 * i])};
-      // Decode matched substring
-      decodeViaHeader(match);
+    // If match found, decode the via header
+    for (int i = 1; i < matches.size(); ++i) {
+      // Decode the via header
+      decodeViaHeader(matches[i]);
     }
   }
-  return TS_ERR_OKAY;
+  return true;
 }
 
 int
 main(int /* argc ATS_UNUSED */, const char **argv)
 {
-  TSMgmtError status;
+  bool opStatus;
 
   // build the application information structure
-  appVersionInfo.setup(PACKAGE_NAME, "traffic_via", PACKAGE_VERSION, __DATE__, __TIME__, BUILD_MACHINE, BUILD_PERSON, "");
+  auto &version = AppVersionInfo::setup_version("traffic_via");
 
   /* see 'ink_args.h' for meanings of the various fields */
   ArgumentDescription argument_descriptions[] = {
@@ -316,17 +287,17 @@ main(int /* argc ATS_UNUSED */, const char **argv)
     HELP_ARGUMENT_DESCRIPTION(),
   };
 
-  process_args(&appVersionInfo, argument_descriptions, countof(argument_descriptions), argv);
+  process_args(&version, argument_descriptions, countof(argument_descriptions), argv);
 
   for (unsigned i = 0; i < n_file_arguments; ++i) {
     if (strcmp(file_arguments[i], "-") == 0) {
       // Filter arguments provided from stdin
-      status = filterViaHeader();
+      opStatus = filterViaHeader();
     } else {
-      status = decodeViaHeader(std::string_view{file_arguments[i], strlen(file_arguments[i])});
+      opStatus = decodeViaHeader(std::string_view{file_arguments[i], strlen(file_arguments[i])});
     }
 
-    if (status != TS_ERR_OKAY) {
+    if (!opStatus) {
       return 1;
     }
   }

@@ -16,6 +16,7 @@
    under the License.
 
 .. include:: ../../common.defs
+.. default-domain:: cpp
 
 .. _developer-plugins-interfaces:
 
@@ -61,17 +62,17 @@ corresponding usage of the ``fopen`` family of functions is
 inappropriate due to file descriptor and portability limitations. The
 ``TSfopen`` family of functions consists of the following:
 
--  :c:func:`TSfclose`
+-  :func:`TSfclose`
 
--  :c:func:`TSfflush`
+-  :func:`TSfflush`
 
--  :c:func:`TSfgets`
+-  :func:`TSfgets`
 
--  :c:func:`TSfopen`
+-  :func:`TSfopen`
 
--  :c:func:`TSfread`
+-  :func:`TSfread`
 
--  :c:func:`TSfwrite`
+-  :func:`TSfwrite`
 
 Memory Allocation
 =================
@@ -84,7 +85,7 @@ example, ``TSrealloc`` behaves like the C library routine ``realloc``.
 There are two main reasons for using the routines provided by Traffic
 Server. The first is portability: the Traffic Server API routines behave
 the same on all of Traffic Server's supported platforms. For example,
-``realloc`` does not accept an argument of ``NULL`` on some platforms.
+``realloc`` does not accept an argument of ``nullptr`` on some platforms.
 The second reason is that the Traffic Server routines actually track the
 memory allocations by file and line number. This tracking is very
 efficient, always turned on, and quite useful when tracking down memory
@@ -92,17 +93,17 @@ leaks.
 
 The memory allocation functions are:
 
--  :c:func:`TSfree`
+-  :func:`TSfree`
 
--  :c:func:`TSmalloc`
+-  :func:`TSmalloc`
 
--  :c:func:`TSrealloc`
+-  :func:`TSrealloc`
 
--  :c:func:`TSstrdup`
+-  :func:`TSstrdup`
 
--  :c:func:`TSstrndup`
+-  :func:`TSstrndup`
 
-Thread Functions
+Thrd Functions
 ================
 
 The Traffic Server API thread functions enable you to create, destroy,
@@ -114,30 +115,29 @@ shared resources and data using the ``TSMutex`` type, as described in
 
 The thread functions are listed below:
 
--  :c:func:`TSThreadCreate`
--  :c:func:`TSThreadDestroy`
--  :c:func:`TSThreadInit`
--  :c:func:`TSThreadSelf`
+-  :func:`TSThreadCreate`
+-  :func:`TSThreadDestroy`
+-  :func:`TSThreadInit`
+-  :func:`TSThreadSelf`
 
 Debugging Functions
 ===================
 
--  :c:func:`TSDbg`
-   (replaces deprecated :c:func:`TSDebug`) prints out a formatted
-   statement if you are running Traffic Server in debug mode.
+-  :func:`Dbg`
+   prints out a formatted statement if you are
+   running Traffic Server in debug mode.
 
--  :c:func:`TSIsDbgCtlSet`
-   (replaces deprecated :c:func:`TSIsDebugTagSet`)
+-  :func:`DbgCtl::on`
    checks to see if a debug control (associated with a debug tag) is
    set. If the debug tag is set, then Traffic Server prints out all
    debug statements associated with the control.
 
--  :c:func:`TSError`
+-  :func:`TSError`
    prints error messages to Traffic Server's error log
 
--  :c:func:`TSAssert`
+-  :c:macro:`TSAssert`
    enables the use of assertion in a plugin.
 
--  :c:func:`TSReleaseAssert`
+-  :c:macro:`TSReleaseAssert`
    enables the use of assertion in a plugin.
 

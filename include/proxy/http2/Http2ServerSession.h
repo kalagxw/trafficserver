@@ -1,0 +1,120 @@
+/** @file
+
+  Http2ServerSession.
+
+  @par License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+
+#pragma once
+
+#include "proxy/Plugin.h"
+#include "proxy/http2/Http2CommonSession.h"
+#include <string_view>
+#include "tscore/ink_inet.h"
+#include "tscore/History.h"
+#include "proxy/Milestones.h"
+#include "proxy/PoolableSession.h"
+
+class Http2ServerSession : public PoolableSession, public Http2CommonSession
+{
+public:
+  using super          = PoolableSession; ///< Parent type.
+  using SessionHandler = int (Http2ServerSession::*)(int, void *);
+
+  Http2ServerSession();
+
+  /////////////////////
+  // Methods
+
+  // Implement VConnection interface
+  void do_io_close(int lerrno = -1) override;
+
+  // Implement ProxySession interface
+  void              new_connection(NetVConnection *new_vc, MIOBuffer *iobuf, IOBufferReader *reader) override;
+  void              start() override;
+  void              destroy() override;
+  void              release(ProxyTransaction *trans) override;
+  void              free() override;
+  ProxyTransaction *new_transaction() override;
+  bool              is_protocol_framed() const override;
+  uint64_t          get_received_frame_count(uint64_t type) const override;
+
+  void add_session() override;
+  void remove_session();
+
+  /** Eagerly drop a half-closed session out of the server-session pool.
+   *
+   *  Sets the half-close-local flag (delegating to the base class) and, when
+   *  the flag transitions to @c true, immediately removes this session from
+   *  the per-thread server-session pool. Once @c half_close_local is set,
+   *  every subsequent @c create_initiating_stream on this session
+   *  short-circuits with @c REFUSED_STREAM, so leaving it discoverable in
+   *  the pool produces a stream of REFUSED_STREAM aborts on otherwise
+   *  unrelated requests until the session is finally torn down. The pool
+   *  must be made aware as soon as the half-close decision is made, not at
+   *  session destruction time.
+   */
+  void set_half_close_local_flag(bool flag) override;
+
+  ////////////////////
+  // Accessors
+  sockaddr const *get_remote_addr() const override;
+  sockaddr const *get_local_addr() override;
+  int             get_transact_count() const override;
+  const char     *get_protocol_string() const override;
+  int             populate_protocol(std::string_view *result, int size) const override;
+  const char     *protocol_contains(std::string_view prefix) const override;
+  HTTPVersion     get_version(HTTPHdr &hdr) const override;
+  IOBufferReader *get_remote_reader() override;
+
+  ProxySession *get_proxy_session() override;
+
+  void
+  increment_current_active_connections_stat() override
+  {
+    Metrics::Gauge::increment(http2_rsb.current_active_server_connection_count);
+  }
+
+  void
+  decrement_current_active_connections_stat() override
+  {
+    Metrics::Gauge::decrement(http2_rsb.current_active_server_connection_count);
+  }
+
+  // noncopyable
+  Http2ServerSession(Http2ServerSession &)                  = delete;
+  Http2ServerSession &operator=(const Http2ServerSession &) = delete;
+
+  bool is_multiplexing() const override;
+  bool is_outbound() const override;
+
+  void set_netvc(NetVConnection *netvc) override;
+
+  void set_no_activity_timeout() override;
+
+private:
+  int main_event_handler(int, void *);
+
+  IpEndpoint cached_client_addr;
+  IpEndpoint cached_local_addr;
+
+  bool in_session_table = false;
+};
+
+extern ClassAllocator<Http2ServerSession, false> http2ServerSessionAllocator;

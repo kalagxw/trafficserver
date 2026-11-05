@@ -1,0 +1,199 @@
+/** @file
+
+  A brief file description
+
+  @par License
+
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ */
+
+#pragma once
+
+#include "iocore/eventsystem/VConnection.h"
+#include "proxy/ProxyTransaction.h"
+#include "iocore/net/quic/QUICStreamVCAdapter.h"
+#include "proxy/http3/Http3FrameDispatcher.h"
+#include "proxy/http3/Http3FrameCollector.h"
+#include "proxy/http3/Http3HeaderFramer.h"
+#include "proxy/http3/Http3DataFramer.h"
+#include "proxy/http3/Http3ProtocolEnforcer.h"
+#include "proxy/http3/Http3HeaderVIOAdaptor.h"
+#include "proxy/http3/Http3StreamDataVIOAdaptor.h"
+
+#include <functional>
+
+class QUICStreamIO;
+class HQSession;
+class Http09Session;
+class Http3Session;
+
+class HQTransaction : public ProxyTransaction
+{
+public:
+  using super = ProxyTransaction;
+
+  HQTransaction(HQSession *session, QUICStreamVCAdapter::IOInfo &info);
+  virtual ~HQTransaction();
+
+  // Implement ProxyClienTransaction interface
+  void set_active_timeout(ink_hrtime timeout_in) override;
+  void set_inactivity_timeout(ink_hrtime timeout_in) override;
+  void cancel_inactivity_timeout() override;
+  void transaction_done() override;
+  void release() override;
+  int  get_transaction_id() const override;
+  void stream_closed();
+  void set_stream_cleanup(std::function<void()> cleanup);
+  void increment_transactions_stat() override;
+  void decrement_transactions_stat() override;
+
+  // VConnection interface
+  virtual VIO *do_io_read(Continuation *c, int64_t nbytes = INT64_MAX, MIOBuffer *buf = 0) override;
+  virtual VIO *do_io_write(Continuation *c = nullptr, int64_t nbytes = INT64_MAX, IOBufferReader *buf = 0,
+                           bool owner = false) override;
+  virtual void do_io_close(int lerrno = -1) override;
+  virtual void do_io_shutdown(ShutdownHowTo_t) override;
+  virtual void reenable(VIO *) override;
+
+  // HQTransaction
+  virtual int             state_stream_open(int event, Event *data)   = 0;
+  virtual int             state_stream_closed(int event, Event *data) = 0;
+  NetVConnectionContext_t direction() const;
+
+  /** Full-width QUIC stream identifier for this transaction.
+   *
+   *  @c get_transaction_id returns @c int and exists primarily for compact log
+   *  fields and probe arguments; QUIC stream IDs are 62-bit values, so callers
+   *  that route or compare by stream ID must use this accessor to avoid
+   *  truncation.
+   *
+   *  @return The QUIC stream ID owned by this transaction.
+   */
+  QUICStreamId get_quic_stream_id() const;
+
+  // For Queue from tscore/Link.h
+  LINK(HQTransaction, link);
+
+protected:
+  virtual int64_t _process_read_vio()  = 0;
+  virtual int64_t _process_write_vio() = 0;
+  void            _schedule_read_ready_event();
+  void            _unschedule_read_ready_event();
+  void            _close_read_ready_event(Event *e);
+  void            _schedule_read_complete_event();
+  void            _unschedule_read_complete_event();
+  void            _close_read_complete_event(Event *e);
+  void            _schedule_read_event();
+  void            _schedule_write_ready_event();
+  void            _unschedule_write_ready_event();
+  void            _close_write_ready_event(Event *e);
+  void            _schedule_write_complete_event();
+  void            _unschedule_write_complete_event();
+  void            _close_write_complete_event(Event *e);
+  void            _signal_event(int event, Event *e);
+  void            _signal_read_event();
+  void            _signal_write_event();
+  bool            _is_write_buffer_flushed();
+  virtual bool    _is_closed() const = 0;
+  bool            _is_stream_closed() const;
+  void            _delete_if_possible();
+
+  EThread *_thread = nullptr;
+
+  MIOBuffer                    _read_vio_buf{BUFFER_SIZE_INDEX_4K};
+  QUICStreamVCAdapter::IOInfo &_info;
+  QUICStreamId                 _stream_id = 0;
+
+  size_t _sent_bytes = 0;
+
+  VIO    _read_vio;
+  VIO    _write_vio;
+  Event *_read_ready_event     = nullptr;
+  Event *_read_complete_event  = nullptr;
+  Event *_write_ready_event    = nullptr;
+  Event *_write_complete_event = nullptr;
+
+  bool _transaction_done     = false;
+  bool _event_handler_active = false;
+
+  std::function<void()> _stream_cleanup;
+};
+
+class Http3Transaction : public HQTransaction
+{
+public:
+  using super = HQTransaction;
+
+  Http3Transaction(Http3Session *session, QUICStreamVCAdapter::IOInfo &info);
+  virtual ~Http3Transaction();
+
+  VIO *do_io_write(Continuation *c = nullptr, int64_t nbytes = INT64_MAX, IOBufferReader *buf = nullptr,
+                   bool owner = false) override;
+  int  state_stream_open(int event, Event *data) override;
+  int  state_stream_closed(int event, Event *data) override;
+
+  void do_io_close(int lerrno = -1) override;
+  void on_header_decode_complete();
+
+  bool is_response_header_sent() const;
+  bool is_response_body_sent() const;
+
+  // TODO:  Just a place holder for now
+  bool has_request_body(int64_t content_length, bool is_chunked_set) const override;
+
+private:
+  int64_t _process_read_vio() override;
+  int64_t _process_write_vio() override;
+  bool    _is_closed() const override;
+  void    _handle_error(const Http3Error &error);
+
+  // These are for HTTP/3
+  Http3FrameDispatcher      _frame_dispatcher;
+  Http3FrameCollector       _frame_collector;
+  Http3ProtocolEnforcer     _protocol_enforcer;
+  Http3HeaderFramer         _header_framer;
+  Http3DataFramer           _data_framer;
+  Http3HeaderVIOAdaptor     _header_handler;
+  Http3StreamDataVIOAdaptor _data_handler;
+};
+
+/**
+   Only for interop. Will be removed.
+ */
+class Http09Transaction : public HQTransaction
+{
+public:
+  using super = HQTransaction;
+
+  Http09Transaction(Http09Session *session, QUICStreamVCAdapter::IOInfo &info);
+  ~Http09Transaction();
+
+  int state_stream_open(int event, Event *data) override;
+  int state_stream_closed(int event, Event *data) override;
+
+  void do_io_close(int lerrno = -1) override;
+
+private:
+  int64_t _process_read_vio() override;
+  int64_t _process_write_vio() override;
+  bool    _is_closed() const override;
+
+  // These are for HTTP/0.9
+  bool _protocol_detected          = false;
+  bool _legacy_request             = false;
+  bool _client_req_header_complete = false;
+};

@@ -29,16 +29,23 @@
 #include <ts/ts.h>   // for debug
 #include <cinttypes> // for PRIu64
 #include <cstring>
+#include <map>
+#include <netdb.h>
 
 // debug messages viewable by setting 'proxy.config.diags.debug.tags'
-// in 'records.config'
+// in 'records.yaml'
 
 // debug messages during one-time initialization
 static const char DEBUG_TAG_INIT[] = "ssntxnorder_verify.init";
 
+static DbgCtl dbg_ctl_init{DEBUG_TAG_INIT};
+
 // debug messages on every request serviced
 static const char DEBUG_TAG_HOOK[]  = "ssntxnorder_verify.hook";
 static const char DEBUG_TAG_CLOSE[] = "ssntxnorder_verify.close";
+
+static DbgCtl dbg_ctl_hook{DEBUG_TAG_HOOK};
+static DbgCtl dbg_ctl_close{DEBUG_TAG_CLOSE};
 
 // plugin registration info
 static char plugin_name[]   = "ssntxnorder_verify";
@@ -47,17 +54,40 @@ static char support_email[] = "shinrich@apache.org";
 
 // List of started sessions, SSN_START seen, SSN_CLOSE not seen yet.
 thread_local std::set<TSHttpSsn> started_ssns;
-thread_local int ssn_balance = 0; // +1 on SSN_START, -1 on SSN_CLOSE
+thread_local int                 ssn_balance = 0; // +1 on SSN_START, -1 on SSN_CLOSE
+
+thread_local std::map<TSHttpSsn, std::pair<std::string, std::string>> session_addresses;
+static bool                                                           check_addresses = false;
+
+/** Return a numeric endpoint, rejecting invalid families and zero ports.
+ * @param[in] address Address returned by a session address API.
+ */
+static std::string
+numeric_endpoint(sockaddr const *address)
+{
+  if (!address || (address->sa_family != AF_INET && address->sa_family != AF_INET6)) {
+    TSError("Session address has an invalid family");
+    abort();
+  }
+  char      host[NI_MAXHOST], port[NI_MAXSERV];
+  socklen_t length = address->sa_family == AF_INET ? sizeof(sockaddr_in) : sizeof(sockaddr_in6);
+  if (getnameinfo(address, length, host, sizeof(host), port, sizeof(port), NI_NUMERICHOST | NI_NUMERICSERV) != 0 ||
+      strcmp(port, "0") == 0) {
+    TSError("Session address has an invalid address or port");
+    abort();
+  }
+  return std::string(host) + ":" + port;
+}
 
 // Metadata for active transactions. Stored upon start to persist improper
 // closing behavior.
-typedef struct started_txn {
-  uint64_t id;
+using started_txn = struct started_txn {
+  uint64_t  id;
   TSHttpTxn txnp;
   TSHttpSsn ssnp;                      // enclosing session
   started_txn(uint64_t id) : id(id) {} // used for lookup on id
   started_txn(uint64_t id, TSHttpTxn txnp, TSHttpSsn ssnp) : id(id), txnp(txnp), ssnp(ssnp) {}
-} started_txn;
+};
 
 // Comparator functor for transactions. Compare by ID.
 struct txn_compare {
@@ -70,18 +100,19 @@ struct txn_compare {
 // List of started transactions, TXN_START seen, TXN_CLOSE not seen yet.
 thread_local std::set<started_txn, txn_compare> started_txns;
 thread_local std::set<started_txn, txn_compare> closed_txns;
-thread_local int txn_balance = 0; // +1 on TXN_START -1 on TXN_CLOSE
+thread_local int                                txn_balance = 0; // +1 on TXN_START -1 on TXN_CLOSE
 
 // Statistics provided by the plugin
-static int stat_ssn_close = 0; // number of TS_HTTP_SSN_CLOSE hooks caught
-static int stat_ssn_start = 0; // number of TS_HTTP_SSN_START hooks caught
-static int stat_txn_close = 0; // number of TS_HTTP_TXN_CLOSE hooks caught
-static int stat_txn_start = 0; // number of TS_HTTP_TXN_START hooks caught
-static int stat_err       = 0; // number of inaccuracies encountered
-static int stat_test_done = 0; // Set to 1 when the test is done
+static int stat_ssn_close     = 0; // number of TS_HTTP_SSN_CLOSE hooks caught
+static int stat_ssn_addresses = 0; // number of close hooks with unchanged numeric endpoints
+static int stat_ssn_start     = 0; // number of TS_HTTP_SSN_START hooks caught
+static int stat_txn_close     = 0; // number of TS_HTTP_TXN_CLOSE hooks caught
+static int stat_txn_start     = 0; // number of TS_HTTP_TXN_START hooks caught
+static int stat_err           = 0; // number of inaccuracies encountered
+static int stat_test_done     = 0; // Set to 1 when the test is done
 
 // IPC information
-static char *ctl_tag         = plugin_name; // name is a convenient identifier
+static char      *ctl_tag    = plugin_name; // name is a convenient identifier
 static const char ctl_dump[] = "dump";      // output active ssn/txn tables cmd
 
 /**
@@ -97,7 +128,7 @@ static const char ctl_dump[] = "dump";      // output active ssn/txn tables cmd
 static void
 dump_tables()
 {
-  TSDebug(DEBUG_TAG_HOOK, "Dumping active session and transaction tables.");
+  Dbg(dbg_ctl_hook, "Dumping active session and transaction tables.");
   std::stringstream dump("");
 
   dump << std::string(100, '+') << std::endl;
@@ -131,8 +162,8 @@ dump_tables()
 static int
 handle_order(TSCont contp, TSEvent event, void *edata)
 {
-  TSHttpSsn ssnp;    // session data
-  TSHttpTxn txnp;    // transaction data
+  TSHttpSsn    ssnp; // session data
+  TSHttpTxn    txnp; // transaction data
   TSPluginMsg *msgp; // message data
 
   // Find the event that happened
@@ -140,17 +171,28 @@ handle_order(TSCont contp, TSEvent event, void *edata)
   case TS_EVENT_HTTP_SSN_CLOSE: // End of session
   {
     ssnp = reinterpret_cast<TSHttpSsn>(edata);
-    TSDebug(DEBUG_TAG_CLOSE, "event TS_EVENT_HTTP_SSN_CLOSE [ SSNID = %p ]", ssnp);
+    Dbg(dbg_ctl_close, "event TS_EVENT_HTTP_SSN_CLOSE [ SSNID = %p ]", ssnp);
     TSStatIntIncrement(stat_ssn_close, 1);
+    if (check_addresses) {
+      auto expected = session_addresses.find(ssnp);
+      if (expected == session_addresses.end() || expected->second.first != numeric_endpoint(TSHttpSsnClientAddrGet(ssnp)) ||
+          expected->second.second != numeric_endpoint(TSHttpSsnIncomingAddrGet(ssnp))) {
+        TSError("Session addresses changed between SSN_START and SSN_CLOSE");
+        TSStatIntIncrement(stat_err, 1);
+        abort();
+      }
+      session_addresses.erase(expected);
+      TSStatIntIncrement(stat_ssn_addresses, 1);
+    }
     if (started_ssns.erase(ssnp) == 0) {
       // No record existsted for this session
-      TSDebug(DEBUG_TAG_HOOK, "Session [ SSNID = %p ] closing was not previously started", ssnp);
+      Dbg(dbg_ctl_hook, "Session [ SSNID = %p ] closing was not previously started", ssnp);
       TSStatIntIncrement(stat_err, 1);
       abort();
     }
 
     if (--ssn_balance < 0) {
-      TSDebug(DEBUG_TAG_HOOK, "More sessions have been closed than started.");
+      Dbg(dbg_ctl_hook, "More sessions have been closed than started.");
       TSStatIntIncrement(stat_err, 1);
       abort();
     }
@@ -162,12 +204,16 @@ handle_order(TSCont contp, TSEvent event, void *edata)
   case TS_EVENT_HTTP_SSN_START: // Beginning of session
   {
     ssnp = reinterpret_cast<TSHttpSsn>(edata);
-    TSDebug(DEBUG_TAG_HOOK, "event TS_EVENT_HTTP_SSN_START [ SSNID = %p ]", ssnp);
+    Dbg(dbg_ctl_hook, "event TS_EVENT_HTTP_SSN_START [ SSNID = %p ]", ssnp);
     TSStatIntIncrement(stat_ssn_start, 1);
+    if (check_addresses) {
+      session_addresses.emplace(
+        ssnp, std::make_pair(numeric_endpoint(TSHttpSsnClientAddrGet(ssnp)), numeric_endpoint(TSHttpSsnIncomingAddrGet(ssnp))));
+    }
 
     if (!started_ssns.insert(ssnp).second) {
       // Insert failed. Session already existed in the record.
-      TSDebug(DEBUG_TAG_HOOK, "Session [ SSNID = %p ] has previously started.", ssnp);
+      Dbg(dbg_ctl_hook, "Session [ SSNID = %p ] has previously started.", ssnp);
       TSStatIntIncrement(stat_err, 1);
       abort();
     }
@@ -180,7 +226,7 @@ handle_order(TSCont contp, TSEvent event, void *edata)
   case TS_EVENT_HTTP_TXN_CLOSE: // End of transaction
   {
     txnp = reinterpret_cast<TSHttpTxn>(edata);
-    TSDebug(DEBUG_TAG_HOOK, "event TS_EVENT_HTTP_TXN_CLOSE [ TXNID = %" PRIu64 " ]", TSHttpTxnIdGet(txnp));
+    Dbg(dbg_ctl_hook, "event TS_EVENT_HTTP_TXN_CLOSE [ TXNID = %" PRIu64 " ]", TSHttpTxnIdGet(txnp));
     TSStatIntIncrement(stat_txn_close, 1);
 
     std::set<started_txn>::iterator closed_txn = closed_txns.find(started_txn(TSHttpTxnIdGet(txnp)));
@@ -200,26 +246,26 @@ handle_order(TSCont contp, TSEvent event, void *edata)
       if (started_ssns.find(ssnp) == started_ssns.end()) {
         // The session of the transaction was either not started, or was
         // already closed.
-        TSDebug(DEBUG_TAG_HOOK,
-                "Transaction [ TXNID = %" PRIu64 " ] closing not in an "
-                "active session [ SSNID = %p ].",
-                current_txn->id, ssnp);
+        Dbg(dbg_ctl_hook,
+            "Transaction [ TXNID = %" PRIu64 " ] closing not in an "
+            "active session [ SSNID = %p ].",
+            current_txn->id, ssnp);
         TSStatIntIncrement(stat_err, 1);
         abort();
       }
       started_txns.erase(current_txn); // Stop monitoring the transaction
     } else {
       // Transaction does not exists.
-      TSDebug(DEBUG_TAG_HOOK,
-              "Transaction [ TXNID = %" PRIu64 " ] closing not "
-              "previously started.",
-              TSHttpTxnIdGet(txnp));
+      Dbg(dbg_ctl_hook,
+          "Transaction [ TXNID = %" PRIu64 " ] closing not "
+          "previously started.",
+          TSHttpTxnIdGet(txnp));
       TSStatIntIncrement(stat_err, 1);
       abort();
     }
 
     if (--txn_balance < 0) {
-      TSDebug(DEBUG_TAG_HOOK, "More transactions have been closed than started.");
+      Dbg(dbg_ctl_hook, "More transactions have been closed than started.");
       TSStatIntIncrement(stat_err, 1);
       abort();
     }
@@ -232,24 +278,24 @@ handle_order(TSCont contp, TSEvent event, void *edata)
   {
     txnp = reinterpret_cast<TSHttpTxn>(edata);
     ssnp = TSHttpTxnSsnGet(txnp);
-    TSDebug(DEBUG_TAG_HOOK, "event TS_EVENT_HTTP_TXN_START [ TXNID = %" PRIu64 " ]", TSHttpTxnIdGet(txnp));
+    Dbg(dbg_ctl_hook, "event TS_EVENT_HTTP_TXN_START [ TXNID = %" PRIu64 " ]", TSHttpTxnIdGet(txnp));
     TSStatIntIncrement(stat_txn_start, 1);
 
     started_txn new_txn = started_txn(TSHttpTxnIdGet(txnp), txnp, ssnp);
 
     if (started_ssns.find(ssnp) == started_ssns.end()) {
       // Session of the transaction has not started.
-      TSDebug(DEBUG_TAG_HOOK,
-              "Transaction [ TXNID = %" PRIu64 " ] starting not in an "
-              "active session [ SSNID = %p ].",
-              new_txn.id, ssnp);
+      Dbg(dbg_ctl_hook,
+          "Transaction [ TXNID = %" PRIu64 " ] starting not in an "
+          "active session [ SSNID = %p ].",
+          new_txn.id, ssnp);
       TSStatIntIncrement(stat_err, 1);
       abort();
     }
 
     if (!started_txns.insert(new_txn).second) {
       // Insertion failed. Transaction has previously started.
-      TSDebug(DEBUG_TAG_HOOK, "Transaction [ TXNID = %" PRIu64 " ] has previously started.", new_txn.id);
+      Dbg(dbg_ctl_hook, "Transaction [ TXNID = %" PRIu64 " ] has previously started.", new_txn.id);
       TSStatIntIncrement(stat_err, 1);
       abort();
     }
@@ -262,7 +308,7 @@ handle_order(TSCont contp, TSEvent event, void *edata)
 
   case TS_EVENT_LIFECYCLE_MSG: // External trigger, such as traffic_ctl
   {
-    TSDebug(DEBUG_TAG_HOOK, "event TS_EVENT_LIFECYCLE_MSG");
+    Dbg(dbg_ctl_hook, "event TS_EVENT_LIFECYCLE_MSG");
     msgp = reinterpret_cast<TSPluginMsg *>(edata); // inconsistency
 
     // Verify message is with the appropriate tag
@@ -298,7 +344,8 @@ handle_order(TSCont contp, TSEvent event, void *edata)
 void
 TSPluginInit(int argc, const char *argv[])
 {
-  TSDebug(DEBUG_TAG_INIT, "initializing plugin");
+  check_addresses = argc > 1 && strcmp(argv[1], "--check-addresses") == 0;
+  Dbg(dbg_ctl_init, "initializing plugin");
 
   TSPluginRegistrationInfo info;
 
@@ -307,19 +354,21 @@ TSPluginInit(int argc, const char *argv[])
   info.support_email = support_email;
 
   if (TSPluginRegister(&info) != TS_SUCCESS) {
-    TSDebug(DEBUG_TAG_HOOK, "[%s] Plugin registration failed. \n", plugin_name);
+    Dbg(dbg_ctl_hook, "[%s] Plugin registration failed. \n", plugin_name);
   }
 
   TSCont contp = TSContCreate(handle_order, TSMutexCreate());
   if (contp == nullptr) {
     // Continuation initialization failed. Unrecoverable, report and exit.
-    TSDebug(DEBUG_TAG_HOOK, "[%s] could not create continuation", plugin_name);
+    Dbg(dbg_ctl_hook, "[%s] could not create continuation", plugin_name);
     abort();
   } else {
     // Continuation initialization succeeded.
 
     stat_ssn_start = TSStatCreate("ssntxnorder_verify.ssn.start", TS_RECORDDATATYPE_INT, TS_STAT_NON_PERSISTENT, TS_STAT_SYNC_SUM);
     stat_ssn_close = TSStatCreate("ssntxnorder_verify.ssn.close", TS_RECORDDATATYPE_INT, TS_STAT_NON_PERSISTENT, TS_STAT_SYNC_SUM);
+    stat_ssn_addresses =
+      TSStatCreate("ssntxnorder_verify.ssn.addresses", TS_RECORDDATATYPE_INT, TS_STAT_NON_PERSISTENT, TS_STAT_SYNC_SUM);
     stat_txn_start = TSStatCreate("ssntxnorder_verify.txn.start", TS_RECORDDATATYPE_INT, TS_STAT_NON_PERSISTENT, TS_STAT_SYNC_SUM);
     stat_txn_close = TSStatCreate("ssntxnorder_verify.txn.close", TS_RECORDDATATYPE_INT, TS_STAT_NON_PERSISTENT, TS_STAT_SYNC_SUM);
     stat_err       = TSStatCreate("ssntxnorder_verify.err", TS_RECORDDATATYPE_INT, TS_STAT_NON_PERSISTENT, TS_STAT_SYNC_SUM);

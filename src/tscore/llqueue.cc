@@ -2,7 +2,7 @@
 
   Implementation of a simple linked list queue
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -41,7 +41,7 @@ static LLQrec *
 newrec(LLQ *Q)
 {
   LLQrec *new_val;
-  int i;
+  int     i;
 
   if (Q->free != nullptr) {
     new_val = Q->free;
@@ -183,7 +183,7 @@ void *
 dequeue(LLQ *Q)
 {
   LLQrec *rec;
-  void *d;
+  void   *d;
   ink_sem_wait(&(Q->sema));
   ink_mutex_acquire(&(Q->mux));
 
@@ -215,7 +215,7 @@ dequeue(LLQ *Q)
 void *
 testfun(void *unused)
 {
-  int num;
+  int  num;
   LLQ *Q;
 
   Q = create_queue();

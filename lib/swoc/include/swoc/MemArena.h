@@ -9,6 +9,8 @@
 
 #include <mutex>
 #include <memory>
+#include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <new>
 #if __has_include(<memory_resource>)
@@ -18,8 +20,10 @@
 #include "swoc/MemSpan.h"
 #include "swoc/Scalar.h"
 #include "swoc/IntrusiveDList.h"
+#include "swoc/TextView.h"
 
 namespace swoc { inline namespace SWOC_VERSION_NS {
+
 /** A memory arena.
 
     The intended use is for allocating many small chunks of memory - few, large allocations are best
@@ -36,7 +40,23 @@ class MemArena
   using self_type = MemArena; ///< Self reference type.
 
 public:
-  static constexpr size_t DEFAULT_ALIGNMENT{1};
+  static constexpr size_t DEFAULT_ALIGNMENT{1}; ///< Default memory alignment.
+
+  /// Convenient alias for use with @c unique_ptr.
+  /// @internal Can't be @c inline because the instantiation requires a complete type.
+  static void (*destroyer)(self_type *);
+
+  /// Correct type for a unique pointer to an instance.
+  /// Initialization is
+  /// @code
+  ///     MemArena::unique_ptr arena(nullptr, MemArena::destroyer);
+  /// @endcode
+  /// To create the arena on demand
+  /// @code
+  ///    arena.reset(MemArena::construct_self_contained());
+  /// @endcode
+  /// If the unique pointer is to be initialized with an arena, it should probably be a direct member isntead.
+  using unique_ptr = std::unique_ptr<self_type, void (*)(self_type *)>;
 
   /// Simple internal arena block of memory. Maintains the underlying memory.
   struct Block {
@@ -48,6 +68,12 @@ public:
 
     /// Get the start of the data in this block.
     const char *data() const;
+
+    /// @return The first byte past allocated storage.
+    char *allocated_data_end();
+
+    /// @return The first byte past allocated storage.
+    const char *allocated_data_end() const;
 
     /// Amount of unallocated storage.
     size_t remaining() const;
@@ -98,7 +124,25 @@ public:
     bool is_full() const;
 
   protected:
-    friend MemArena;
+    friend MemArena; ///< Container.
+
+    /** A custom @c operator @c new.
+     *
+     * Compilers complain about mismatched std operator new and the custom
+     * operator delete unless this custom operator new is provided.
+     *
+     * @param block_size The implicit compiler-provided sizeof(Block), the object size.
+     * @param n The number of bytes the user is requesting for the backend storage of Block.
+     * @return Pointer to the allocated memory.
+     */
+    static void* operator new(size_t block_size, size_t n);
+
+    /** Override placement (non-allocated) @c new.
+     * @param block_size The implicit compiler-provided sizeof(Block), the object size. Not used.
+     * @param place Value passed to @c new.
+     * @return Pointer to the memory.
+     */
+    static void* operator new([[maybe_unused]] size_t block_size, void* place) noexcept;
 
     /** Override @c operator @c delete.
      *
@@ -139,15 +183,18 @@ public:
     size_t allocated{0}; ///< Current allocated (in use) bytes.
 
     struct Linkage {
+      /// @cond INTERNAL_DETAIL
       Block *_next{nullptr};
       Block *_prev{nullptr};
 
       static Block *&next_ptr(Block *);
 
       static Block *&prev_ptr(Block *);
-    } _link;
+      /// @endcond
+    } _link; ///< Intrusive list support.
   };
 
+  /// Intrusive list of blocks.
   using BlockList = IntrusiveDList<Block::Linkage>;
 
   /** Construct with reservation hint.
@@ -172,6 +219,9 @@ public:
    * @a static_block is used as the first block for allocation and is never deleted. This makes
    * it possible to have an instance that allocates from stack memory and only allocates from the
    * heap if the static block becomes full.
+   *
+   * @note There is no default block size because the static block is the initial block. Subsequent
+   * allocations are based on that size.
    */
   explicit MemArena(MemSpan<void> static_block);
 
@@ -179,14 +229,16 @@ public:
   MemArena(self_type const &that) = delete;
 
   /// Allow moving the arena.
-  MemArena(self_type &&that);
+  MemArena(self_type &&that) noexcept;
 
   /// Destructor.
   ~MemArena();
 
+  /// No copy assignment.
   self_type &operator=(self_type const &that) = delete;
 
-  self_type &operator=(self_type &&that);
+  /// Move assignment.
+  self_type &operator=(self_type &&that) noexcept;
 
   /** Make a self-contained instance.
    *
@@ -255,7 +307,41 @@ public:
       general it is a bad idea to make objects in the Arena that own memory that is not also in the
       Arena.
   */
-  template <typename T, typename... Args> T *make(Args &&... args);
+  template <typename T, typename... Args> T *make(Args &&...args);
+
+  /** Copy the contents of a string view into the arena.
+   *
+   * @param s Original string.
+   * @return A view of the copy of @a s.
+   */
+  MemSpan<char> localize(MemSpan<char const> s);
+
+  /** Copy the contents of a string view into the arena.
+   *
+   * @param s Original string.
+   * @return A view of the copy of @a s.
+   */
+  MemSpan<char> localize(char const * s);
+
+  /** Copy the contents of a string view into the arena as a C string.
+   *
+   * @param s Original string.
+   * @return A view of the copy of @a s.
+   *
+   * A terminating nul character is added to the copy which is not included in the returned view.
+   * This enables using the string view as a C string.
+   */
+  MemSpan<char> localize_c(MemSpan<char const> s);
+
+  /** Copy the contents of a string view into the arena as a C string.
+   *
+   * @param s Original string.
+   * @return A view of the copy of @a s.
+   *
+   * A terminating nul character is added to the copy which is not included in the returned view.
+   * This enables using the string view as a C string.
+   */
+  MemSpan<char> localize_c(char const * s);
 
   /** Freeze reserved memory.
 
@@ -291,6 +377,25 @@ public:
    */
   MemArena &clear(size_t hint = 0);
 
+  /** Best effort allocation discard.
+   *
+   * The allocation is discard (become unallocated memory) if and only if it is at the end of
+   * a recent allocation block. If nothing has been allocated, this always works. Otherwise if later
+   * allocation exists, this method silently fails. This can work with multiple allocations in a
+   * stack - if all later allocations are discarded when this method is invoked it will succeed.
+   *
+   * @note This is purely a performance enhancement to enable computing with internally allocated
+   * but unused memory. Compare with @c remnant
+   *
+   * @note No destruction or other clean up is done, the span is simply marked as unallocated.
+   *
+   * @param hint Size hint for the next internal allocation.
+   * @return @a this.
+   *
+   * @see remnant
+   */
+  MemArena &discard(MemSpan<void const> span);
+
   /** Discard all allocations.
    *
    * All active internal memory blocks are reset to be empty, discarding any allocations. These blocks
@@ -309,8 +414,29 @@ public:
   /// @return The amount of free space.
   size_t remaining() const;
 
+  /** Get aligned and sized remnant.
+   *
+   * @tparam T Element type.
+   * @param n Number of instances of @a T
+   * @return A span that is in the remnant, correctly aligned with minimal padding.
+   *
+   * This is guaranteed to be the same bytes as if @c alloc<T> was called. The returned span will
+   * always be the specified size, the remnant will be expanded as needed.
+   */
+  template <typename T> MemSpan<T> remnant_span(size_t n);
+
   /// @return Contiguous free space in the current internal block.
   MemSpan<void> remnant();
+
+  /** Get an aligned remnant.
+   *
+   * @param n Remnant size.
+   * @param align Memory alignment (default 1, must be power of 2).
+   * @return Space in the remnant with minimal alignment padding.
+   *
+   * @note This will always return a span of @a n bytes, the remnant will be expanded as needed.
+   */
+  MemSpan<void> remnant(size_t n, size_t align = DEFAULT_ALIGNMENT);
 
   /** Require @a n bytes of contiguous memory to be available for allocation.
    *
@@ -338,17 +464,19 @@ public:
    */
   size_t reserved_size() const;
 
-  using const_iterator = BlockList::const_iterator;
-  using iterator       = const_iterator; // only const iteration allowed on blocks.
+  using const_iterator = BlockList::const_iterator; ///< Constant element iteration.
+  using iterator       = const_iterator;            ///< Element iteration.
 
-  /// Iterate over active blocks.
+  /// First active block.
   const_iterator begin() const;
 
+  /// After Last active block.
   const_iterator end() const;
 
-  /// Iterator over frozen blocks.
+  /// First frozen block.
   const_iterator frozen_begin() const;
 
+  /// After last frozen block.
   const_iterator frozen_end() const;
 
 protected:
@@ -374,11 +502,10 @@ protected:
   static constexpr size_t DEFAULT_BLOCK_SIZE = Page::SCALE - Paragraph{round_up(ALLOC_HEADER_SIZE + sizeof(Block))};
 
   size_t _active_allocated = 0; ///< Total allocations in the active generation.
-  size_t _active_reserved  = 0; ///< Total current reserved memory.
+  size_t _active_reserved  = 0; ///< Total reserved memory (allocated from OS).
   /// Total allocations in the previous generation. This is only non-zero while the arena is frozen.
   size_t _frozen_allocated = 0;
-  /// Total frozen reserved memory.
-  size_t _frozen_reserved = 0;
+  size_t _frozen_reserved = 0; ///< Total frozen reserved memory.
 
   /// Minimum free space needed in the next allocated block.
   /// This is not zero iff @c reserve was called.
@@ -454,8 +581,13 @@ public:
 
   /// Drop all items in the free list.
   void clear();
+
+  /// Access the wrapped arena directly.
+  MemArena &arena();
 };
-// Implementation
+
+// --- Implementation ---
+/// @cond INTERNAL_DETAIL
 
 inline auto
 MemArena::Block::Linkage::next_ptr(Block *b) -> Block *& {
@@ -477,6 +609,16 @@ MemArena::Block::data() {
 inline const char *
 MemArena::Block::data() const {
   return reinterpret_cast<const char *>(this + 1);
+}
+
+inline char *
+MemArena::Block::allocated_data_end() {
+  return this->data() + allocated;
+}
+
+inline const char *
+MemArena::Block::allocated_data_end() const {
+  return this->data() + allocated;
 }
 
 inline bool
@@ -508,20 +650,6 @@ MemArena::Block::alloc(size_t n, size_t align) {
   return zret;
 }
 
-template <typename T>
-MemSpan<T>
-MemArena::alloc_span(size_t n) {
-  return this->alloc(sizeof(T) * n, size_t{alignof(T)}).rebind<T>();
-}
-
-template <typename T, typename... Args>
-T *
-MemArena::make(Args &&... args) {
-  return new (this->alloc(sizeof(T)).data()) T(std::forward<Args>(args)...);
-}
-
-inline MemArena::MemArena(size_t n) : _reserve_hint(n) {}
-
 inline MemSpan<void>
 MemArena::Block::remnant() {
   return {this->data() + allocated, this->remaining()};
@@ -531,6 +659,26 @@ inline MemArena::Block &
 MemArena::Block::discard() {
   allocated = 0;
   return *this;
+}
+
+inline void*
+MemArena::Block::operator new(size_t block_size, size_t n)
+{
+  if (n < block_size) {
+    throw std::invalid_argument("MemArena::Block::operator new size is less than object size.");
+  }
+  // In theory we could use ::operator new(n) but this causes a size mismatch during ::operator delete.
+  // Easier to use malloc here and also override @c delete.
+  auto b = static_cast<Block *>(::malloc(n));
+  if (b == nullptr) {
+    throw std::bad_alloc();
+  }
+  return b;
+}
+
+inline void*
+MemArena::Block::operator new([[maybe_unused]] size_t block_size, void* place) noexcept {
+  return place;
 }
 
 inline void
@@ -544,8 +692,63 @@ MemArena::Block::operator delete([[maybe_unused]] void *ptr, void *place) noexce
 
 inline size_t
 MemArena::Block::align_padding(void const *ptr, size_t align) {
-  auto delta = uintptr_t(ptr) & (size_t(align) - 1);
-  return delta ? size_t(align) - delta : delta;
+  if (auto delta = uintptr_t(ptr) & (align - 1); delta > 0) {
+    return align - delta;
+  }
+  return 0;
+}
+
+inline MemArena::MemArena(size_t n) : _reserve_hint(n) {}
+
+template <typename T>
+MemSpan<T>
+MemArena::alloc_span(size_t n) {
+  return this->alloc(sizeof(T) * n, alignof(T)).rebind<T>();
+}
+
+template <typename T, typename... Args>
+T *
+MemArena::make(Args &&...args) {
+  return new (this->alloc(sizeof(T), alignof(T)).data()) T(std::forward<Args>(args)...);
+}
+
+inline MemSpan<char> MemArena::localize(MemSpan<char const> s) {
+  auto span = this->alloc(s.size()).rebind<char>();
+  memcpy(span.data(), s.data(), span.size());
+  return { span.data(), span.size() };
+}
+
+inline MemSpan<char> MemArena::localize(char const * s) {
+  return this->localize(MemSpan<char const>(s, strlen(s)));
+}
+
+inline MemSpan<char> MemArena::localize_c(MemSpan<char const> s) {
+  auto span = this->alloc(s.size() + 1).rebind<char>();
+  memcpy(span.data(), s.data(), span.size());
+  span[s.size()] = '\0';
+  return { span.data(), span.size() };
+}
+
+inline MemSpan<char> MemArena::localize_c(char const * s) {
+  return this->localize_c(MemSpan<char const>(s, strlen(s)));
+}
+
+template <typename T>
+MemSpan<T>
+MemArena::remnant_span(size_t n) {
+  auto span = this->require(sizeof(T) * n, alignof(T)).remnant();
+  return span.remove_prefix(Block::align_padding(span.data(), alignof(T))).rebind<T>();
+}
+
+template <>
+inline MemSpan<void>
+MemArena::remnant_span<void>(size_t n) {
+  return this->require(n).remnant().prefix(n);
+}
+
+inline MemSpan<void>
+MemArena::remnant(size_t n, size_t align) {
+  return this->require(n, align).remnant().prefix(n);
 }
 
 inline size_t
@@ -625,5 +828,13 @@ void
 FixedArena<T>::clear() {
   _list._next = nullptr;
 }
+
+template <typename T>
+MemArena &
+FixedArena<T>::arena() {
+  return _arena;
+}
+
+/// @endcond INTERNAL_DETAIL
 
 }} // namespace swoc::SWOC_VERSION_NS

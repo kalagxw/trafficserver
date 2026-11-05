@@ -16,7 +16,7 @@
 
 .. include:: ../../../common.defs
 
-.. default-domain:: c
+.. default-domain:: cpp
 
 TSMgmtUpdateRegister
 ********************
@@ -28,7 +28,7 @@ Synopsis
 
     #include <ts/ts.h>
 
-.. function:: void TSMgmtUpdateRegister(TSCont contp, const char * plugin_name)
+.. function:: void TSMgmtUpdateRegister(TSCont contp, const char *plugin_name, const char *plugin_file_name=nullptr)
 
 Description
 ===========

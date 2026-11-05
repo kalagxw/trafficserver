@@ -26,10 +26,13 @@
  *
  */
 
+// The C++ Plugin API is deprecated in ATS 10, and will be removed in ATS 11.
+
 #pragma once
 
 #include <string>
 #include "tscpp/api/noncopyable.h"
+#include "ts/ts.h"
 
 #if !defined(ATSCPPAPI_PRINTFLIKE)
 #if defined(__GNUC__) || defined(__clang__)
@@ -80,46 +83,28 @@
 
 /**
  * We forward declare this because if we didn't we end up writing our
- * own version to do the vsnprintf just to call TSDebug and have it do
- * an unnecessary vsnprintf.
- *
- * @private
- */
-extern "C" void TSDebug(const char *tag, const char *fmt, ...) ATSCPPAPI_PRINTFLIKE(2, 3);
-
-/**
- * We forward declare this because if we didn't we end up writing our
  * own version to do the vsnprintf just to call TSError and have it do
  * an unnecessary vsnprintf.
  *
  * @private
  */
-extern "C" void TSError(const char *fmt, ...) ATSCPPAPI_PRINTFLIKE(1, 2);
+void TSError(const char *fmt, ...) noexcept ATSCPPAPI_PRINTFLIKE(1, 2);
 
 // This is weird, but see the following:
 //   http://stackoverflow.com/questions/5641427/how-to-make-preprocessor-generate-a-string-for-line-keyword
 #define STRINGIFY0(x) #x
-#define STRINGIFY(x) STRINGIFY0(x)
-#define LINE_NO STRINGIFY(__LINE__)
-
-/**
- * A helper macro to get access to the Diag messages available in traffic server. These can be enabled
- * via traffic_server -T "tag.*" or since this macro includes the file can you further refine to an
- * individual file or even a particular line! This can also be enabled via records.config.
- */
-#define TS_DEBUG(tag, fmt, ...)                                                        \
-  do {                                                                                 \
-    TSDebug(tag "." __FILE__ ":" LINE_NO, "[%s()] " fmt, __FUNCTION__, ##__VA_ARGS__); \
-  } while (false)
+#define STRINGIFY(x)  STRINGIFY0(x)
+#define LINE_NO       STRINGIFY(__LINE__)
 
 /**
  * A helper macro to get access to the error.log messages available in traffic server. This
  * will also output a DEBUG message visible via traffic_server -T "tag.*", or by enabling the
- * tag in records.config.
+ * tag in records.yaml.
  */
 #define TS_ERROR(tag, fmt, ...)                                                               \
   do {                                                                                        \
-    TS_DEBUG(tag, "[ERROR] " fmt, ##__VA_ARGS__);                                             \
+    DbgCtl dc{tag};                                                                           \
+    Dbg(dc, "[ERROR] " fmt, ##__VA_ARGS__);                                                   \
     TSError("[%s] [%s:%d, %s()] " fmt, tag, __FILE__, __LINE__, __FUNCTION__, ##__VA_ARGS__); \
   } while (false)
 
@@ -131,7 +116,7 @@ struct LoggerState;
  * @brief Create log files that are automatically rolled and cleaned up as space is required.
  *
  * Log files created using the Logger class will be placed in the same directory as
- * other log files, that directory is specified in records.config. All of the logging
+ * other log files, that directory is specified in records.yaml. All of the logging
  * configuration such as max space available for all logs includes any logs created
  * using the Logger class.
  *
@@ -257,7 +242,7 @@ public:
   void logError(const char *fmt, ...) ATSCPPAPI_PRINTFLIKE(2, 3);
 
 private:
-  LoggerState *state_; /**< Internal state for the Logger */
+  std::unique_ptr<LoggerState> state_; /**< Internal state for the Logger */
 };
 
 } // namespace atscppapi

@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -60,9 +60,9 @@ public:
   TextBuffer(int size);
   ~TextBuffer();
 
-  int rawReadFromFile(int fd);
-  int readFromFD(int fd);
-  int copyFrom(const void *, unsigned num_bytes);
+  int  rawReadFromFile(int fd);
+  int  readFromFD(int fd);
+  int  copyFrom(const void *, unsigned num_bytes);
   void reUse();
   void chomp();
   void slurp(int);
@@ -94,7 +94,7 @@ public:
   size_t
   spaceUsed() const
   {
-    return (size_t)(nextAdd - bufferStart);
+    return static_cast<size_t>(nextAdd - bufferStart);
   };
 
   bool
@@ -113,6 +113,6 @@ private:
 
   size_t currentSize = 0;
   size_t spaceLeft   = 0;
-  char *bufferStart  = nullptr;
-  char *nextAdd      = nullptr;
+  char  *bufferStart = nullptr;
+  char  *nextAdd     = nullptr;
 };

@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -37,8 +37,8 @@ class EventNotify
 public:
   EventNotify();
   void signal();
-  int wait();
-  int timedwait(int timeout); // milliseconds
+  int  wait();
+  int  timedwait(int timeout); // milliseconds
   void lock();
   bool trylock();
   void unlock();
@@ -49,7 +49,7 @@ private:
   int m_event_fd;
   int m_epoll_fd;
 #else
-  ink_cond m_cond;
+  ink_cond  m_cond;
   ink_mutex m_mutex;
 #endif
 };

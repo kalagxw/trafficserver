@@ -32,7 +32,7 @@ public:
 
   bool create(const string &strCookie);
 
-  CookieJar(const CookieJar &) = delete;
+  CookieJar(const CookieJar &)            = delete;
   CookieJar &operator=(const CookieJar &) = delete;
 
   bool get_full(const string &cookie_name, string &val);
@@ -50,8 +50,8 @@ private:
   {
   public:
     unordered_map<string, string> m_subelements;
-    string m_val;
-    bool parts_inited = false;
+    string                        m_val;
+    bool                          parts_inited = false;
   };
   CookieVal *m_currentVal = nullptr;
 

@@ -2,7 +2,7 @@
 
     A brief file description
 
-    @section license License
+    @par License
 
     Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
@@ -22,49 +22,50 @@
 */
 
 #include "tscore/ink_config.h"
-#include "tscore/Diags.h"
-#include "tscore/ink_cap.h"
-#include "tscore/ink_thread.h"
-
 #include <grp.h>
 
-#if HAVE_SYS_CAPABILITY_H
+#if __has_include(<sys/capability.h>)
 #include <sys/capability.h>
 #endif
 
-#if HAVE_SYS_PRCTL_H
+#if __has_include(<sys/prctl.h>)
 #include <sys/prctl.h>
 #endif
+
+#include "swoc/bwf_ip.h"
+
+#include "tscore/Diags.h"
+#include "tscore/ink_cap.h"
+#include "tscore/ink_thread.h"
 
 // NOTE: Failing to acquire or release privileges is a fatal error. This is because that should never happen
 // and if it does, it is likely that some fundamental security assumption has been violated. In that case
 // it is dangerous to continue.
 
-#if !TS_USE_POSIX_CAP
-ink_mutex ElevateAccess::lock = INK_MUTEX_INIT;
-#endif
+namespace
+{
 
-#define DEBUG_CREDENTIALS(tag)                                                                                               \
+#define DEBUG_CREDENTIALS(ctl)                                                                                               \
   do {                                                                                                                       \
-    if (diags()->on(tag)) {                                                                                                  \
+    if ((ctl).on()) {                                                                                                        \
       uid_t uid = -1, euid = -1, suid = -1;                                                                                  \
       gid_t gid = -1, egid = -1, sgid = -1;                                                                                  \
       getresuid(&uid, &euid, &suid);                                                                                         \
       getresgid(&gid, &egid, &sgid);                                                                                         \
-      Debug(tag, "uid=%ld, gid=%ld, euid=%ld, egid=%ld, suid=%ld, sgid=%ld", static_cast<long>(uid), static_cast<long>(gid), \
-            static_cast<long>(euid), static_cast<long>(egid), static_cast<long>(suid), static_cast<long>(sgid));             \
+      Dbg((ctl), "uid=%ld, gid=%ld, euid=%ld, egid=%ld, suid=%ld, sgid=%ld", static_cast<long>(uid), static_cast<long>(gid), \
+          static_cast<long>(euid), static_cast<long>(egid), static_cast<long>(suid), static_cast<long>(sgid));               \
     }                                                                                                                        \
   } while (0)
 
 #if TS_USE_POSIX_CAP
 
-#define DEBUG_PRIVILEGES(tag)                                                                                    \
+#define DEBUG_PRIVILEGES(ctl)                                                                                    \
   do {                                                                                                           \
-    if (diags()->on(tag)) {                                                                                      \
+    if ((ctl).on()) {                                                                                            \
       cap_t caps      = cap_get_proc();                                                                          \
       char *caps_text = cap_to_text(caps, nullptr);                                                              \
-      Debug(tag, "caps='%s', core=%s, death signal=%d, thread=0x%llx", caps_text, is_dumpable(), death_signal(), \
-            (unsigned long long)pthread_self());                                                                 \
+      Dbg((ctl), "caps='%s', core=%s, death signal=%d, thread=0x%llx", caps_text, is_dumpable(), death_signal(), \
+          (unsigned long long)pthread_self());                                                                   \
       cap_free(caps_text);                                                                                       \
       cap_free(caps);                                                                                            \
     }                                                                                                            \
@@ -72,19 +73,21 @@ ink_mutex ElevateAccess::lock = INK_MUTEX_INIT;
 
 #else /* TS_USE_POSIX_CAP */
 
-#define DEBUG_PRIVILEGES(tag)                                                                       \
+#define DEBUG_PRIVILEGES(ctl)                                                                       \
   do {                                                                                              \
-    if (diags()->on(tag)) {                                                                         \
-      Debug(tag, "caps='', core=%s, death signal=%d, thread=0x%llx", is_dumpable(), death_signal(), \
-            (unsigned long long)pthread_self());                                                    \
+    if ((ctl).on()) {                                                                               \
+      Dbg((ctl), "caps='', core=%s, death signal=%d, thread=0x%llx", is_dumpable(), death_signal(), \
+          (unsigned long long)pthread_self());                                                      \
     }                                                                                               \
   } while (0)
 
 #endif /* TS_USE_POSIX_CAP */
 
+DbgCtl dbg_ctl_privileges{"privileges"};
+
 #if !HAVE_GETRESUID
 static int
-getresuid(uid_t *uid, uid_t *euid, uid_t *suid)
+getresuid(uid_t *uid, uid_t *euid, uid_t * /* suid ATS_UNUSED */)
 {
   *uid  = getuid();
   *euid = geteuid();
@@ -94,7 +97,7 @@ getresuid(uid_t *uid, uid_t *euid, uid_t *suid)
 
 #if !HAVE_GETRESGID
 static int
-getresgid(gid_t *gid, gid_t *egid, gid_t *sgid)
+getresgid(gid_t *gid, gid_t *egid, gid_t * /* sgid ATS_UNUSED */)
 {
   *gid  = getgid();
   *egid = getegid();
@@ -137,21 +140,14 @@ death_signal()
   return signum;
 }
 
-void
-DebugCapabilities(const char *tag)
-{
-  DEBUG_CREDENTIALS(tag);
-  DEBUG_PRIVILEGES(tag);
-}
-
 static void
 impersonate(const struct passwd *pwd, ImpersonationLevel level)
 {
-  int deathsig  = death_signal();
+  int  deathsig = death_signal();
   bool dumpable = false;
 
-  DEBUG_CREDENTIALS("privileges");
-  DEBUG_PRIVILEGES("privileges");
+  DEBUG_CREDENTIALS(dbg_ctl_privileges);
+  DEBUG_PRIVILEGES(dbg_ctl_privileges);
 
   ink_release_assert(pwd != nullptr);
 
@@ -160,7 +156,11 @@ impersonate(const struct passwd *pwd, ImpersonationLevel level)
 #endif
 
   // Always repopulate the supplementary group list for the new user.
-  initgroups(pwd->pw_name, pwd->pw_gid);
+  if (geteuid() == 0) { // check that we have enough rights to call initgroups()
+    if (initgroups(pwd->pw_name, pwd->pw_gid) != 0) {
+      Fatal("switching to user %s, failed to initialize supplementary groups ID %ld", pwd->pw_name, (long)pwd->pw_gid);
+    }
+  }
 
   switch (level) {
   case IMPERSONATE_PERMANENT:
@@ -193,16 +193,25 @@ impersonate(const struct passwd *pwd, ImpersonationLevel level)
     EnableDeathSignal(deathsig);
   }
 
-  DEBUG_CREDENTIALS("privileges");
-  DEBUG_PRIVILEGES("privileges");
+  DEBUG_CREDENTIALS(dbg_ctl_privileges);
+  DEBUG_PRIVILEGES(dbg_ctl_privileges);
+}
+
+} // end anonymous namespace
+
+void
+DebugCapabilities(DbgCtl &dbg_ctl)
+{
+  DEBUG_CREDENTIALS(dbg_ctl);
+  DEBUG_PRIVILEGES(dbg_ctl);
 }
 
 void
 ImpersonateUserID(uid_t uid, ImpersonationLevel level)
 {
   struct passwd *pwd;
-  struct passwd pbuf;
-  char buf[max_passwd_size()];
+  struct passwd  pbuf;
+  char           buf[max_passwd_size()];
 
   if (getpwuid_r(uid, &pbuf, buf, sizeof(buf), &pwd) != 0) {
     Fatal("missing password database entry for UID %ld: %s", (long)uid, strerror(errno));
@@ -220,8 +229,8 @@ void
 ImpersonateUser(const char *user, ImpersonationLevel level)
 {
   struct passwd *pwd;
-  struct passwd pbuf;
-  char buf[max_passwd_size()];
+  struct passwd  pbuf;
+  char           buf[max_passwd_size()];
 
   if (*user == '#') {
     // Numeric user notation.
@@ -250,7 +259,7 @@ PreserveCapabilities()
 #if TS_USE_POSIX_CAP
   zret = prctl(PR_SET_KEEPCAPS, 1);
 #endif
-  Debug("privileges", "[PreserveCapabilities] zret : %d", zret);
+  Dbg(dbg_ctl_privileges, "[PreserveCapabilities] zret : %d", zret);
   return zret == 0;
 }
 
@@ -264,9 +273,9 @@ RestrictCapabilities()
   cap_t caps_orig = cap_get_proc();
 
   // Capabilities we need.
-  cap_value_t perm_list[]         = {CAP_NET_ADMIN, CAP_NET_BIND_SERVICE, CAP_IPC_LOCK, CAP_DAC_OVERRIDE, CAP_FOWNER};
+  cap_value_t      perm_list[]    = {CAP_NET_ADMIN, CAP_NET_BIND_SERVICE, CAP_IPC_LOCK, CAP_DAC_OVERRIDE, CAP_FOWNER, CAP_CHOWN};
   static int const PERM_CAP_COUNT = sizeof(perm_list) / sizeof(*perm_list);
-  cap_value_t eff_list[]          = {CAP_NET_ADMIN, CAP_NET_BIND_SERVICE, CAP_IPC_LOCK};
+  cap_value_t      eff_list[]     = {CAP_NET_ADMIN, CAP_NET_BIND_SERVICE, CAP_IPC_LOCK};
   static int const EFF_CAP_COUNT  = sizeof(eff_list) / sizeof(*eff_list);
 
   // Request capabilities one at a time.  If one capability fails
@@ -278,10 +287,9 @@ RestrictCapabilities()
     if (cap_set_flag(caps, CAP_PERMITTED, 1, perm_list + i, CAP_SET) < 0) {
     } else {
       if (cap_set_proc(caps) == -1) { // it failed, back out
-        Warning("CAP_PERMITTED failed for option %d", i);
+        Dbg(dbg_ctl_privileges, "CAP_PERMITTED failed for option %d", i);
       } else {
-        if (cap_set_flag(caps_good, CAP_PERMITTED, 1, perm_list + i, CAP_SET) < 0) {
-        }
+        if (cap_set_flag(caps_good, CAP_PERMITTED, 1, perm_list + i, CAP_SET) < 0) {}
       }
     }
     if (cap_set_proc(caps_orig) < 0) {
@@ -294,10 +302,9 @@ RestrictCapabilities()
     if (cap_set_flag(caps, CAP_EFFECTIVE, 1, eff_list + i, CAP_SET) < 0) {
     } else {
       if (cap_set_proc(caps) == -1) { // it failed, back out
-        Warning("CAP_EFFECTIVE failed for option %d", i);
+        Dbg(dbg_ctl_privileges, "CAP_EFFECTIVE failed for option %d", i);
       } else {
-        if (cap_set_flag(caps_good, CAP_EFFECTIVE, 1, eff_list + i, CAP_SET) < 0) {
-        }
+        if (cap_set_flag(caps_good, CAP_EFFECTIVE, 1, eff_list + i, CAP_SET) < 0) {}
       }
     }
     if (cap_set_proc(caps_orig) < 0) {
@@ -314,26 +321,26 @@ RestrictCapabilities()
     cap_flag_value_t val;
     if (cap_get_flag(caps_good, perm_list[i], CAP_PERMITTED, &val) < 0) {
     } else {
-      Warning("CAP_PERMITTED offiset %d is %s", i, val == CAP_SET ? "set" : "unset");
+      Dbg(dbg_ctl_privileges, "CAP_PERMITTED offset %d is %s", i, val == CAP_SET ? "set" : "unset");
     }
   }
   for (int i = 0; i < EFF_CAP_COUNT; i++) {
     cap_flag_value_t val;
     if (cap_get_flag(caps_good, eff_list[i], CAP_EFFECTIVE, &val) < 0) {
     } else {
-      Warning("CAP_EFFECTIVE offiset %d is %s", i, val == CAP_SET ? "set" : "unset");
+      Dbg(dbg_ctl_privileges, "CAP_EFFECTIVE offset %d is %s", i, val == CAP_SET ? "set" : "unset");
     }
   }
 
   cap_free(caps_good);
   cap_free(caps_orig);
 #endif
-  Debug("privileges", "[RestrictCapabilities] zret : %d", zret);
+  Dbg(dbg_ctl_privileges, "[RestrictCapabilities] zret : %d", zret);
   return zret == 0;
 }
 
 bool
-EnableCoreFile(bool flag)
+EnableCoreFile([[maybe_unused]] bool flag)
 {
   int zret = 0;
 
@@ -347,18 +354,16 @@ EnableCoreFile(bool flag)
   }
 #endif // linux check
 
-  Debug("privileges", "[EnableCoreFile] zret : %d", zret);
+  Dbg(dbg_ctl_privileges, "[EnableCoreFile] zret : %d", zret);
   return zret == 0;
 }
 
 void
-EnableDeathSignal(int signum)
+EnableDeathSignal([[maybe_unused]] int signum)
 {
-  (void)signum;
-
 #if defined(PR_SET_PDEATHSIG)
   if (prctl(PR_SET_PDEATHSIG, signum, 0, 0, 0) != 0) {
-    Debug("privileges", "prctl(PR_SET_PDEATHSIG) failed: %s", strerror(errno));
+    Dbg(dbg_ctl_privileges, "prctl(PR_SET_PDEATHSIG) failed: %s", strerror(errno));
   }
 #endif
 }
@@ -418,18 +423,23 @@ elevating_stat(const char *path, struct stat *buff)
   return ret;
 }
 
-#if TS_USE_POSIX_CAP
+#if !TS_USE_POSIX_CAP
+
+ink_mutex ElevateAccess::lock = INK_MUTEX_INIT;
+
+#else
+
 /** Acquire file access privileges to bypass DAC.
     @a level is a mask of the specific file access capabilities to acquire.
  */
 void
 ElevateAccess::acquirePrivilege(unsigned priv_mask)
 {
-  unsigned cap_count = 0;
-  cap_value_t cap_list[3];
-  cap_t new_cap_state;
+  unsigned    cap_count = 0;
+  cap_value_t cap_list[4];
+  cap_t       new_cap_state;
 
-  Debug("privileges", "[acquirePrivilege] level= %x", level);
+  Dbg(dbg_ctl_privileges, "[acquirePrivilege] level= %x", level);
 
   ink_assert(nullptr == cap_state);
 
@@ -453,7 +463,12 @@ ElevateAccess::acquirePrivilege(unsigned priv_mask)
     ++cap_count;
   }
 
-  ink_release_assert(cap_count <= sizeof(cap_list));
+  if (priv_mask & ElevateAccess::CHOWN_PRIVILEGE) {
+    cap_list[cap_count] = CAP_CHOWN;
+    ++cap_count;
+  }
+
+  ink_release_assert(cap_count <= sizeof(cap_list) / sizeof(cap_list[0]));
 
   if (cap_count > 0) {
     this->cap_state = cap_get_proc(); // save current capabilities
@@ -473,7 +488,7 @@ ElevateAccess::acquirePrivilege(unsigned priv_mask)
 void
 ElevateAccess::releasePrivilege()
 {
-  Debug("privileges", "[releaseFileAccessCap]");
+  Dbg(dbg_ctl_privileges, "[releaseFileAccessCap]");
 
   if (this->cap_state) {
     if (cap_set_proc(static_cast<cap_t>(cap_state)) != 0) {
@@ -495,9 +510,9 @@ ElevateAccess::ElevateAccess(unsigned lvl)
 {
   elevate(level);
 #if !TS_USE_POSIX_CAP
-  DEBUG_CREDENTIALS("privileges");
+  DEBUG_CREDENTIALS(dbg_ctl_privileges);
 #endif
-  DEBUG_PRIVILEGES("privileges");
+  DEBUG_PRIVILEGES(dbg_ctl_privileges);
 }
 
 ElevateAccess::~ElevateAccess()
@@ -505,9 +520,9 @@ ElevateAccess::~ElevateAccess()
   if (elevated) {
     demote();
 #if !TS_USE_POSIX_CAP
-    DEBUG_CREDENTIALS("privileges");
+    DEBUG_CREDENTIALS(dbg_ctl_privileges);
 #endif
-    DEBUG_PRIVILEGES("privileges");
+    DEBUG_PRIVILEGES(dbg_ctl_privileges);
   }
 }
 

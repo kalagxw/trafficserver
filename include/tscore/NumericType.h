@@ -19,7 +19,7 @@
     It is not necessary to ever mention some_random_tag_name
     again. All we need is the entry in the symbol table.
 
-    @section license License
+    @par License
 
     Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
@@ -149,9 +149,9 @@ public:
   self_type operator-(raw_type t);
 
   self_type &operator++();
-  self_type operator++(int);
+  self_type  operator++(int);
   self_type &operator--();
-  self_type operator--(int);
+  self_type  operator--(int);
 
 private:
   raw_type _t;

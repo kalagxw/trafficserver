@@ -22,8 +22,8 @@
  */
 
 #include "HttpDataFetcherImpl.h"
-#include "lib/Utils.h"
-#include "lib/gzip.h"
+#include "Utils.h"
+#include "gzip.h"
 
 #include <arpa/inet.h>
 #include <cstdlib>
@@ -32,6 +32,10 @@ using std::string;
 using namespace EsiLib;
 
 const int HttpDataFetcherImpl::FETCH_EVENT_ID_BASE = 10000;
+
+// Can only be used in HttpDataFetcherImpl member functions.
+//
+#define DBG(FMT, ...) Dbg(_dbg_ctl, FMT " address=%p", ##__VA_ARGS__, this)
 
 inline void
 HttpDataFetcherImpl::_release(RequestData &req_data)
@@ -46,11 +50,10 @@ HttpDataFetcherImpl::_release(RequestData &req_data)
   }
 }
 
-HttpDataFetcherImpl::HttpDataFetcherImpl(TSCont contp, sockaddr const *client_addr, const char *debug_tag)
-  : _contp(contp), _n_pending_requests(0), _curr_event_id_base(FETCH_EVENT_ID_BASE), _headers_str("")
+HttpDataFetcherImpl::HttpDataFetcherImpl(TSCont contp, sockaddr const *client_addr, char const *dbg_tag)
+  : _contp(contp), _n_pending_requests(0), _curr_event_id_base(FETCH_EVENT_ID_BASE), _headers_str(""), _dbg_ctl(dbg_tag)
 {
   _http_parser = TSHttpParserCreate();
-  snprintf(_debug_tag, sizeof(_debug_tag), "%s", debug_tag);
   // default client address to use for fetch url
   struct sockaddr_in sin;
   memset(&sin, 0, sizeof(sin));
@@ -62,6 +65,8 @@ HttpDataFetcherImpl::HttpDataFetcherImpl(TSCont contp, sockaddr const *client_ad
       memcpy(&_client_addr, client_addr, sizeof(sockaddr_in));
     } else if (client_addr->sa_family == AF_INET6) {
       memcpy(&_client_addr, client_addr, sizeof(sockaddr_in6));
+    } else if (client_addr->sa_family == AF_UNIX) {
+      memcpy(&_client_addr, client_addr, sizeof(sockaddr_un));
     } else {
       memcpy(&_client_addr, &sin, sizeof(sin));
       TSError("[HttpDataFetcherImpl] Unknown address family %d", client_addr->sa_family);
@@ -81,45 +86,64 @@ HttpDataFetcherImpl::~HttpDataFetcherImpl()
 bool
 HttpDataFetcherImpl::addFetchRequest(const string &url, FetchedDataProcessor *callback_obj /* = 0 */)
 {
+  static constexpr size_t MAX_REQ_LEN = 32 * 1024;
+
+  size_t total_len        = 0;
+  auto   add_to_total_len = [&total_len](size_t part_len) -> bool {
+    if (part_len > (MAX_REQ_LEN - total_len)) {
+      return false;
+    }
+    total_len += part_len;
+    return true;
+  };
+  if (!add_to_total_len(sizeof("GET ") - 1) || !add_to_total_len(url.length()) || !add_to_total_len(sizeof(" HTTP/1.0\r\n") - 1) ||
+      !add_to_total_len(_headers_str.length()) || !add_to_total_len(sizeof("\r\n") - 1)) {
+    TSError("[HttpDataFetcherImpl][%s] HTTP request size exceeds maximum %zu", __FUNCTION__, MAX_REQ_LEN);
+    return false;
+  }
+
   // do we already have a request for this?
   std::pair<UrlToContentMap::iterator, bool> insert_result = _pages.insert(UrlToContentMap::value_type(url, RequestData()));
   if (callback_obj) {
     ((insert_result.first)->second).callback_objects.push_back(callback_obj);
   }
   if (!insert_result.second) {
-    TSDebug(_debug_tag, "[%s] Fetch request for url [%s] already added", __FUNCTION__, url.data());
+    DBG("[%s] Fetch request for url [%s] already added", __FUNCTION__, url.data());
     return true;
   }
 
-  char buff[1024];
-  char *http_req;
-  int length;
+  char   buff[1024];
+  char  *http_req;
+  int    length;
+  size_t req_buf_size = 0;
 
-  length = sizeof("GET ") - 1 + url.length() + sizeof(" HTTP/1.0\r\n") - 1 + _headers_str.length() + sizeof("\r\n") - 1;
+  length = static_cast<int>(total_len);
   if (length < static_cast<int>(sizeof(buff))) {
-    http_req = buff;
+    http_req     = buff;
+    req_buf_size = sizeof(buff);
   } else {
-    http_req = static_cast<char *>(malloc(length + 1));
+    req_buf_size = length + 1;
+    http_req     = static_cast<char *>(malloc(req_buf_size));
     if (http_req == nullptr) {
       TSError("[HttpDataFetcherImpl][%s] malloc %d bytes fail", __FUNCTION__, length + 1);
       return false;
     }
   }
 
-  sprintf(http_req, "GET %s HTTP/1.0\r\n%s\r\n", url.c_str(), _headers_str.c_str());
+  snprintf(http_req, req_buf_size, "GET %s HTTP/1.0\r\n%s\r\n", url.c_str(), _headers_str.c_str());
 
   TSFetchEvent event_ids;
-  event_ids.success_event_id = _curr_event_id_base;
-  event_ids.failure_event_id = _curr_event_id_base + 1;
-  event_ids.timeout_event_id = _curr_event_id_base + 2;
-  _curr_event_id_base += 3;
+  event_ids.success_event_id  = _curr_event_id_base;
+  event_ids.failure_event_id  = _curr_event_id_base + 1;
+  event_ids.timeout_event_id  = _curr_event_id_base + 2;
+  _curr_event_id_base        += 3;
 
   TSFetchUrl(http_req, length, reinterpret_cast<sockaddr *>(&_client_addr), _contp, AFTER_BODY, event_ids);
   if (http_req != buff) {
     free(http_req);
   }
 
-  TSDebug(_debug_tag, "[%s] Successfully added fetch request for URL [%s]", __FUNCTION__, url.data());
+  DBG("[%s] Successfully added fetch request for URL [%s]", __FUNCTION__, url.data());
   _page_entry_lookup.push_back(insert_result.first);
   ++_n_pending_requests;
   return true;
@@ -130,8 +154,8 @@ HttpDataFetcherImpl::_isFetchEvent(TSEvent event, int &base_event_id) const
 {
   base_event_id = _getBaseEventId(event);
   if ((base_event_id < 0) || (base_event_id >= static_cast<int>(_page_entry_lookup.size()))) {
-    TSDebug(_debug_tag, "[%s] Event id %d not within fetch event id range [%d, %ld)", __FUNCTION__, event, FETCH_EVENT_ID_BASE,
-            static_cast<long int>(FETCH_EVENT_ID_BASE + (_page_entry_lookup.size() * 3)));
+    DBG("[%s] Event id %d not within fetch event id range [%d, %ld)", __FUNCTION__, event, FETCH_EVENT_ID_BASE,
+        static_cast<long int>(FETCH_EVENT_ID_BASE + (_page_entry_lookup.size() * 3)));
     return false;
   }
   return true;
@@ -147,8 +171,8 @@ HttpDataFetcherImpl::handleFetchEvent(TSEvent event, void *edata)
   }
 
   UrlToContentMap::iterator &req_entry = _page_entry_lookup[base_event_id];
-  const string &req_str                = req_entry->first;
-  RequestData &req_data                = req_entry->second;
+  const string              &req_str   = req_entry->first;
+  RequestData               &req_data  = req_entry->second;
 
   if (req_data.complete) {
     // can only happen if there's a bug in this or fetch API code
@@ -166,10 +190,10 @@ HttpDataFetcherImpl::handleFetchEvent(TSEvent event, void *edata)
     return true;
   }
 
-  int page_data_len;
+  int         page_data_len;
   const char *page_data = TSFetchRespGet(static_cast<TSHttpTxn>(edata), &page_data_len);
   req_data.response.assign(page_data, page_data_len);
-  bool valid_data_received = false;
+  bool        valid_data_received = false;
   const char *startptr = req_data.response.data(), *endptr = startptr + page_data_len;
 
   req_data.bufp    = TSMBufferCreate();
@@ -183,8 +207,8 @@ HttpDataFetcherImpl::handleFetchEvent(TSEvent event, void *edata)
     if (req_data.resp_status == TS_HTTP_STATUS_OK) {
       req_data.body_len = endptr - startptr;
       req_data.body     = startptr;
-      TSDebug(_debug_tag, "[%s] Inserted page data of size %d starting with [%.6s] for request [%s]", __FUNCTION__,
-              req_data.body_len, (req_data.body_len ? req_data.body : "(null)"), req_str.c_str());
+      DBG("[%s] Inserted page data of size %d starting with [%.6s] for request [%s]", __FUNCTION__, req_data.body_len,
+          (req_data.body_len ? req_data.body : "(null)"), req_str.c_str());
 
       if (_checkHeaderValue(req_data.bufp, req_data.hdr_loc, TS_MIME_FIELD_CONTENT_ENCODING, TS_MIME_LEN_CONTENT_ENCODING,
                             TS_HTTP_VALUE_GZIP, TS_HTTP_LEN_GZIP, false)) {
@@ -207,7 +231,7 @@ HttpDataFetcherImpl::handleFetchEvent(TSEvent event, void *edata)
       }
 
     } else {
-      TSDebug(_debug_tag, "[%s] Received non-OK status %d for request [%s]", __FUNCTION__, req_data.resp_status, req_str.data());
+      DBG("[%s] Received non-OK status %d for request [%s]", __FUNCTION__, req_data.resp_status, req_str.data());
 
       string empty_response = "";
       for (CallbackObjectList::iterator list_iter = req_data.callback_objects.begin(); list_iter != req_data.callback_objects.end();
@@ -216,7 +240,7 @@ HttpDataFetcherImpl::handleFetchEvent(TSEvent event, void *edata)
       }
     }
   } else {
-    TSDebug(_debug_tag, "[%s] Could not parse response for request [%s]", __FUNCTION__, req_str.data());
+    DBG("[%s] Could not parse response for request [%s]", __FUNCTION__, req_str.data());
   }
 
   if (!valid_data_received) {
@@ -240,8 +264,8 @@ HttpDataFetcherImpl::_checkHeaderValue(TSMBuffer bufp, TSMLoc hdr_loc, const cha
 
   if (exp_value && exp_value_len) {
     const char *value;
-    int value_len;
-    int n_values = TSMimeHdrFieldValuesCount(bufp, hdr_loc, field_loc);
+    int         value_len;
+    int         n_values = TSMimeHdrFieldValuesCount(bufp, hdr_loc, field_loc);
 
     for (int i = 0; i < n_values; ++i) {
       value = TSMimeHdrFieldValueStringGet(bufp, hdr_loc, field_loc, i, &value_len);
@@ -254,7 +278,7 @@ HttpDataFetcherImpl::_checkHeaderValue(TSMBuffer bufp, TSMLoc hdr_loc, const cha
           retval = true;
         }
       } else {
-        TSDebug(_debug_tag, "[%s] Error while getting value # %d of header [%.*s]", __FUNCTION__, i, name_len, name);
+        DBG("[%s] Error while getting value # %d of header [%.*s]", __FUNCTION__, i, name_len, name);
       }
       if (retval) {
         break;
@@ -290,8 +314,7 @@ HttpDataFetcherImpl::getData(const string &url, ResponseData &resp_data) const
   }
 
   resp_data.set(req_data.body, req_data.body_len, req_data.bufp, req_data.hdr_loc, req_data.resp_status);
-  TSDebug(_debug_tag, "[%s] Found data for URL [%s] of size %d starting with [%.5s]", __FUNCTION__, url.data(), req_data.body_len,
-          req_data.body);
+  DBG("[%s] Found data for URL [%s] of size %d starting with [%.5s]", __FUNCTION__, url.data(), req_data.body_len, req_data.body);
   return true;
 }
 

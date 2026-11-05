@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -34,8 +34,9 @@
 
  ****************************************************************************/
 
-#include "tscore/BufferWriter.h"
-#include "tscore/bwf_std_format.h"
+#include "tsutil/DbgCtl.h"
+#include "tscore/DiagsTypes.h"
+#include "tsutil/ts_bw_format.h"
 #include "tscore/ink_platform.h"
 #include "tscore/ink_memory.h"
 #include "tscore/ink_defs.h"
@@ -46,10 +47,12 @@
 #include "tscore/ink_thread.h"
 #include "tscore/Regression.h"
 #include "tscore/Diags.h"
+#include "ts/ts.h"
+#include <string_view>
 
-int diags_on_for_plugins          = 0;
-char ts_new_debug_on_flag_        = 0;
 int DiagsConfigState::_enabled[2] = {0, 0};
+
+using namespace swoc::literals;
 
 void
 DiagsConfigState::enabled(DiagsTagType dtt, int new_value)
@@ -60,8 +63,7 @@ DiagsConfigState::enabled(DiagsTagType dtt, int new_value)
   _enabled[dtt] = new_value;
 
   if (DiagsTagType_Debug == dtt) {
-    diags_on_for_plugins  = 1 == new_value;
-    ts_new_debug_on_flag_ = (1 & new_value) != 0;
+    DbgCtl::_config_mode.store(new_value, std::memory_order_relaxed);
   }
 }
 
@@ -73,7 +75,7 @@ DiagsPtr::set(Diags *new_ptr)
 {
   _diags_ptr = new_ptr;
 
-  DbgCtl::update();
+  DebugInterface::set_instance(new_ptr);
 }
 
 static bool regression_testing_on = false;
@@ -84,38 +86,15 @@ tell_diags_regression_testing_is_on()
   regression_testing_on = true;
 }
 
-static bool
-location(const SourceLocation *loc, DiagsShowLocation show, DiagsLevel level)
-{
-  if (loc && loc->valid()) {
-    switch (show) {
-    case SHOW_LOCATION_ALL:
-      return true;
-    case SHOW_LOCATION_DEBUG:
-      return level <= DL_Debug;
-    default:
-      return false;
-    }
-  }
-
-  return false;
-}
-
 //////////////////////////////////////////////////////////////////////////////
 //
-//      Diags::Diags(char *bdt, char *bat)
+//      Diags::Diags(prefix_string, bdt, bat, _diags_log, dl_perm, ol_perm)
 //
-//      This is the constructor for the Diags class.  The constructor takes
-//      two strings called the "base debug tags" (bdt) and the
-//      "base action tags" (bat).  These represent debug/action overrides,
-//      to override the records.config values.  They current come from
-//      command-line options.
-//
-//      If bdt is not nullptr, and not "", it overrides records.config settings.
-//      If bat is not nullptr, and not "", it overrides records.config settings.
-//
-//      When the constructor is done, records.config callbacks will be set,
-//      the initial values read, and the Diags instance will be ready to use.
+//      Constructor for the Diags class.  bdt and bat are the "base debug
+//      tags" and "base action tags" — command-line overrides for the
+//      records.yaml tag settings.  Non-null, non-empty values are stored
+//      for later use by activate_taglist(); activated tag tables are left
+//      empty until an external reconfigure call populates them.
 //
 //////////////////////////////////////////////////////////////////////////////
 
@@ -226,7 +205,7 @@ Diags::~Diags()
 //      parentheses if its value is not nullptr.  It takes a <diags_level>,
 //      which is converted to a prefix string.
 //      print_va takes an optional source location structure pointer <loc>,
-//      which can be nullptr.  If <loc> is not NULL, the source code location
+//      which can be nullptr.  If <loc> is not null, the source code location
 //      is converted to a string, and printed between angle brackets.
 //      Finally, it takes a printf format string <format_string>, and a
 //      va_list list of varargs.
@@ -238,6 +217,7 @@ Diags::~Diags()
 //              void print(...)
 //              void log_va(...)
 //              void log(...)
+//              void error_va(...)
 //
 //////////////////////////////////////////////////////////////////////////////
 
@@ -246,39 +226,23 @@ Diags::print_va(const char *debug_tag, DiagsLevel diags_level, const SourceLocat
                 va_list ap) const
 {
   ink_release_assert(diags_level < DiagsLevel_Count);
-  ts::LocalBufferWriter<1024> format_writer;
-
-  // Save room for optional newline and terminating NUL bytes.
-  format_writer.clip(2);
-
-  format_writer.print("[{timestamp}] ");
-  auto timestamp_offset = format_writer.size();
-
-  format_writer.print("{thread-name}");
-  format_writer.print(" {}: ", level_name(diags_level));
-
-  if (location(loc, show_location, diags_level)) {
-    format_writer.print("<{}> ", *loc);
-  }
-
-  if (debug_tag) {
-    format_writer.print("({}) ", debug_tag);
-  }
-
-  format_writer.print("{}", format_string);
-
-  format_writer.extend(2);                   // restore the space for required termination.
-  if (format_writer.view().back() != '\n') { // safe because always some chars in the buffer.
-    format_writer.write('\n');
-  }
-  format_writer.write('\0');
+  swoc::LocalBufferWriter<1024> format_writer;
+  auto timestamp_offset = generate_format_string(format_writer, debug_tag, diags_level, loc, show_location, format_string);
 
   //////////////////////////////////////
   // now, finally, output the message //
   //////////////////////////////////////
 
-  lock();
-  if (config.outputs[diags_level].to_diagslog) {
+  auto const &output = config.outputs[diags_level];
+
+  // FILE output must be serialized, but syslog provides its own thread safety.
+  bool const serialize_file_output = output.to_diagslog || output.to_stdout || output.to_stderr || regression_testing_on;
+
+  if (serialize_file_output) {
+    lock();
+  }
+
+  if (output.to_diagslog) {
     if (diags_log && diags_log->m_fp) {
       va_list tmp;
       va_copy(tmp, ap);
@@ -287,7 +251,7 @@ Diags::print_va(const char *debug_tag, DiagsLevel diags_level, const SourceLocat
     }
   }
 
-  if (config.outputs[diags_level].to_stdout) {
+  if (output.to_stdout) {
     if (stdout_log && stdout_log->m_fp) {
       va_list tmp;
       va_copy(tmp, ap);
@@ -296,7 +260,7 @@ Diags::print_va(const char *debug_tag, DiagsLevel diags_level, const SourceLocat
     }
   }
 
-  if (config.outputs[diags_level].to_stderr || regression_testing_on) {
+  if (output.to_stderr || regression_testing_on) {
     if (stderr_log && stderr_log->m_fp) {
       va_list tmp;
       va_copy(tmp, ap);
@@ -305,12 +269,12 @@ Diags::print_va(const char *debug_tag, DiagsLevel diags_level, const SourceLocat
     }
   }
 
-#if !defined(freebsd)
-  unlock();
-#endif
+  if (serialize_file_output) {
+    unlock();
+  }
 
-  if (config.outputs[diags_level].to_syslog) {
-    int priority;
+  if (output.to_syslog) {
+    int  priority;
     char syslog_buffer[2048];
 
     switch (diags_level) {
@@ -347,10 +311,6 @@ Diags::print_va(const char *debug_tag, DiagsLevel diags_level, const SourceLocat
     vsnprintf(syslog_buffer, sizeof(syslog_buffer), format_writer.data() + timestamp_offset, ap);
     syslog(priority, "%s", syslog_buffer);
   }
-
-#if defined(freebsd)
-  unlock();
-#endif
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -359,54 +319,53 @@ Diags::print_va(const char *debug_tag, DiagsLevel diags_level, const SourceLocat
 //
 //      This routine inquires if a particular <tag> in the tag table of
 //      type <mode> is activated, returning true if it is, false if it
-//      isn't.  If <tag> is nullptr, true is returned.  The call uses a lock
-//      to get atomic access to the tag tables.
+//      isn't.  If <tag> is nullptr, true is returned.  The active regex
+//      pointer is snapshotted under tag_table_lock; regex execution runs
+//      outside the lock.
 //
 //////////////////////////////////////////////////////////////////////////////
 
 bool
 Diags::tag_activated(const char *tag, DiagsTagType mode) const
 {
-  bool activated = false;
-
   if (tag == nullptr) {
-    return (true);
+    return true;
   }
 
-  lock();
-  if (activated_tags[mode]) {
-    activated = (activated_tags[mode]->match(tag) != -1);
+  // Snapshot the regex under the lock, then release the lock before running
+  // Regex::exec().  exec() can lazily construct a thread_local RegexContext
+  // whose destructor registration via __cxa_thread_atexit_impl takes the
+  // dynamic loader lock.  Holding tag_table_lock across exec() therefore
+  // creates a lock-order inversion with dlopen() callers that construct a
+  // DbgCtl during a plugin's static initialization (which takes
+  // tag_table_lock while already holding the dl loader lock).  See the
+  // analogous fix in DbgCtl::_new_reference.
+  std::shared_ptr<Regex> regex;
+  {
+    lock();
+    regex = activated_tags[mode];
+    unlock();
   }
-  unlock();
 
-  return (activated);
+  return regex ? regex->exec(tag, RE_ANCHORED) : false;
 }
-
-//////////////////////////////////////////////////////////////////////////////
-//
-//      void Diags::activate_taglist(char * taglist, DiagsTagType mode)
-//
-//      This routine adds all tags in the vertical-bar-separated taglist
-//      to the tag table of type <mode>.  Each addition is done under a lock.
-//      If an individual tag is already set, that tag is ignored.  If
-//      <taglist> is nullptr, this routine exits immediately.
-//
-//////////////////////////////////////////////////////////////////////////////
 
 void
 Diags::activate_taglist(const char *taglist, DiagsTagType mode)
 {
   if (taglist) {
-    lock();
-    if (activated_tags[mode]) {
-      delete activated_tags[mode];
+    // Compile the new regex outside tag_table_lock to avoid holding the lock
+    // across work that may touch thread_local state (see tag_activated).
+    auto new_regex = std::make_shared<Regex>();
+    new_regex->compile(taglist);
+    {
+      lock();
+      activated_tags[mode] = std::move(new_regex);
+      unlock();
     }
-    activated_tags[mode] = new DFA;
-    activated_tags[mode]->compile(taglist);
-    unlock();
   }
   if ((DiagsTagType_Debug == mode) && (this == diags())) {
-    DbgCtl::update();
+    DbgCtl::update([&](const char *tag) -> bool { return tag_activated(tag, DiagsTagType_Debug); });
   }
 }
 
@@ -424,49 +383,10 @@ void
 Diags::deactivate_all(DiagsTagType mode)
 {
   lock();
-  if (activated_tags[mode]) {
-    delete activated_tags[mode];
-    activated_tags[mode] = nullptr;
-  }
+  activated_tags[mode].reset();
   unlock();
   if ((DiagsTagType_Debug == mode) && (this == diags())) {
-    DbgCtl::update();
-  }
-}
-
-//////////////////////////////////////////////////////////////////////////////
-//
-//      const char *Diags::level_name(DiagsLevel dl)
-//
-//      This routine returns a string name corresponding to the error
-//      level <dl>, suitable for us as an output log entry prefix.
-//
-//////////////////////////////////////////////////////////////////////////////
-
-const char *
-Diags::level_name(DiagsLevel dl) const
-{
-  switch (dl) {
-  case DL_Diag:
-    return ("DIAG");
-  case DL_Debug:
-    return ("DEBUG");
-  case DL_Status:
-    return ("STATUS");
-  case DL_Note:
-    return ("NOTE");
-  case DL_Warning:
-    return ("WARNING");
-  case DL_Error:
-    return ("ERROR");
-  case DL_Fatal:
-    return ("FATAL");
-  case DL_Alert:
-    return ("ALERT");
-  case DL_Emergency:
-    return ("EMERGENCY");
-  default:
-    return ("DIAG");
+    DbgCtl::update([&](const char *tag) -> bool { return tag_activated(tag, DiagsTagType_Debug); });
   }
 }
 
@@ -502,6 +422,9 @@ Diags::error_va(DiagsLevel level, const SourceLocation *loc, const char *format_
     va_list ap2;
 
     va_copy(ap2, ap);
+    // No re-entry guard: if two threads emit a terminal-level message
+    // concurrently, or if cleanup_func itself emits one, cleanup_func may
+    // be invoked more than once. The callback must tolerate this.
     if (cleanup_func) {
       cleanup_func();
     }
@@ -516,12 +439,6 @@ Diags::error_va(DiagsLevel level, const SourceLocation *loc, const char *format_
   }
 }
 
-/*
- * Sets up and error handles the given BaseLogFile object to work
- * with this instance of Diags.
- *
- * Returns true on success, false otherwise
- */
 bool
 Diags::setup_diagslog(BaseLogFile *blf)
 {
@@ -552,19 +469,6 @@ Diags::config_roll_outputlog(RollingEnabledValues re, int ri, int rs)
   outputlog_rolling_size     = rs;
 }
 
-/*
- * Update diags_log to use the underlying file on disk.
- *
- * This function will replace the current BaseLogFile object with a new one, as
- * each BaseLogFile object logically represents one file on disk. It can be
- * used when we want to re-open the log file if the initial one was moved.
- *
- * Note that, however, cross process race conditions may still exist,
- * especially with the metafile, and further work with flock() for fcntl() may
- * still need to be done.
- *
- * Returns true if the log was reseated, false otherwise.
- */
 bool
 Diags::reseat_diagslog()
 {
@@ -608,7 +512,8 @@ Diags::should_roll_diagslog()
   log_log_trace("%s: rolling_enabled = %d, output_rolling_size = %d, output_rolling_interval = %d\n", __func__,
                 diagslog_rolling_enabled, diagslog_rolling_size, diagslog_rolling_interval);
   log_log_trace("%s: RollingEnabledValues::ROLL_ON_TIME = %d\n", __func__, RollingEnabledValues::ROLL_ON_TIME);
-  log_log_trace("%s: time(0) - last_roll_time = %d\n", __func__, time(nullptr) - diagslog_time_last_roll);
+  log_log_trace("%s: time(0) - last_roll_time = %" PRId64 "\n", __func__,
+                static_cast<int64_t>(time(nullptr) - diagslog_time_last_roll));
 
   // Roll diags_log if necessary
   if (diags_log && diags_log->is_init()) {
@@ -694,7 +599,8 @@ Diags::should_roll_outputlog()
   log_log_trace("%s: rolling_enabled = %d, output_rolling_size = %d, output_rolling_interval = %d\n", __func__,
                 outputlog_rolling_enabled, outputlog_rolling_size, outputlog_rolling_interval);
   log_log_trace("%s: RollingEnabledValues::ROLL_ON_TIME = %d\n", __func__, RollingEnabledValues::ROLL_ON_TIME);
-  log_log_trace("%s: time(0) - last_roll_time = %d\n", __func__, time(nullptr) - outputlog_time_last_roll);
+  log_log_trace("%s: time(0) - last_roll_time = %" PRId64 "\n", __func__,
+                static_cast<int64_t>(time(nullptr) - outputlog_time_last_roll));
   log_log_trace("%s: stdout_log = %p\n", __func__, stdout_log);
 
   // Roll stdout_log if necessary
@@ -773,7 +679,7 @@ Diags::should_roll_outputlog()
   // If for some reason, someone wants the feature to have stdout pointing to some file on
   // disk, and stderr pointing to a different file on disk, and then also wants both files to
   // rotate according to the (same || different) scheme, it would not be difficult to add
-  // some more config options in records.config and said feature into this function.
+  // some more config options in records.yaml and said feature into this function.
   if (ret_val) {
     ink_assert(!need_consider_stderr);
   }
@@ -781,18 +687,12 @@ Diags::should_roll_outputlog()
   return ret_val;
 }
 
-/*
- * Sets up a BaseLogFile for the specified file. Then it binds the specified standard steam
- * to the aforementioned BaseLogFile.
- *
- * Returns true on successful binding and setup, false otherwise
- */
 bool
 Diags::set_std_output(StdStream stream, const char *file)
 {
-  const char *target_stream;
+  const char   *target_stream;
   BaseLogFile **current;
-  BaseLogFile *old_log, *new_log;
+  BaseLogFile  *old_log, *new_log;
 
   // If the caller is stupid, we give up
   if (strcmp(file, "") == 0) {
@@ -817,7 +717,7 @@ Diags::set_std_output(StdStream stream, const char *file)
     log_log_error("[Warning]: %s is currently not bound to anything\n", target_stream);
     delete new_log;
     lock();
-    *current = nullptr;
+    *current = nullptr; // old_log is not freed here
     unlock();
     return false;
   }
@@ -826,7 +726,7 @@ Diags::set_std_output(StdStream stream, const char *file)
     log_log_error("[Warning]: %s is currently not bound to anything\n", target_stream);
     delete new_log;
     lock();
-    *current = nullptr;
+    *current = nullptr; // old_log is not freed here
     unlock();
     return false;
   }
@@ -857,7 +757,7 @@ bool
 Diags::rebind_std_stream(StdStream stream, int new_fd)
 {
   const char *target_stream;
-  int stream_fd;
+  int         stream_fd;
 
   // Figure out which stream to dup2
   if (stream == StdStream::STDOUT) {

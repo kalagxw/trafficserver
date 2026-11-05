@@ -1,4 +1,4 @@
-#!/bin/bash
+#! /usr/bin/env bash
 
 #  Licensed to the Apache Software Foundation (ASF) under one
 #  or more contributor license agreements.  See the NOTICE file
@@ -26,31 +26,31 @@ _END_
 
 if [ $? = 1 ]; then
     echo "Python 3.6 or newer is not installed/enabled."
-    return
+    exit 1
 else
     echo "Python 3.6 or newer detected!"
 fi
 
-# check for python development header -- for autest
+# Check for Python development headers needed by test dependencies with native extensions.
 python3-config &> /dev/null
 if [ $? = 1 ]; then
     echo "python3-dev/devel detected!"
 else
     echo "python3-dev/devel is not installed. "
-    return
+    exit 1
 fi
 
-# check for pipenv
-pipenv --version &> /dev/null
+# check for uv
+uv --version &> /dev/null
 if [ $? -eq 0 ]; then
-    echo "pipenv detected!"
-    pipenv --venv &> /dev/null
-    if [ $? -ne 0 ]; then
-        echo "Installing a new virtual environment via pipenv"
-        pipenv install
+    echo "uv detected!"
+    if [ ! -d .venv ]; then
+        echo "Installing a new virtual environment via uv"
+        uv sync
     else
         echo "Using the pre-existing virtual environment."
     fi
 else
-    echo "pipenv is not installed/enabled. "
+    echo "uv is not installed/enabled. "
+    exit 1
 fi

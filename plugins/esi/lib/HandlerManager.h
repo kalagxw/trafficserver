@@ -26,7 +26,6 @@
 #include <string>
 #include <map>
 
-#include "ComponentBase.h"
 #include "Utils.h"
 #include "SpecialIncludeHandler.h"
 #include "IncludeHandlerFactory.h"
@@ -35,31 +34,29 @@
 
 namespace EsiLib
 {
-class HandlerManager : protected ComponentBase
+class HandlerManager
 {
 public:
-  HandlerManager(const char *debug_tag, Debug debug_func, Error error_func) : ComponentBase(debug_tag, debug_func, error_func){};
-
   void loadObjects(const Utils::KeyValueMap &handlers);
 
   SpecialIncludeHandler *getHandler(Variables &esi_vars, Expression &esi_expr, HttpDataFetcher &http_fetcher,
                                     const std::string &id) const;
 
-  ~HandlerManager() override;
+  ~HandlerManager();
 
 private:
-  typedef std::map<std::string, SpecialIncludeHandlerCreator> FunctionHandleMap;
+  using FunctionHandleMap = std::map<std::string, SpecialIncludeHandlerCreator>;
 
   struct ModuleHandles {
-    void *object;
+    void                        *object;
     SpecialIncludeHandlerCreator function;
     ModuleHandles(void *o = nullptr, SpecialIncludeHandlerCreator f = nullptr) : object(o), function(f){};
   };
 
-  typedef std::map<std::string, ModuleHandles> ModuleHandleMap;
+  using ModuleHandleMap = std::map<std::string, ModuleHandles>;
 
   FunctionHandleMap _id_to_function_map;
-  ModuleHandleMap _path_to_module_map;
+  ModuleHandleMap   _path_to_module_map;
 
   static const char *const FACTORY_FUNCTION_NAME;
 };

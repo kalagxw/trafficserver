@@ -2,7 +2,7 @@
 
   A brief file description
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -35,11 +35,7 @@ public:
   x_pthread_mutexattr_t()
   {
     pthread_mutexattr_init(&attr);
-#ifndef POSIX_THREAD_10031c
-    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
-#endif
-
-#if DEBUG && HAVE_PTHREAD_MUTEXATTR_SETTYPE
+#if DEBUG
     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
 #endif
   }
@@ -49,12 +45,11 @@ public:
   pthread_mutexattr_t attr;
 };
 
-static x_pthread_mutexattr_t attr;
-
 void
 ink_mutex_init(ink_mutex *m)
 {
-  int error;
+  int                          error;
+  static x_pthread_mutexattr_t attr;
 
   error = pthread_mutex_init(m, &attr.attr);
   if (unlikely(error != 0)) {

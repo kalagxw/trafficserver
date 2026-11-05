@@ -15,7 +15,7 @@
    permissions and limitations under the License.
 
 .. include:: ../../../common.defs
-.. default-domain:: c
+.. default-domain:: cpp
 
 .. _tsuserargs:
 
@@ -61,7 +61,8 @@ plugin can reserve a slot of a particular type by calling :func:`TSUserArgIndexR
    The type for which the plugin intend to reserve a slot. See :code:`TSUserArgType` above.
 
 :arg:`name`
-   An identifying name for the plugin that reserved the index. Required.
+   An unique and identifying name for the reserved slot index. A plugin registering
+   multiple slots (not recommended!) must make sure the identifier is unique.
 
 :arg:`description`
    An optional description of the use of the arg. This can be :code:`nullptr`.
@@ -79,7 +80,7 @@ independently.
 
 To look up the owner of a reserved index use :func:`TSUserArgIndexNameLookup`, with the appropriate type.
 If :arg:`name` is found as an owner, the function returns :code:`TS_SUCCESS` and :arg:`arg_index` is
-updated with the index reserved under that name. If :arg:`description` is not :code:`NULL` then
+updated with the index reserved under that name. If :arg:`description` is not :code:`nullptr` then
 the character pointer to which it points will be updated to point at the description for that
 reserved index. This enables communication between plugins where plugin "A" reserves an index under
 a well known name and plugin "B" locates the index by looking it up under that name.
@@ -87,11 +88,11 @@ a well known name and plugin "B" locates the index by looking it up under that n
 The owner of a reserved index can be found with :func:`TSUserArgIndexLookup`. If
 :arg:`arg_index` is reserved then the function returns :code:`TS_SUCCESS` and the pointers referred
 to by :arg:`name` and :arg:`description` are updated. :arg:`name` must point at a valid character
-pointer but :arg:`description` can be :code:`NULL` in which case it is ignored.
+pointer but :arg:`description` can be :code:`nullptr` in which case it is ignored.
 
 Manipulating the array is simple. :func:`TSUserArgSet` sets the array slot at :arg:`arg_idx`, for the
 particular type based on the provide data pointer. The values can be retrieved with the value from
-:func:`TSUserArgGet`. Values that have not been set are :code:`NULL`. Note that both the setter and the getter are
+:func:`TSUserArgGet`. Values that have not been set are :code:`nullptr`. Note that both the setter and the getter are
 context sensitive, based on the type (or value) of the data pointer:
 
    ============== =======================================================================

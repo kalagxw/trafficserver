@@ -168,9 +168,10 @@ modifies the IO buffer directly.
 Transaction Data Sink
 ~~~~~~~~~~~~~~~~~~~~~
 
-The hook `TS_HTTP_RESPONSE_CLIENT_HOOK` is a hook that supports a special type of transformation, one with only input and no output.
-Although the transformation doesn't provide data back to Traffic Server it can do anything else with the data, such as writing it
-to another output device or process. It must, however, consume all the data for the transaction. There are two primary use cases.
+The `TS_HTTP_REQUEST_CLIENT_HOOK` and `TS_HTTP_RESPONSE_CLIENT_HOOK` hooks supports a special type of transformation, one with only request or
+response body input and no output.  Although the transformation doesn't provide data back to Traffic Server they can do anything else with the
+data, such as writing it to another output device or process. It must, however, consume all the data for the transaction. There are two primary
+use cases.
 
 #. Tap in to the transaction to provide the data for external processing.
 #. Maintain the transaction.
@@ -181,5 +182,5 @@ and will keep the transaction and the origin server connection up. This is usefu
 run to completion even if the user agent disconnects. Examples would be a standard transform that is expensive to initiate, or expensive
 origin server connections that should be :ts:cv:`shared <proxy.config.http.server_session_sharing.match>`.
 
-There is an `example plugin <https://github.com/apache/trafficserver/blob/master/example/plugins/c-api/txn_data_sink/txn_data_sink.c>`_ that demonstrates
+There is an `example plugin <https://github.com/apache/trafficserver/blob/master/example/plugins/c-api/txn_data_sink/txn_data_sink.cc>`_ that demonstrates
 this used as a pure data sink to keep the transaction up regardless of whether the user agent disconnects.

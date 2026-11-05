@@ -28,7 +28,7 @@ domains provided by local extensions.
 Types
 =====
 
-Data types are documented using the standard ``:c:type:`` markup provided by
+Data types are documented using the standard ``:cpp:type:`` markup provided by
 Sphinx. Types provided by the C API should be documented in
 ``doc/developer-guide/api/types/``
 
@@ -55,7 +55,7 @@ argument (the default value). ::
 
     :ts:cv: <scope> <variable name> <data type> <value>
 
-This corresponds exactly to the line in :file:`records.config`.
+This corresponds exactly to the line in :file:`records.yaml`.
 
 Definition
 ~~~~~~~~~~

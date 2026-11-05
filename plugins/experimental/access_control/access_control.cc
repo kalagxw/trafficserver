@@ -98,15 +98,15 @@ AccessTokenStatus
 AccessToken::validateSignature()
 {
   /* Get secret needed for the signature */
-  size_t secretLen   = 0;
-  const char *secret = getSecretMap(_secretsMap, _keyId, secretLen);
+  size_t      secretLen = 0;
+  const char *secret    = getSecretMap(_secretsMap, _keyId, secretLen);
   if (nullptr == secret || 0 == secretLen) {
     ERROR_OUT("failed to find the secret for key id: '" << _keyId << "'");
     return _state = INVALID_SECRET;
   }
 
   /* Calculate signature. */
-  char computedMd[MAX_MSGDIGEST_BUFFER_SIZE];
+  char   computedMd[MAX_MSGDIGEST_BUFFER_SIZE];
   size_t computedMdLen = 0;
   computedMdLen = calcMessageDigest(_hashFunction, secret, _payload.data(), _payload.size(), computedMd, MAX_MSGDIGEST_BUFFER_SIZE);
   if (0 == computedMdLen) {
@@ -143,7 +143,7 @@ AccessToken::validateTiming(time_t time)
 
   /* Validate and check not before timestamp */
   if (!_notBefore.empty()) {
-    if (0 == (t = string2int(_notBefore))) {
+    if (0 == (t = string2time(_notBefore))) {
       return _state = INVALID_FIELD_VALUE;
     } else {
       if (time <= t) {
@@ -154,8 +154,9 @@ AccessToken::validateTiming(time_t time)
 
   /* Validate and check expiration timestamp */
   if (!_expiration.empty()) {
-    if (0 == (t = string2int(_expiration))) {
-      return _state = INVALID_FIELD_VALUE;
+    if (0 == (t = string2time(_expiration))) {
+      // Case of setting Session Cookie by absense of Expires attribute
+      return _state = VALID;
     } else {
       if (time > t) {
         return _state = TOO_LATE;
@@ -164,7 +165,7 @@ AccessToken::validateTiming(time_t time)
   }
 
   /* "issued at" time-stamp is currently only for info, so check if the time-stamp is valid only */
-  if (!_issuedAt.empty() && 0 == string2int(_issuedAt)) {
+  if (!_issuedAt.empty() && 0 == string2time(_issuedAt)) {
     return _state = INVALID_FIELD_VALUE;
   }
 
@@ -192,15 +193,15 @@ KvpAccessToken::parse(const StringView token)
   size_t pos         = 0;
   do {
     /* Look for the next KVP */
-    pos              = _token.find(_tokenConfig.pairDelimiter, prev);
-    StringView kvp   = _token.substr(prev, pos - prev);
-    size_t equalsign = kvp.find(_tokenConfig.kvDelimiter);
+    pos                  = _token.find(_tokenConfig.pairDelimiter, prev);
+    StringView kvp       = _token.substr(prev, pos - prev);
+    size_t     equalsign = kvp.find(_tokenConfig.kvDelimiter);
     if (kvp.npos == equalsign) {
       ERROR_OUT("invalid key-value-pair, missing key-value delimiter");
       return _state = INVALID_SYNTAX;
     }
     StringView key   = kvp.substr(0, equalsign);
-    StringView value = equalsign != kvp.npos ? kvp.substr(equalsign + 1) : "";
+    StringView value = kvp.substr(equalsign + 1);
 
     DEBUG_OUT("kvp:'" << kvp << "', key:'" << key << "', value:'" << value << "'");
 
@@ -236,7 +237,7 @@ KvpAccessToken::parse(const StringView token)
 
   /* Now identify the pay-load which was signed */
   payloadSize += _tokenConfig.messageDigestName.size() + _tokenConfig.kvDelimiter.size();
-  _payload = _token.substr(0, payloadSize);
+  _payload     = _token.substr(0, payloadSize);
 
   DEBUG_OUT("payload:'" << _payload << "'");
 
@@ -249,7 +250,6 @@ KvpAccessToken::parse(const StringView token)
 KvpAccessTokenBuilder::KvpAccessTokenBuilder(const KvpAccessTokenConfig &config, const StringMap &secretsMap)
   : _config(config), _secretsMap(secretsMap)
 {
-  cryptoMagicInit();
 }
 
 void
@@ -301,9 +301,9 @@ KvpAccessTokenBuilder::sign(const StringView kid, const StringView hf)
   appendKeyValuePair(_config.hashFunctionName, hf);
   appendKeyValuePair(_config.messageDigestName, ""); /* add an empty message digest and append the actual digest later */
 
-  char md[MAX_MSGDIGEST_BUFFER_SIZE];
-  size_t secretLen   = 0;
-  const char *secret = getSecretMap(_secretsMap, kid, secretLen);
+  char        md[MAX_MSGDIGEST_BUFFER_SIZE];
+  size_t      secretLen = 0;
+  const char *secret    = getSecretMap(_secretsMap, kid, secretLen);
   if (nullptr == secret || 0 == secretLen) {
     ERROR_OUT("failed to find the secret for kid='" << kid << "'");
     return;
@@ -314,8 +314,8 @@ KvpAccessTokenBuilder::sign(const StringView kid, const StringView hf)
     DEBUG_OUT("failed to calculate message digest");
   } else {
     /* Hex-encode signature. */
-    char mdHexLenMax = 2 * mdLen + 1;
-    char mdHex[mdHexLenMax];
+    char   mdHexLenMax = 2 * mdLen + 1;
+    char   mdHex[mdHexLenMax];
     size_t mdHexLen = hexEncode(md, mdLen, mdHex, mdHexLenMax);
     if (0 == mdHexLen) {
       DEBUG_OUT("failed to hex-encode new MD");
@@ -360,7 +360,7 @@ static const std::map<String, String> _digestAlgosMap = createStaticDigestAlgoMa
  * @param message input message
  * @param messageLen input message length
  * @param buffer output buffer for storing the message digest
- * @param len output buffer length
+ * @param len output buffer length (must be at least MAX_MSDIGEST_BUFFER_SIZE)
  * @return number of characters actually written to the output buffer.
  */
 size_t
@@ -395,7 +395,7 @@ getSecretMap(const StringMap &map, const StringView &key, size_t &secretSize)
     DEBUG_OUT("secrets map is empty");
     return nullptr;
   }
-  const char *result = nullptr;
+  const char               *result = nullptr;
   StringMap::const_iterator it;
   it = map.find(String(key));
   if (map.end() != it) {

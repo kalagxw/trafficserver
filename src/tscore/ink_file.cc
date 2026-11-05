@@ -2,7 +2,7 @@
 
   File manipulation routines for libts
 
-  @section license License
+  @par License
 
   Licensed to the Apache Software Foundation (ASF) under one
   or more contributor license agreements.  See the NOTICE file
@@ -28,41 +28,40 @@
 #include "tscore/ink_string.h"
 #include "tscore/ink_memory.h"
 
-#if HAVE_SYS_STAT_H
 #include <sys/stat.h>
-#endif
 
-#if HAVE_SYS_PARAM_H
-#include <sys/param.h>
-#endif
-
-#if HAVE_SYS_DISK_H
-#include <sys/disk.h>
-#endif
-
-#if HAVE_SYS_DISKLABEL_H
-#include <sys/disklabel.h>
-#endif
-
-#if HAVE_SYS_IOCTL_H
 #include <sys/ioctl.h>
+
+#if __has_include(<sys/mount.h>)
+#include <sys/mount.h> /* for BLKGETSIZE */
 #endif
 
-#if HAVE_LINUX_HDREG_H
-#include <linux/hdreg.h> /* for struct hd_geometry */
-#endif
-
-#if HAVE_LINUX_FS_H
-#include <linux/fs.h> /* for BLKGETSIZE.  sys/mount.h is another candidate */
+#if __has_include(<sys/disk.h>)
+#include <sys/disk.h> /* for DIOCGMEDIASIZE on FreeBSD */
 #endif
 
 using ioctl_arg_t = union {
   uint64_t u64;
   uint32_t u32;
-  off_t off;
+  off_t    off;
 };
 
+/** Open and possibly create a file.
+ *
+ * This is a wrapper for the POSIX open() call that will retry the call if a
+ * transient error occurs.
+ */
 int
+safe_open(char const *path, int oflag, mode_t mode)
+{
+  int r{-1};
+  do {
+    r = open(path, oflag, mode);
+  } while ((r < 0) && (errno == EINTR));
+  return r;
+}
+
+std::int64_t
 ink_fputln(FILE *stream, const char *s)
 {
   if (stream && s) {
@@ -99,7 +98,7 @@ int
 ink_file_fd_readline(int fd, int bufsz, char *buf)
 {
   char c;
-  int i = 0;
+  int  i = 0;
 
   if (bufsz < 2) {
     return (-EINVAL); /* bufsz must by >= 2 */
@@ -144,7 +143,7 @@ ink_filepath_merge(char *path, int pathsz, const char *rootpath, const char *add
   size_t keptlen; // is the length of the retained rootpath
   size_t pathlen; // is the length of the result path
   size_t seglen;  // is the end of the current segment
-  char curdir[PATH_NAME_MAX];
+  char   curdir[PATH_NAME_MAX];
 
   /* Treat null as an empty path.
    */
@@ -365,7 +364,7 @@ ink_filepath_make(char *path, int pathsz, const char *rootpath, const char *addp
     return static_cast<int>(maxlen);
   }
   ink_strlcpy(path, rootpath, pathsz);
-  path += rootlen;
+  path   += rootlen;
   pathsz -= rootlen;
   if (*(path - 1) != '/') {
     *(path++) = '/';
@@ -418,7 +417,7 @@ ink_file_is_mmappable(mode_t st_mode)
     return true;
   }
 
-#if defined(linux)
+#if defined(__linux__)
   // Disks cannot be mmapped.
   if (S_ISBLK(st_mode)) {
     return false;
@@ -428,11 +427,6 @@ ink_file_is_mmappable(mode_t st_mode)
   if (S_ISCHR(st_mode)) {
     return true;
   }
-#endif
-
-#if defined(solaris)
-  // All file types on Solaris can be mmap(2)'ed.
-  return true;
 #endif
 
   return false;
@@ -463,15 +457,7 @@ ink_file_get_geometry(int fd ATS_UNUSED, ink_device_geometry &geometry)
   errno = ENOTSUP;
 #endif
 
-#elif defined(solaris)
-  struct stat sbuf;
-
-  if (fstat(fd, &sbuf) == 0) {
-    geometry.totalsz = sbuf.st_size;
-    geometry.blocksz = sbuf.st_blksize;
-  }
-
-#elif defined(linux)
+#elif defined(__linux__)
   ioctl_arg_t arg;
 
   // The following set of ioctls work for both block and character devices. You can use the
@@ -530,8 +516,8 @@ int
 ink_fileperm_parse(const char *perms)
 {
   if (perms && strlen(perms) == 9) {
-    int re        = 0;
-    const char *c = perms;
+    int         re = 0;
+    const char *c  = perms;
     if (*c == 'r') {
       re |= S_IRUSR;
     }
